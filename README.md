@@ -1,3 +1,5 @@
+<img src="docs/logo.png" alt="Bugne" width="233">
+
 # Bugne
 
 Bugne is an open-source children's audio player firmware for the ESP32-S3.
