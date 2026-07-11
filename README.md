@@ -94,6 +94,33 @@ idf.py build
 idf.py -p <PORT> flash monitor
 ```
 
+## First flash (new board)
+
+A brand-new board needs one full flash over USB: bootloader, partition
+table, OTA data and app. The `bugne.bin` release asset alone is an OTA app
+image; it updates a running Bugne but cannot bootstrap a blank chip.
+
+Without ESP-IDF, using the release bundle:
+
+1. Download `bugne-flash.zip` from the
+   [latest release](https://github.com/Tupile/bugne-releases/releases/latest)
+   and unzip it.
+2. Install esptool: `pip install esptool`.
+3. Plug the board in over USB and run `./flash.sh [PORT] [--erase]`.
+   `--erase` wipes the whole flash first (recommended for a clean first
+   install). If no serial port shows up, hold the BOOT button while
+   plugging in the cable to enter download mode, then retry.
+
+On Windows, run the `esptool write_flash` command spelled out in `flash.sh`
+(same four binaries, offsets 0x0 / 0x8000 / 0xf000 / 0x20000).
+
+With ESP-IDF installed, `idf.py -p <PORT> flash` from a source build (see
+Build above) does the same in one step.
+
+After flashing, the device boots into Bugne and, with no Wi-Fi stored,
+raises its `Bugne-Setup-XXXX` hotspot: the
+[user manual](docs/manual/en.md) walks through the setup.
+
 ## Releasing an update on GitHub
 
 Devices can install the latest GitHub release from their web page
@@ -103,7 +130,10 @@ Devices can install the latest GitHub release from their web page
 2. Build, then create a GitHub release on the public releases repo
    (Tupile/bugne-releases, see GH_OTA_URL in web_config.c), tag it the same
    version (e.g. `v1.0.1`) and attach `build/bugne.bin` as an asset named
-   exactly `bugne.bin`.
+   exactly `bugne.bin`. Also attach the first-flash bundle as a second
+   asset named exactly `bugne-flash.zip`: a zip of `bootloader.bin`,
+   `partition-table.bin`, `ota_data_initial.bin`, `bugne.bin` (from
+   `build/`) and `tools/flash.sh` (as `flash.sh`), all at the zip root.
 
 The device compares the release binary's embedded version with its own:
 any difference offers the update (so publishing an older version offers a

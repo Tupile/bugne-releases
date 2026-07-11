@@ -3,7 +3,8 @@
 #
 # Run this on the machine the device is plugged into. It expects the four
 # release binaries next to this script (bootloader.bin, partition-table.bin,
-# ota_data_initial.bin, bugne.bin) - that is how the release bundle is packed.
+# ota_data_initial.bin, bugne.bin) - unzipping the bugne-flash.zip asset of a
+# GitHub release gives exactly that layout.
 #
 # Usage:
 #   ./flash.sh [PORT] [--erase]

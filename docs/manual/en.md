@@ -7,9 +7,10 @@ Bugne is a small touch-screen music box for kids: web radios, podcasts
 and an instrument tuner. Parents manage everything from a web page on their
 phone or computer.
 
-This manual has three parts: setting up the device (for parents), using it
-every day (simple enough for a child), and the parents' corner (the web
-page, alarms, quiet hours, updates).
+This manual has four parts: installing the firmware (only for a freshly
+built device), setting up the device (for parents), using it every day
+(simple enough for a child), and the parents' corner (the web page,
+alarms, quiet hours, updates).
 
 ## 1. Meet your Bugne
 
@@ -23,7 +24,29 @@ page, alarms, quiet hours, updates).
 Turn it on: plug it in or use the power switch. The home screen appears in
 about one second.
 
-## 2. First-time setup (parents)
+## 2. Installing the firmware (first flash)
+
+Skip this section if your Bugne already shows something on screen: it only
+concerns a freshly assembled board (or a full recovery). Normal updates
+are done from the web page (see "Firmware updates" in section 6).
+
+You need a computer with Python installed and a USB data cable.
+
+1. Install esptool (the standard Espressif flashing tool):
+   `pip install esptool`.
+2. Download `bugne-flash.zip` from the latest release at
+   <https://github.com/Tupile/bugne-releases/releases/latest> and unzip
+   it.
+3. Connect the board to the computer over USB.
+4. In the unzipped folder, run `./flash.sh --erase` (Linux/macOS). On
+   Windows, run the `esptool` command written inside `flash.sh`.
+5. If no serial port is found, hold the BOOT button while plugging in the
+   USB cable, then run the script again.
+
+When the script finishes, the device restarts into Bugne and opens its
+`Bugne-Setup-XXXX` hotspot: continue with the next section.
+
+## 3. First-time setup (parents)
 
 You need: a 2.4 GHz Wi-Fi network, a phone, and optionally a microSD card
 (FAT32) with music on it.
@@ -53,7 +76,7 @@ picks the strongest one it can see and switches by itself when needed. If
 it cannot reach any known network for about 30 seconds, the setup hotspot
 comes back so you can fix the configuration.
 
-## 3. Everyday use
+## 4. Everyday use
 
 ### The home screen
 
@@ -162,7 +185,7 @@ rings you can snooze it (10 minutes) or stop it; it stops by itself after
 30 minutes. Alarms also work from the web page, and they ring even during
 quiet hours.
 
-## 4. Parents' corner: the web page
+## 5. Parents' corner: the web page
 
 Open `http://bugne-xxxx.local` (or scan the QR under Settings, then
 "Config page (QR)") from any phone or computer on the same Wi-Fi. If you
@@ -228,7 +251,7 @@ Everything else lives here:
 Note: after a firmware update, reload the web page before changing
 settings.
 
-## 5. Going further
+## 6. Going further
 
 ### Music Assistant and multiroom
 
@@ -258,7 +281,7 @@ in one tap, or upload a firmware file. The device reboots, keep it powered
 during the update. If a new firmware fails to start, the device
 automatically returns to the previous one.
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 - No Wi-Fi at the new place: wait about 30 seconds, the
   `Bugne-Setup-XXXX` hotspot appears. Scan the QR under Settings, then
@@ -275,5 +298,5 @@ automatically returns to the previous one.
 - The device does not respond: unplug it, wait a few seconds, plug it back
   in. Settings survive.
 - Forgotten page password: there is no reset button on the device. Whoever
-  built it can clear it by reflashing over USB (saved Wi-Fi networks and
-  settings are erased too).
+  built it can clear it by reflashing over USB with `--erase`, as in
+  section 2 (saved Wi-Fi networks and settings are erased too).

@@ -7,7 +7,8 @@ web, podcasts (aussi hors ligne), musique sur carte SD, réveil, jeu de
 tables de multiplication et accordeur d'instrument. Les parents gèrent tout
 depuis une page web sur leur téléphone ou ordinateur.
 
-Ce mode d'emploi a trois parties : l'installation (pour les parents),
+Ce mode d'emploi a quatre parties : le flash du firmware (seulement pour
+un appareil fraîchement assemblé), l'installation (pour les parents),
 l'utilisation quotidienne (assez simple pour un enfant), et le coin des
 parents (la page web, les alarmes, les heures calmes, les mises à jour).
 
@@ -25,7 +26,32 @@ parents (la page web, les alarmes, les heures calmes, les mises à jour).
 Pour l'allumer : branchez-la ou utilisez l'interrupteur. L'écran d'accueil
 apparaît en une seconde environ.
 
-## 2. Première installation (parents)
+## 2. Installer le firmware (premier flash)
+
+Passez cette section si votre Bugne affiche déjà quelque chose à l'écran :
+elle ne concerne qu'une carte fraîchement assemblée (ou une récupération
+complète). Les mises à jour normales se font depuis la page web (voir
+« Mises à jour du firmware » en section 6).
+
+Il vous faut : un ordinateur avec Python installé et un câble USB de
+données.
+
+1. Installez esptool (l'outil de flash officiel d'Espressif) :
+   `pip install esptool`.
+2. Téléchargez `bugne-flash.zip` depuis la dernière version publiée sur
+   <https://github.com/Tupile/bugne-releases/releases/latest> et
+   décompressez-le.
+3. Branchez la carte à l'ordinateur en USB.
+4. Dans le dossier décompressé, lancez `./flash.sh --erase`
+   (Linux/macOS). Sous Windows, lancez la commande `esptool` écrite dans
+   `flash.sh`.
+5. Si aucun port série n'est trouvé, maintenez le bouton BOOT en
+   branchant le câble USB, puis relancez le script.
+
+À la fin, l'appareil redémarre sous Bugne et ouvre son point d'accès
+`Bugne-Setup-XXXX` : enchaînez avec la section suivante.
+
+## 3. Première installation (parents)
 
 Il vous faut : un réseau Wi-Fi 2,4 GHz, un téléphone, et si possible une
 carte microSD (FAT32) avec de la musique.
@@ -55,7 +81,7 @@ Vous pouvez enregistrer plusieurs réseaux Wi-Fi (maison, grands-parents,
 besoin. S'il ne joint aucun réseau connu pendant environ 30 secondes, le
 point d'accès d'installation revient pour corriger la configuration.
 
-## 3. Au quotidien
+## 4. Au quotidien
 
 ### L'écran d'accueil
 
@@ -167,7 +193,7 @@ toujours. Pendant qu'il sonne, vous pouvez le répéter (10 minutes) ou
 l'arrêter ; il s'arrête seul après 30 minutes. Les alarmes se règlent
 aussi depuis la page web, et elles sonnent même pendant les heures calmes.
 
-## 4. Le coin des parents : la page web
+## 5. Le coin des parents : la page web
 
 Ouvrez `http://bugne-xxxx.local` (ou scannez le QR dans Réglages, puis
 "Page de config (QR)") depuis un téléphone ou un ordinateur sur le même
@@ -236,7 +262,7 @@ Tout le reste est ici :
 Remarque : après une mise à jour du firmware, rechargez la page web avant
 de modifier des réglages.
 
-## 5. Pour aller plus loin
+## 6. Pour aller plus loin
 
 ### Music Assistant et multiroom
 
@@ -267,7 +293,7 @@ installez-la en un clic, ou envoyez un fichier de firmware. L'appareil
 redémarre, laissez-le branché pendant la mise à jour. Si un nouveau
 firmware ne démarre pas, l'appareil revient automatiquement au précédent.
 
-## 6. Dépannage
+## 7. Dépannage
 
 - Pas de Wi-Fi dans un nouveau lieu : attendez environ 30 secondes, le
   point d'accès `Bugne-Setup-XXXX` apparaît. Scannez le QR dans Réglages,
@@ -288,5 +314,5 @@ firmware ne démarre pas, l'appareil revient automatiquement au précédent.
   rebranchez-le. Les réglages sont conservés.
 - Mot de passe de page oublié : il n'y a pas de bouton de réinitialisation
   sur l'appareil. La personne qui l'a assemblé peut l'effacer en
-  reflashant par USB (les réseaux Wi-Fi et réglages enregistrés sont
-  effacés aussi).
+  reflashant par USB avec `--erase`, comme en section 2 (les réseaux
+  Wi-Fi et réglages enregistrés sont effacés aussi).
