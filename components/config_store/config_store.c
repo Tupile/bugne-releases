@@ -668,6 +668,20 @@ esp_err_t config_store_set_password(const char *plain)
     return err;
 }
 
+esp_err_t config_store_clear_password(void)
+{
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
+    esp_err_t e1 = nvs_erase_key(h, NVS_KEY_PW_SALT);
+    esp_err_t e2 = nvs_erase_key(h, NVS_KEY_PW_HASH);
+    esp_err_t err = nvs_commit(h);
+    nvs_close(h);
+    // Already-absent keys count as cleared.
+    if (e1 != ESP_OK && e1 != ESP_ERR_NVS_NOT_FOUND) return e1;
+    if (e2 != ESP_OK && e2 != ESP_ERR_NVS_NOT_FOUND) return e2;
+    return err;
+}
+
 esp_err_t config_store_check_password(const char *plain)
 {
     nvs_handle_t h;

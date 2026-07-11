@@ -245,6 +245,8 @@ esp_err_t config_store_write_json(const char *json);
 // hash of the password. The plaintext is never stored.
 bool config_store_has_password(void);
 esp_err_t config_store_set_password(const char *plain);
+// Remove the password: the config page opens without login again.
+esp_err_t config_store_clear_password(void);
 // ESP_OK if it matches, ESP_ERR_NOT_FOUND if no password is set, ESP_FAIL on
 // mismatch.
 esp_err_t config_store_check_password(const char *plain);

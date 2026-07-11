@@ -168,7 +168,7 @@ static esp_err_t root_get(httpd_req_t *req)
 // Set the session cookie on the response. cookie_buf must outlive the send.
 static void set_session_cookie(httpd_req_t *req, char *cookie_buf, size_t size)
 {
-    snprintf(cookie_buf, size, COOKIE_NAME "=%s; Path=/; HttpOnly", s_session);
+    snprintf(cookie_buf, size, COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict", s_session);
     httpd_resp_set_hdr(req, "Set-Cookie", cookie_buf);
 }
 
@@ -209,8 +209,19 @@ static esp_err_t password_post(httpd_req_t *req)
     }
     cJSON *root = cJSON_Parse(body);
     const cJSON *pass = root ? cJSON_GetObjectItemCaseSensitive(root, "pass") : NULL;
-    bool valid = cJSON_IsString(pass) && pass->valuestring && strlen(pass->valuestring) >= 4;
-    esp_err_t err = valid ? config_store_set_password(pass->valuestring) : ESP_ERR_INVALID_ARG;
+    const char *plain = (cJSON_IsString(pass) && pass->valuestring) ? pass->valuestring : NULL;
+    if (plain && plain[0] == '\0') {
+        // Empty password removes the password: the page opens without login.
+        esp_err_t cerr = config_store_clear_password();
+        cJSON_Delete(root);
+        if (cerr != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "clear failed");
+            return ESP_FAIL;
+        }
+        return httpd_resp_sendstr(req, "password removed");
+    }
+    bool valid = plain && strlen(plain) >= 4;
+    esp_err_t err = valid ? config_store_set_password(plain) : ESP_ERR_INVALID_ARG;
     cJSON_Delete(root);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "password too short or save failed");
