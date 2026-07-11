@@ -110,7 +110,7 @@ supports. Their `*_corps+grille.step` files combine body and grille so a
 multi-color printer can put the grille plate in a second color; a single
 color works too. Assembly needs a few small self-tapping screws.
 
-<img src="case/preview_face.png" alt="Plain case" height="220"> <img src="case/preview_seventies_face.png" alt="Seventies cabinet" height="220">
+<img src="case/preview_seventies_face.png" alt="Seventies cabinet" height="220">
 
 ## Build
 
