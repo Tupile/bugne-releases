@@ -81,8 +81,36 @@ implemented feature set:
 
 ## Hardware
 
-Board: LCDWIKI ES3C28P (ESP32-S3, 8MB PSRAM, 16MB flash). The full pin map and
-board notes live in [docs/hardware.md](docs/hardware.md).
+Board: **LCDWIKI ES3C28P**, an ESP32-S3 board (16MB flash, 8MB PSRAM) with a
+2.8 inch ILI9341V display, FT6336G capacitive touch, ES8311 audio codec,
+microphone, microSD slot and USB port. Buy it under that exact reference; the
+speaker ships with the board. The full pin map and board notes live in
+[docs/hardware.md](docs/hardware.md).
+
+The board also carries a TP4054 charger and a JST 1.25mm port for a 1S 3.7V
+LiPo battery. Battery operation is untested by this project so far: possible
+in principle, not recommended yet. Power the device over USB.
+
+## 3D-printed case
+
+[case/](case) holds ready-to-print designs plus the CadQuery scripts that
+generate them (edit a script and rerun it to customize):
+
+- Plain two-piece case (`es3c28p_boitier_facade.stl` +
+  `es3c28p_boitier_fond.stl`): portrait, sound exits through a grid in the
+  back.
+- Vintage radio cabinet (`es3c28p_radio_*.stl`): landscape, vertical front,
+  sloped back, screwed rear cover.
+- Seventies cabinet (`es3c28p_seventies_*.stl`, inspired by Dieter Rams'
+  1970s designs): landscape, perforated speaker plate, separate stand.
+  This is the recommended design.
+
+The radio and seventies cabinets print face down (front on the bed) with no
+supports. Their `*_corps+grille.step` files combine body and grille so a
+multi-color printer can put the grille plate in a second color; a single
+color works too. Assembly needs a few small self-tapping screws.
+
+<img src="case/preview_face.png" alt="Plain case" height="220"> <img src="case/preview_seventies_face.png" alt="Seventies cabinet" height="220">
 
 ## Build
 

@@ -1,7 +1,9 @@
 # Hardware: LCDWIKI ES3C28P
 
-ESP32-S3, 8MB PSRAM, 16MB flash. The pin map below is fixed and confirmed from
-vendor docs. Do not change it.
+ESP32-S3, 8MB PSRAM, 16MB flash. The pin map below is fixed, confirmed from
+vendor docs and on real hardware. Do not change it. Note: the vendor doc swaps
+the two I2S data pins; the values below (DOUT = IO8, DIN = IO6) are the
+hardware-confirmed ones.
 
 ## GPIO map
 
@@ -23,9 +25,9 @@ vendor docs. Do not change it.
 | Audio amp FM8002E | Enable | IO1 (active low: low plays, high mutes) |
 | I2S | MCLK | IO4 |
 | | BCLK | IO5 |
-| | DOUT (to codec) | IO6 |
+| | DOUT (to codec) | IO8 |
 | | WS / LRCK | IO7 |
-| | DIN (from mic) | IO8 |
+| | DIN (from mic) | IO6 |
 | microSD (SDIO 4-bit) | CLK | IO38 |
 | | CMD | IO40 |
 | | D0 | IO39 |

@@ -3,7 +3,7 @@ Boitier ENFANT "robot rigolo" pour la carte LCDWIKI ES3C28P.
 
 La grille HP est le SOURIRE du robot (plaque stade sombre percee), les yeux
 sont des inlays 3e couleur, l'ecran est le ventre. Poignee-arche entre deux
-antennes sur le crane. Coeur mecanique repris de es3c28p-braun-stl.py.
+antennes sur le crane. Coeur mecanique repris de es3c28p-seventies-stl.py.
 Carte en paysage, HP au-dessus (cable court), USB a droite. Pas de pieds
 (piece arrachable = avalable), fond plat, gros conges partout.
 Imprime FACE CONTRE LE PLATEAU, aucun support. PETG conseille (poignee).
@@ -19,7 +19,7 @@ HOLE_DX, HOLE_DZ = 39.0, 21.0
 WIN_W, WIN_H = 60.5, 46.5
 SPK_W, SPK_H, SPK_T = 41.0, 28.5, 9.15
 
-# ---- Coque (largeur asymetrique comme le braun, tete plus haute) ----
+# ---- Coque (largeur asymetrique comme le seventies, tete plus haute) ----
 FRONT_T = 2.5
 WALL = 2.0
 LID_T = 4.0                    # 4 mm : fraisage profond, vis sous la surface
@@ -32,7 +32,7 @@ DEPTH = 32.0
 R_CORNER = 6.0                 # gros conges enfant
 FRONT_R = 2.0                  # roundover du perimetre de facade
 
-# ---- Fenetre ecran (valide braun) ----
+# ---- Fenetre ecran (valide seventies) ----
 WIN_OPEN_W = WIN_W + 3.0
 WIN_CX = CAB_CX
 WIN_CH = 3.0
@@ -73,7 +73,7 @@ RIM_R = 2.5                    # adoucissement des rives avant/arriere
 EAR_W, EAR_H, EAR_R = 10.0, 16.0, 4.0
 EAR_DX = 40.0                  # antennes de part et d'autre de l'arche
 
-# ---- USB sur le flanc droit (valide braun) ----
+# ---- USB sur le flanc droit (valide seventies) ----
 USB_Y = 10.0
 USB_OPEN_W, USB_OPEN_H, USB_OPEN_R = 10.5, 6.0, 1.0
 
@@ -186,7 +186,7 @@ cavity = (cq.Workplane("XY")
           .translate((CAB_CX, FRONT_T, WALL)))
 body = body.cut(cavity)
 
-# Fenetre ecran chanfreinee (valide braun)
+# Fenetre ecran chanfreinee (valide seventies)
 body = body.cut(cq.Workplane("XY").box(WIN_OPEN_W, FRONT_T + 4, WIN_H, centered=(True, True, True))
                 .translate((WIN_CX, FRONT_T / 2.0, Z_BOARD)))
 cham = (cq.Workplane("XY").rect(WIN_OPEN_W + 2 * WIN_CH, WIN_H + 2 * WIN_CH)
@@ -194,7 +194,7 @@ cham = (cq.Workplane("XY").rect(WIN_OPEN_W + 2 * WIN_CH, WIN_H + 2 * WIN_CH)
 cham = cham.rotate((0, 0, 0), (1, 0, 0), -90).translate((WIN_CX, 0, Z_BOARD))
 body = body.cut(cham)
 
-# Tablette + nervures HP, encoche fils (valide braun)
+# Tablette + nervures HP, encoche fils (valide seventies)
 body = body.union(cq.Workplane("XY").box(CAB_W - 2 * WALL + 1, SHELF_DEPTH, SHELF_T, centered=(True, False, False))
                   .translate((CAB_CX, FRONT_T - 1, SHELF_Z)))
 z_bot = SHELF_Z + SHELF_T

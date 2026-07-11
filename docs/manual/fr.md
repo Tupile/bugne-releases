@@ -7,8 +7,8 @@ web, podcasts (aussi hors ligne), musique sur carte SD, réveil, jeu de
 tables de multiplication et accordeur d'instrument. Les parents gèrent tout
 depuis une page web sur leur téléphone ou ordinateur.
 
-Ce mode d'emploi a quatre parties : le flash du firmware (seulement pour
-un appareil fraîchement assemblé), l'installation (pour les parents),
+Ce mode d'emploi a cinq parties : la fabrication (la carte et son boîtier
+imprimé en 3D), le flash du firmware, l'installation (pour les parents),
 l'utilisation quotidienne (assez simple pour un enfant), et le coin des
 parents (la page web, les alarmes, les heures calmes, les mises à jour).
 
@@ -26,12 +26,34 @@ parents (la page web, les alarmes, les heures calmes, les mises à jour).
 Pour l'allumer : branchez-la ou utilisez l'interrupteur. L'écran d'accueil
 apparaît en une seconde environ.
 
-## 2. Installer le firmware (premier flash)
+## 2. Le matériel : la carte et le boîtier imprimé en 3D
+
+La Bugne se fabrique soi-même : une carte du commerce et un boîtier
+imprimé en 3D.
+
+- La carte est une **LCDWIKI ES3C28P** (référence exacte à respecter) :
+  un ESP32-S3 avec 16 Mo de flash et 8 Mo de PSRAM, un écran tactile
+  capacitif de 2,8 pouces, un codec audio, un micro, un lecteur microSD
+  et un port USB. Le petit haut-parleur est livré avec la carte.
+- La carte a aussi un port batterie avec chargeur (LiPo 3,7 V à une
+  cellule, prise JST 1.25 mm). Le projet ne l'a pas encore testé, donc
+  ce n'est pas conseillé pour l'instant : alimentez l'appareil par USB.
+- Le boîtier s'imprime en 3D : le dossier `case/` du projet propose
+  trois modèles. Un boîtier simple en deux pièces (portrait, son par une
+  grille au dos), un poste « vieille radio » et un coffret « seventies »
+  (tous deux en paysage, imprimés face contre le plateau sans supports ;
+  leur grille de haut-parleur peut s'imprimer dans une seconde couleur).
+  Le coffret seventies est le modèle conseillé. Quelques petites vis
+  autotaraudeuses fixent la carte et ferment le dos.
+
+<img src="../../case/preview_face.png" alt="Boîtier simple" height="200"> <img src="../../case/preview_seventies_face.png" alt="Coffret seventies" height="200">
+
+## 3. Installer le firmware (premier flash)
 
 Passez cette section si votre Bugne affiche déjà quelque chose à l'écran :
 elle ne concerne qu'une carte fraîchement assemblée (ou une récupération
 complète). Les mises à jour normales se font depuis la page web (voir
-« Mises à jour du firmware » en section 6).
+« Mises à jour du firmware » en section 7).
 
 Il vous faut : un ordinateur avec Python installé et un câble USB de
 données.
@@ -51,7 +73,7 @@ données.
 À la fin, l'appareil redémarre sous Bugne et ouvre son point d'accès
 `Bugne-Setup-XXXX` : enchaînez avec la section suivante.
 
-## 3. Première installation (parents)
+## 4. Première installation (parents)
 
 Il vous faut : un réseau Wi-Fi 2,4 GHz, un téléphone, et si possible une
 carte microSD (FAT32) avec de la musique.
@@ -81,7 +103,7 @@ Vous pouvez enregistrer plusieurs réseaux Wi-Fi (maison, grands-parents,
 besoin. S'il ne joint aucun réseau connu pendant environ 30 secondes, le
 point d'accès d'installation revient pour corriger la configuration.
 
-## 4. Au quotidien
+## 5. Au quotidien
 
 ### L'écran d'accueil
 
@@ -193,7 +215,7 @@ toujours. Pendant qu'il sonne, vous pouvez le répéter (10 minutes) ou
 l'arrêter ; il s'arrête seul après 30 minutes. Les alarmes se règlent
 aussi depuis la page web, et elles sonnent même pendant les heures calmes.
 
-## 5. Le coin des parents : la page web
+## 6. Le coin des parents : la page web
 
 Ouvrez `http://bugne-xxxx.local` (ou scannez le QR dans Réglages, puis
 "Page de config (QR)") depuis un téléphone ou un ordinateur sur le même
@@ -262,7 +284,7 @@ Tout le reste est ici :
 Remarque : après une mise à jour du firmware, rechargez la page web avant
 de modifier des réglages.
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 ### Music Assistant et multiroom
 
@@ -293,7 +315,7 @@ installez-la en un clic, ou envoyez un fichier de firmware. L'appareil
 redémarre, laissez-le branché pendant la mise à jour. Si un nouveau
 firmware ne démarre pas, l'appareil revient automatiquement au précédent.
 
-## 7. Dépannage
+## 8. Dépannage
 
 - Pas de Wi-Fi dans un nouveau lieu : attendez environ 30 secondes, le
   point d'accès `Bugne-Setup-XXXX` apparaît. Scannez le QR dans Réglages,
@@ -314,5 +336,5 @@ firmware ne démarre pas, l'appareil revient automatiquement au précédent.
   rebranchez-le. Les réglages sont conservés.
 - Mot de passe de page oublié : il n'y a pas de bouton de réinitialisation
   sur l'appareil. La personne qui l'a assemblé peut l'effacer en
-  reflashant par USB avec `--erase`, comme en section 2 (les réseaux
+  reflashant par USB avec `--erase`, comme en section 3 (les réseaux
   Wi-Fi et réglages enregistrés sont effacés aussi).

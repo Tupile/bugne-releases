@@ -1,5 +1,5 @@
 """
-Cabinet "radio Braun 70s" (style Dieter Rams) pour la carte LCDWIKI ES3C28P.
+Cabinet "seventies", inspire des designs Dieter Rams des annees 70, pour la carte LCDWIKI ES3C28P.
 
 Forme : boite droite epuree, facade plate, capot arriere plat visse.
 Facade basse = fenetre ecran chanfreinee ; bande haute = plaque sombre a
@@ -8,7 +8,7 @@ Carte en paysage, HP au-dessus de la carte (cable court), USB a droite.
 Imprime FACE CONTRE LE PLATEAU (facade en bas), aucun support.
 
 Repere : X = largeur, Y = profondeur (facade Y=0, arriere +Y), Z = hauteur.
-Lancer : python3 es3c28p-braun-stl.py
+Lancer : python3 es3c28p-seventies-stl.py
 """
 import cadquery as cq
 
@@ -296,10 +296,10 @@ assert MIC_X + MIC_R < WIN_CX - WIN_OPEN_W / 2 - WIN_CH, "trou micro vs chanfrei
 # Export
 # ============================================================================
 parts = {
-    "es3c28p_braun_corps.stl": body,
-    "es3c28p_braun_capot.stl": capot,
-    "es3c28p_braun_grille.stl": grille,
-    "es3c28p_braun_pied.stl": pied,
+    "es3c28p_seventies_corps.stl": body,
+    "es3c28p_seventies_capot.stl": capot,
+    "es3c28p_seventies_grille.stl": grille,
+    "es3c28p_seventies_pied.stl": pied,
 }
 for name, part in parts.items():
     cq.exporters.export(part, "./" + name)
@@ -312,8 +312,8 @@ for name, part in parts.items():
 asm = cq.Assembly()
 asm.add(body, name="corps", color=cq.Color(0.93, 0.91, 0.86))
 asm.add(grille, name="grille", color=cq.Color(0.17, 0.17, 0.17))
-asm.export("es3c28p_braun_corps+grille.step")
-print("es3c28p_braun_corps+grille.step  (corps+grille positionnes+colores)")
+asm.export("es3c28p_seventies_corps+grille.step")
+print("es3c28p_seventies_corps+grille.step  (corps+grille positionnes+colores)")
 print("boite %.1f x %.1f x %.1f, trous grille : %d borgnes + %d traversants"
       % (CAB_W, DEPTH, CAB_H, len(PTS_BLIND), len(PTS_THRU)))
 print("rappel slicing : compensation elephant foot ON (rives des trous couche 1)")
