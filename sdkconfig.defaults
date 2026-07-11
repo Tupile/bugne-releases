@@ -1,0 +1,100 @@
+# Board defaults for the LCDWIKI ES3C28P (ESP32-S3, 8MB PSRAM, 16MB flash).
+# This file is tracked. The generated sdkconfig is not (see .gitignore).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# Build for speed: -O2. FLAC/MP3 decode, LVGL (now in PSRAM) and networking all
+# benefit; flash is plentiful so the larger binary is fine. Assertions stay on.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Dynamic frequency scaling: max CPU 240 MHz, scaled down to 160 MHz at idle by
+# the power-management framework (esp_pm_configure in bugne_main.c). No way to
+# detect mains vs battery on this board, so DFS saves power by load instead.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_PM_ENABLE=y
+
+# SD card long filenames (heap LFN) with UTF-8 path encoding, so uploaded music
+# keeps its real (and accented) names instead of 8.3 aliases.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# 16MB flash with a custom partition table (see partitions.csv).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA rollback: a freshly updated image boots as "pending verify" and must mark
+# itself healthy (app_main starts a task that does so after a stable uptime). If
+# it crashes or reboots before then, the bootloader reverts to the previous slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# 8MB octal PSRAM (N16R8 class module).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# LVGL: enable the QR code widget (bundled qrcodegen) for the setup screen.
+CONFIG_LV_USE_QRCODE=y
+
+# LVGL: enable snapshot (GET /api/screenshot renders the live screen off-screen).
+CONFIG_LV_USE_SNAPSHOT=y
+
+# LVGL heap lives in PSRAM (custom allocator in components/ui/lv_mem_psram.c)
+# instead of a 64 KB static array in scarce internal RAM.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
+
+# LVGL: built-in Montserrat fonts used as fallback for our custom bugne fonts
+# (LV_SYMBOL_* glyphs) and for headings that need a larger stock size.
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+
+# More lwip sockets: config httpd + captive DNS + Sendspin WS + mDNS + the
+# stream's HTTP client together exceed the default of 10.
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# WebSocket post-handshake callback: IDF does not call the URI handler on the WS
+# handshake, so the Sendspin server uses this callback to fire on_connected (send
+# client/hello). Without it Music Assistant drops the player as an unknown client.
+CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
+
+# Allocate mbedTLS (TLS) buffers from PSRAM. Internal RAM is too tight for a TLS
+# handshake once Wi-Fi + LVGL + two httpd servers + Sendspin are running, so
+# HTTPS podcast RSS fetches failed with MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00).
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Allocate Wi-Fi and LWIP buffers from PSRAM too: frees tens of KB of internal
+# RAM so HTTPS streaming (TLS + the stream reader task) fits. Requires the
+# Sendspin httpd stack to also be in PSRAM (httpd_psram_stack), otherwise its
+# 8 KB task stack can no longer be created in internal RAM (ESP_ERR_HTTPD_TASK).
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Task stacks in PSRAM (xTaskCreateWithCaps): used by the Sendspin worker and
+# the stream reader task. Only tasks that never call flash APIs (NVS, LittleFS,
+# OTA) may do this: flash writes disable the cache, and a PSRAM stack is
+# unreachable without it. Pinned here because the generated sdkconfig had it
+# while sdkconfig.defaults did not, so a clean build would silently lose it.
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# Wi-Fi buffer tuning to free internal DMA-capable RAM (the scarce resource
+# during HTTPS streaming). The static RX buffers are the 802.11 hardware DMA
+# buffers (1.6 KB each, always internal): 16 -> 10 frees ~10 KB. RX_BA_WIN
+# shrinks the AMPDU reorder window to match (must stay <= the RX buffer count).
+# Raise both back (16/16) if streaming throughput ever suffers. Note: TX
+# buffers are NOT tuned here; with SPIRAM_TRY_ALLOCATE_WIFI_LWIP they already
+# live in PSRAM (Kconfig then forbids dynamic TX and uses cache TX bridging).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+
+# Snappier UI: LVGL refresh 33 ms -> 20 ms (50 fps). LVGL runs on core 0,
+# decode on core 1; validated on the bench with playback while scrolling.
+CONFIG_LV_DEF_REFR_PERIOD=20
+
+# TCP receive window 4 -> 6 x MSS (5760 -> 8640): fewer round-trip stalls on
+# HTTPS streams and podcast downloads. The pbufs live in PSRAM
+# (SPIRAM_TRY_ALLOCATE_WIFI_LWIP), so internal RAM is unaffected.
+CONFIG_LWIP_TCP_WND_DEFAULT=8640
+
+# QIO flash (2x read bandwidth vs DIO, same 80 MHz clock). Requires a USB
+# reflash of the BOOTLOADER to take effect (an OTA alone cannot change the
+# flash mode); validated on the bench with USB recovery at hand.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y

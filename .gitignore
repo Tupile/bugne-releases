@@ -1,0 +1,34 @@
+# ESP-IDF build output
+build/
+
+# Managed components fetched from the registry (resolved from idf_component.yml)
+managed_components/
+dependencies.lock
+
+# Generated sdkconfig (sdkconfig.defaults is tracked instead)
+sdkconfig
+sdkconfig.old
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor and OS
+.vscode/
+.DS_Store
+
+# Local AI agent settings
+.ai/
+
+# Shared agent skills (personal fleet info, same policy as .ai/)
+.agents/
+
+# Live serial log captured while flashing, and local build logs
+device.log
+device_build.log
+
+# Local flash bundles (built artifacts, not source)
+bugne-flash-*.tar.gz
+
+# Original kickoff prompt (project meta, not part of the firmware)
+bugne_kickoff_prompt-1.md

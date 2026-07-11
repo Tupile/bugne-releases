@@ -1,0 +1,14 @@
+# Partition table for 16MB flash, dual-OTA so firmware can be updated over Wi-Fi.
+# nvs keeps Wi-Fi credentials and the hashed config-page password; its offset and
+# size are unchanged from the old layout, so those survive the migration.
+# littlefs holds config.json. It MOVES in this layout, so it is reformatted on the
+# first boot after migrating (config resets to defaults): back up the config from
+# the web page first, then restore it. SD card holds bulk content, not a partition.
+# Name,     Type, SubType,  Offset,    Size,  Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+otadata,    data, ota,      0xF000,    0x2000,
+phy_init,   data, phy,      0x11000,   0x1000,
+ota_0,      app,  ota_0,    0x20000,   0x400000,
+ota_1,      app,  ota_1,    0x420000,  0x400000,
+littlefs,   data, littlefs, 0x820000,  0x100000,
+coredump,   data, coredump, 0x920000,  0x10000,

@@ -1,0 +1,46 @@
+# External dependencies for Bugne, resolved by the IDF component manager.
+# Versions confirmed against the ESP Component Registry on 2026-06-21.
+# Single-file libraries (dr_mp3, dr_flac, yxml, qrcodegen) are vendored into
+# their own component directories, so they are not listed here.
+dependencies:
+  # ESP-IDF floor. Raised to 5.5 because sendspin-cpp 0.6.1 requires it.
+  idf:
+    version: ">=5.5"
+
+  # ES8311 codec support. Mature.
+  espressif/esp_codec_dev:
+    version: "^1.5.10"
+
+  # AAC-LC decoder (for .m4a podcasts and AAC web radio). The MP4 container is
+  # demuxed by the vendored minimp4 (Radio France .m4a has moov at the end, which
+  # this component's own M4A parser does not handle), so only the raw AAC frame
+  # decoder is used here.
+  espressif/esp_audio_codec:
+    version: "^2.5.0"
+
+  # UI toolkit. Pinned to the 9.x line: the v8 and v9 APIs differ.
+  lvgl/lvgl:
+    version: "^9.5.0"
+
+  # LVGL-to-esp_lcd glue, plus the ILI9341 panel and FT5x06/FT6x36 touch drivers.
+  # (FT6336 is FT6x36, handled by the ft5x06 driver.)
+  espressif/esp_lvgl_port:
+    version: "^2.8.0"
+  espressif/esp_lcd_ili9341:
+    version: "^2.0.2"
+  espressif/esp_lcd_touch_ft5x06:
+    version: "^1.1.0"
+
+  # LittleFS for the JSON config in internal flash. Mature.
+  joltwallet/littlefs:
+    version: "^1.22.1"
+
+  # mDNS for bugne-XXXX.local and Sendspin discovery.
+  espressif/mdns:
+    version: "^1.11.2"
+
+  # Sendspin player protocol. Highest-risk dependency: pre-1.0 and tracks the
+  # Music Assistant protocol. Pinned to an exact version on purpose.
+  # Requires ESP-IDF >= 5.5 (the project baseline).
+  sendspin/sendspin-cpp:
+    version: "==0.6.1"

@@ -1,0 +1,12 @@
+<!doctype html><!-- ux-phase-6 --><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Bugne login</title><style>
+:root{--bg:#eef0f3;--surface:#fff;--text:#1a1c1f;--muted:#666;--border:#d3d7dd;--accent:#2196F3;--on-accent:#fff;--danger:#e14b4b;--r1:8px;--r2:14px}
+@media (prefers-color-scheme:dark){:root{--bg:#15171b;--surface:#22262c;--text:#e8eaed;--muted:#9aa1ab;--border:#3a3f47;--danger:#ff6b6b}}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;font-size:16px;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--text);padding:16px}
+.card{background:var(--surface);border-radius:var(--r2);padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08);width:100%;max-width:340px;text-align:center}
+h1{font-size:1.4em;margin:0 0 2px}
+p{color:var(--muted);margin:0 0 16px}
+input{padding:10px;width:100%;font-size:1em;min-height:44px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:var(--r1)}
+button{min-height:44px;padding:10px 14px;font-size:1em;margin-top:12px;width:100%;cursor:pointer;border:none;border-radius:var(--r1);background:var(--accent);color:var(--on-accent);font-weight:bold}
+.err{color:var(--danger);font-size:.9em;margin-top:12px;min-height:1.2em}
+</style></head><body><div class=card><h1>Bugne</h1><p>Login</p><form id=l><input id=p type=password placeholder=Password autofocus><button type=submit>Login</button></form><div id=m class=err></div></div><script>document.getElementById('l').onsubmit=function(e){e.preventDefault();fetch('/login',{method:'POST',body:JSON.stringify({pass:document.getElementById('p').value})}).then(function(r){if(r.ok){location.reload()}else{document.getElementById('m').textContent='Wrong password'}})};</script></body></html>

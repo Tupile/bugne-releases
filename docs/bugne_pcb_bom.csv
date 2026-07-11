@@ -1,0 +1,28 @@
+Comment,Designator,Footprint,LCSC,Qty/board,Pose,Note
+ESP32-S3-WROOM-1-N16R8,U1,Module-WROOM-1,C2913209,1,JLCPCB,8MB PSRAM / 16MB flash - verifier la ref N16R8
+MAX98357A,U2,TQFN-16(3x3),C910544,1,JLCPCB,ampli I2S HP mono
+PCM5102A,U5,TSSOP-20,C107071,1,JLCPCB,DAC I2S casque stereo (PLL interne no MCLK)
+AMS1117-3.3,U3,SOT-223,C6186,1,JLCPCB,LDO 3.3V
+TP4056,U4,ESOP-8,C16581,1,JLCPCB,charge LiPo 1S
+B5819W,D1,SOD-123,C8598,1,JLCPCB,Schottky path USB/batterie
+USB-C 16P,J1,USB-C-SMD-16P,C165948,1,JLCPCB,alim + USB natif S3
+microSD push-pull,J2,TF-SMD,C91145,1,JLCPCB,lecteur carte SD
+Bouton tactile SMD,SW1,SMD-2P,C318884,1,JLCPCB,BOOT (IO0)
+Bouton tactile SMD,SW2,SMD-2P,C318884,1,JLCPCB,RESET (EN)
+100nF 0603,C6 C7 C8 C10 C12,0603,C14663,5,JLCPCB,decouplage S3/ampli/DAC
+1uF 0603,C5,0603,C15849,1,JLCPCB,RC delai sur EN
+10uF 0805,C1 C2 C4 C9 C11 C13,0805,C15850,6,JLCPCB,bulk alim + decouplage audio
+22uF 0805,C3,0805,C45783,1,JLCPCB,sortie LDO
+10uF 0805 (couplage audio),C14 C15,0805,C15850,2,JLCPCB,couplage sortie casque L/R
+10k 0603,R1 R2 R7,0603,C25804,3,JLCPCB,pullups EN / IO0 / XSMT
+5.1k 0603,R3 R4,0603,C25905,2,JLCPCB,resistances CC USB-C
+1.2k 0603,R10,0603,C17475,1,JLCPCB,Rprog TP4056 (~1A)
+1k 0603,R11,0603,C21190,1,JLCPCB,LED charge
+100R 0603,R9 R12,0603,C22775,2,JLCPCB,serie sortie casque L/R
+100k 0603,R6,0603,C25803,1,JLCPCB,selection canal / SD MAX98357A
+0R 0603,R8,0603,C21189,1,JLCPCB,SCK PCM5102A a la masse
+LED rouge 0603,LED1,0603,C2286,1,JLCPCB,etat charge
+Haut-parleur 3W 4ohm 40mm,LS1,off-board,-,1,a monter,fil/JST - choisir bonne qualite
+Jack 3.5mm avec switch detection,J4,off-board,-,1,a monter,coupe le HP quand casque branche
+Connecteur batterie JST-PH 2P,J5,off-board,-,1,a monter,LiPo 1S 3.7V
+Header/FFC ecran 2.8 ILI9341+FT6336,J3,off-board,-,1,a monter,module ecran enfichable (SPI + I2C tactile)

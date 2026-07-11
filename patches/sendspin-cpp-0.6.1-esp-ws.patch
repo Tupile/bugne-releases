@@ -1,0 +1,62 @@
+--- a/src/esp/ws_server.cpp
++++ b/src/esp/ws_server.cpp
+@@ -49,6 +49,24 @@
+ 
+ static const char* const TAG = "sendspin.ws_server";
+ 
++#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
++// IDF (>=5.x) does NOT call the URI handler for the WebSocket handshake; it returns
++// after sending the 101 and offers this post-handshake callback instead. Fire
++// on_connected_cb here so the hub sends its client/hello once connected.
++static esp_err_t ws_post_handshake(httpd_req_t* req) {
++    int sockfd = httpd_req_to_sockfd(req);
++    auto* slot = static_cast<std::shared_ptr<SendspinServerConnection>*>(
++        httpd_sess_get_ctx(req->handle, sockfd));
++    if (slot != nullptr && *slot) {
++        SendspinServerConnection* conn = (*slot).get();
++        if (conn->on_connected_cb) {
++            conn->on_connected_cb(conn);
++        }
++    }
++    return ESP_OK;
++}
++#endif
++
+ SendspinWsServer::~SendspinWsServer() {
+     this->stop();
+ }
+@@ -64,6 +82,10 @@
+ 
+     // Configure the HTTP server
+     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
++    // The default 4 KB httpd task stack is tight: open/close callbacks (C++
++    // shared_ptr + std::function) and the async frame sends all run on this task.
++    // 4 KB corrupts the LWIP select semaphore under load; give it more headroom.
++    config.stack_size = 8192;
+     if (task_stack_in_psram) {
+         config.task_caps = MALLOC_CAP_SPIRAM;
+     }
+@@ -89,13 +111,16 @@
+     }
+ 
+     // Register the WebSocket handler
+-    const httpd_uri_t sendspin_ws_uri = {.uri = "/sendspin",
+-                                         .method = HTTP_GET,
+-                                         .handler = SendspinWsServer::websocket_handler,
+-                                         .user_ctx = (void*)this,
+-                                         .is_websocket = true,
+-                                         .handle_ws_control_frames = false,
+-                                         .supported_subprotocol = nullptr};
++    httpd_uri_t sendspin_ws_uri = {.uri = "/sendspin",
++                                   .method = HTTP_GET,
++                                   .handler = SendspinWsServer::websocket_handler,
++                                   .user_ctx = (void*)this,
++                                   .is_websocket = true,
++                                   .handle_ws_control_frames = false,
++                                   .supported_subprotocol = nullptr};
++#ifdef CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
++    sendspin_ws_uri.ws_post_handshake_cb = ws_post_handshake;
++#endif
+ 
+     err = httpd_register_uri_handler(this->server_, &sendspin_ws_uri);
+     if (err != ESP_OK) {
