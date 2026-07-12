@@ -75,6 +75,15 @@ typedef struct {
     int days;           // bit0=Monday .. bit6=Sunday; never 0 after load
 } config_quiet_window_t;
 
+// Parental daily usage limit: maximum listening + game minutes per day.
+// Web-only, the device never writes it. The consumed-time counter itself is
+// NVS (config_store_get/set_usage below), not config.json. See
+// docs/config_schema.md.
+typedef struct {
+    int enabled;  // 0/1
+    int minutes;  // 5..720
+} config_limit_t;
+
 // One favorite: a webradio (by stable id) or an SD track path. Added from the
 // device's now-playing star button, managed on the web Play tab.
 #define CFG_MAX_FAVORITES 12
@@ -118,6 +127,8 @@ typedef struct {
     config_alarm_t alarms[CFG_MAX_ALARMS];
 
     config_quiet_window_t quiet[CFG_QUIET_WINDOWS];  // parental no-playback windows, web-configured
+
+    config_limit_t daily_limit;  // parental daily usage limit, web-configured
 
     config_favorite_t favorites[CFG_MAX_FAVORITES];
     size_t            favorite_count;
@@ -232,6 +243,14 @@ esp_err_t config_store_set_highscore(uint32_t score);
 // Multiplication game max streak, persisted in NVS. get returns 0 when unset.
 uint32_t config_store_get_maxstreak(void);
 esp_err_t config_store_set_maxstreak(uint32_t streak);
+
+// Daily usage counter for the parental limit, persisted in NVS so a power
+// cycle cannot reset the child's consumed time. date is the local yyyymmdd
+// day, seconds the usage consumed on it. get returns date 0 when never
+// written. Owned by the ui component (it seeds usage.c at boot and writes
+// back about once per minute of usage).
+esp_err_t config_store_get_usage(uint32_t *date, uint32_t *seconds);
+esp_err_t config_store_set_usage(uint32_t date, uint32_t seconds);
 
 // Read the current config.json bytes into buf (null-terminated). Sets *out_len
 // (excluding the null) if out_len is not NULL.

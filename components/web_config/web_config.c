@@ -11,6 +11,7 @@
 #include "net.h"
 #include "logstore.h"
 #include "ui.h"
+#include "usage.h"
 #include "source_sd.h"
 #include "library.h"
 
@@ -601,11 +602,12 @@ static esp_err_t config_post(httpd_req_t *req)
         if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&addr, &alen) == 0) {
             inet_ntop(AF_INET6, &addr.sin6_addr, ips, sizeof(ips));
         }
-        ESP_LOGI(TAG, "config POST from %s, %u bytes, quiet %s, favorites %s, alarms %s, sunrise %s", ips,
+        ESP_LOGI(TAG, "config POST from %s, %u bytes, quiet %s, favorites %s, alarms %s, sunrise %s, daily_limit %s", ips,
                  (unsigned)strlen(buf), strstr(buf, "\"quiet\"") ? "present" : "MISSING",
                  strstr(buf, "\"favorites\"") ? "present" : "MISSING",
                  strstr(buf, "\"alarms\"") ? "present" : "MISSING",
-                 strstr(buf, "\"sunrise\"") ? "present" : "MISSING");
+                 strstr(buf, "\"sunrise\"") ? "present" : "MISSING",
+                 strstr(buf, "\"daily_limit\"") ? "present" : "MISSING");
         err = config_store_write_json(buf);
     }
     free(buf);
@@ -1281,6 +1283,19 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "heap_free", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(o, "rssi", rssi);
     cJSON_AddStringToObject(o, "ip", ip);
+    // Daily usage consumed today (parental limit counter, listening + game
+    // seconds). 0 before the first SNTP sync or on a fresh day. The counter's
+    // ints are written from the LVGL task; aligned word reads are atomic on
+    // this target, same tolerance as the stats file read.
+    {
+        time_t now = time(NULL);
+        struct tm tmv;
+        localtime_r(&now, &tmv);
+        int today = (tmv.tm_year + 1900 >= 2025)
+                  ? (tmv.tm_year + 1900) * 10000 + (tmv.tm_mon + 1) * 100 + tmv.tm_mday
+                  : 0;
+        cJSON_AddNumberToObject(o, "usage_today_s", usage_today(today));
+    }
     cJSON *sd = cJSON_AddObjectToObject(o, "sd");
     if (sd) {
         cJSON_AddBoolToObject(sd, "present", sd_present);

@@ -76,6 +76,10 @@ static void set_defaults(config_t *c)
     c->quiet[1].end_hour = 14;
     c->quiet[1].end_minute = 0;
     c->quiet[1].days = 0x7F;  // every day
+
+    // Daily usage limit: prefill only, disabled by default.
+    c->daily_limit.enabled = 0;
+    c->daily_limit.minutes = 120;
 }
 
 // Overlay one alarm object's fields onto an already-defaulted config_alarm_t.
@@ -258,6 +262,14 @@ static void load_from_json(const cJSON *root)
             }
         }
     }
+
+    const cJSON *lim = cJSON_GetObjectItemCaseSensitive(root, "daily_limit");
+    if (cJSON_IsObject(lim)) {
+        const cJSON *en = cJSON_GetObjectItemCaseSensitive(lim, "enabled");
+        if (cJSON_IsNumber(en)) s_config.daily_limit.enabled = clampi(en->valueint, 0, 1);
+        const cJSON *mi = cJSON_GetObjectItemCaseSensitive(lim, "minutes");
+        if (cJSON_IsNumber(mi)) s_config.daily_limit.minutes = clampi(mi->valueint, 5, 720);
+    }
 }
 
 // Serialize a config to config.json. Writes a temp file then renames it, so a
@@ -343,6 +355,10 @@ static esp_err_t save_to_disk(const config_t *c)
         cJSON_AddNumberToObject(o, "days", c->quiet[i].days);
         cJSON_AddItemToArray(quiet, o);
     }
+
+    cJSON *lim = cJSON_AddObjectToObject(root, "daily_limit");
+    cJSON_AddNumberToObject(lim, "enabled", c->daily_limit.enabled);
+    cJSON_AddNumberToObject(lim, "minutes", c->daily_limit.minutes);
 
     char *txt = cJSON_Print(root);
     cJSON_Delete(root);
@@ -537,6 +553,8 @@ esp_err_t config_store_favorite_remove(int index)
 #define NVS_KEY_RESUME  "resume"
 #define NVS_KEY_HISCORE "highscore"
 #define NVS_KEY_MAXSTRK "maxstreak"
+#define NVS_KEY_USE_DAY "use_day"
+#define NVS_KEY_USE_SEC "use_sec"
 #define PW_SALT_LEN     16
 #define PW_HASH_LEN     32
 
@@ -767,6 +785,31 @@ esp_err_t config_store_set_maxstreak(uint32_t streak)
     nvs_handle_t h;
     ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
     esp_err_t err = nvs_set_u32(h, NVS_KEY_MAXSTRK, streak);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t config_store_get_usage(uint32_t *date, uint32_t *seconds)
+{
+    if (!date || !seconds) return ESP_ERR_INVALID_ARG;
+    *date = 0;
+    *seconds = 0;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    if (nvs_get_u32(h, NVS_KEY_USE_DAY, date) != ESP_OK) *date = 0;
+    if (nvs_get_u32(h, NVS_KEY_USE_SEC, seconds) != ESP_OK) *seconds = 0;
+    nvs_close(h);
+    return ESP_OK;
+}
+
+esp_err_t config_store_set_usage(uint32_t date, uint32_t seconds)
+{
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
+    esp_err_t err = nvs_set_u32(h, NVS_KEY_USE_DAY, date);
+    if (err == ESP_OK) err = nvs_set_u32(h, NVS_KEY_USE_SEC, seconds);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     return err;

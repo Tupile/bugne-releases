@@ -17,6 +17,7 @@
 #include "decode.h"
 #include "library.h"
 #include "quiet.h"
+#include "usage.h"
 #include "alarm_next.h"
 #include "stats.h"
 #include "pitch.h"
@@ -100,7 +101,8 @@ static const accent_def_t ACCENTS[] = {
 static int s_dark_applied = -1;    // 0/1 currently applied, -1 = none yet
 static int s_accent_applied = -1;
 static char s_tz_applied[CFG_TZ_MAX];  // TZ string currently applied via apply_tz
-static int s_quiet_applied = -1;   // parental quiet-hours state currently applied, -1 = none yet
+static int s_block_applied = -1;   // parental block (quiet hours or daily limit) currently applied, -1 = none yet
+static int s_limit_warn_date;      // yyyymmdd of the last "5 minutes left" warning (one per day)
 
 // Design tokens ("playful tiles" redesign). The mini bar floats as a rounded
 // card; every bottom clearance in the layout code derives from these three so
@@ -583,6 +585,36 @@ static bool quiet_active(void)
             return true;
     }
     return false;
+}
+
+// Local calendar day as yyyymmdd, or 0 before the first SNTP sync (usage.c
+// drops ticks and queries on 0, so nothing is counted with an invalid clock).
+static int date_today(void)
+{
+    if (!time_valid()) return 0;
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    return (tmv.tm_year + 1900) * 10000 + (tmv.tm_mon + 1) * 100 + tmv.tm_mday;
+}
+
+// Parental daily usage limit: true once today's counted usage (listening +
+// game time, accumulated in the 1 Hz block) has consumed the configured
+// quota. Fail-open without valid time, same gate philosophy as quiet hours.
+static bool limit_hit(void)
+{
+    const config_t *c = config_store_get();
+    if (!c || !c->daily_limit.enabled) return false;
+    int today = date_today();
+    if (today == 0) return false;
+    return usage_today(today) >= c->daily_limit.minutes * 60;
+}
+
+// Any parental block active (quiet hours or exhausted daily limit). Used
+// where a toast is not wanted (home tile greying, debug-nav refusal).
+static bool parental_blocked(void)
+{
+    return quiet_active() || limit_hit();
 }
 
 // Token colors, derived from the applied dark flag and accent palette so all
@@ -1244,6 +1276,17 @@ static void alarm_fire(int idx);     // alarm engine, defined after exit_sleep
 static void alarm_finish(bool snooze);
 static void beep_start(void);        // beep fallback (placeholder until A5)
 static void toast(const char *text); // top-layer toast, defined after the screen builders
+
+// Parental gate, checked at every user playback entry point (GATE PLACEMENT
+// RULE: never inside ui_play or the alarm code, so the alarm stays exempt by
+// construction). Quiet hours first, then the daily usage limit. Toasts the
+// reason and returns true when the action must be refused.
+static bool play_denied(void)
+{
+    if (quiet_active()) { toast(T(STR_QUIET_HOURS)); return true; }
+    if (limit_hit())    { toast(T(STR_LIMIT_REACHED)); return true; }
+    return false;
+}
 static lv_obj_t *add_menu_button(lv_obj_t *scr, const char *text, int x, int y, int h, lv_event_cb_t cb);
 static lv_obj_t *add_menu_button_t(lv_obj_t *scr, const char *icon, str_id_t id, int x, int y, int h, lv_event_cb_t cb);
 static lv_obj_t *make_tile(lv_obj_t *scr, const char *icon, str_id_t label_id,
@@ -1903,7 +1946,7 @@ static void ss_refresh(void)
 
 static void on_webradio(lv_event_t *e)
 {
-    if (quiet_active()) { toast(T(STR_QUIET_HOURS)); return; }
+    if (play_denied()) return;
     lv_obj_t *btn = lv_event_get_target(e);
     int i = (int)(intptr_t)lv_obj_get_user_data(btn);
     const config_t *c = config_store_get();
@@ -1957,7 +2000,7 @@ static void build_webradios(lv_obj_t *scr)
 // are ignored (list edges).
 static void play_ctx_at_ex(int i, bool show_np)
 {
-    if (quiet_active()) { toast(T(STR_QUIET_HOURS)); return; }
+    if (play_denied()) return;
     if (s_play_ctx == PLAY_CTX_SD) {
         // Navigate the playing folder's own snapshot, not the live browse list.
         if (!s_play_sd_names || i < 0 || (size_t)i >= s_play_sd_count) return;
@@ -2032,14 +2075,15 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
     bool ss = source_sendspin_session_active();
     switch (cmd) {
     case UI_REMOTE_TOGGLE:
-        // Pausing must always work; refuse only the resume direction in quiet hours.
+        // Pausing must always work; refuse only the resume direction while
+        // parentally blocked (quiet hours or exhausted daily limit).
         if (ss) {
             if (source_sendspin_active()) source_sendspin_command(SENDSPIN_CMD_PAUSE);
-            else if (quiet_active()) { toast(T(STR_QUIET_HOURS)); break; }
+            else if (play_denied()) break;
             else source_sendspin_command(SENDSPIN_CMD_PLAY);
         } else {
             if (audio_is_paused()) {
-                if (quiet_active()) { toast(T(STR_QUIET_HOURS)); break; }
+                if (play_denied()) break;
                 audio_set_paused(false);
             } else {
                 audio_set_paused(true);
@@ -2055,12 +2099,12 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         }
         break;
     case UI_REMOTE_NEXT:
-        if (quiet_active()) { toast(T(STR_QUIET_HOURS)); break; }
+        if (play_denied()) break;
         if (ss) source_sendspin_command(SENDSPIN_CMD_NEXT);
         else    play_ctx_at(s_play_index + 1);
         break;
     case UI_REMOTE_PREV:
-        if (quiet_active()) { toast(T(STR_QUIET_HOURS)); break; }
+        if (play_denied()) break;
         if (ss) source_sendspin_command(SENDSPIN_CMD_PREVIOUS);
         else    play_ctx_at(s_play_index - 1);
         break;
@@ -2071,7 +2115,7 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         if (s_np_vol) lv_slider_set_value(s_np_vol, arg, LV_ANIM_OFF);  // reflect on screen
         break;
     case UI_REMOTE_PLAY_RADIO: {
-        if (quiet_active()) { toast(T(STR_QUIET_HOURS)); break; }
+        if (play_denied()) break;
         const config_t *c = config_store_get();
         if (c && arg >= 0 && (size_t)arg < c->webradio_count) {
             s_play_ctx = PLAY_CTX_NONE;  // a single stream, no next/previous
@@ -2119,7 +2163,7 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         s_dl_phase = UI_DL_IDLE;
         break;
     case UI_REMOTE_PLAY_PATH: {
-        if (quiet_active()) { toast(T(STR_QUIET_HOURS)); break; }
+        if (play_denied()) break;
         if (!s_remote_path[0]) break;
         char path[16 + LIB_PATH_MAX];
         snprintf(path, sizeof(path), "/sdcard/%s", s_remote_path);
@@ -2937,7 +2981,7 @@ static void on_game_back(lv_event_t *e)
 static void on_open_game(lv_event_t *e)
 {
     (void)e;
-    if (quiet_active()) { toast(T(STR_QUIET_HOURS)); return; }
+    if (play_denied()) return;
     if (s_game_timer) { lv_timer_delete(s_game_timer); s_game_timer = NULL; }
     s_game_score = 0;
     s_game_error_count = 0;
@@ -3308,12 +3352,12 @@ static bool fav_available(const config_favorite_t *f)
     return source_sd_present() && stat(path, &st) == 0;
 }
 
-// Row tap: play the favorite. Quiet-hours gate here, at the user entry point,
+// Row tap: play the favorite. Parental gate here, at the user entry point,
 // never inside ui_play (GATE PLACEMENT RULE). Missing content (radio id gone,
 // SD file gone) refuses with a toast instead of a silent failure.
 static void on_favorite_row(lv_event_t *e)
 {
-    if (quiet_active()) { toast(T(STR_QUIET_HOURS)); return; }
+    if (play_denied()) return;
     int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     const config_t *c = config_store_get();
     if (!c || i < 0 || (size_t)i >= c->favorite_count) return;
@@ -3614,7 +3658,7 @@ static void build_home(lv_obj_t *scr)
     // stay enabled: downloaded episodes play offline, the episodes screen greys
     // the rest. The home screen is rebuilt when the connection state changes
     // (see sleep_timer_cb).
-    bool q = quiet_active();
+    bool q = parental_blocked();  // quiet hours or exhausted daily limit
     if (net_state() != NET_STATE_CONNECTED || q) lv_obj_add_state(wr, LV_STATE_DISABLED);
     if (q) {
         lv_obj_add_state(pod, LV_STATE_DISABLED);
@@ -4914,8 +4958,8 @@ static void sleep_timer_cb(lv_timer_t *t)
         } else if (strcmp(name, "library_albums") == 0) {
             if (s_lib_artist[0] == '\0') strlcpy(name, "library_artists", sizeof(name));  // no artist chosen
         } else if (strcmp(name, "game") == 0 || strcmp(name, "game_play") == 0) {
-            if (quiet_active()) {
-                strlcpy(name, "home", sizeof(name));   // quiet hours: refuse, go home
+            if (parental_blocked()) {
+                strlcpy(name, "home", sizeof(name));   // quiet hours / daily limit: refuse, go home
             } else {
                 if (s_game_timer) { lv_timer_delete(s_game_timer); s_game_timer = NULL; }
                 s_game_score = 0;                      // mimic on_open_game: fresh session
@@ -5114,9 +5158,8 @@ static void sleep_timer_cb(lv_timer_t *t)
     // still on that screen. Refresh the title/progress while it is shown.
     bool ss = source_sendspin_session_active();
     if (ss && !s_ss_prev) {
-        if (quiet_active()) {  // parental quiet hours: refuse the Music Assistant stream
+        if (play_denied()) {  // parental block: refuse the Music Assistant stream
             source_sendspin_command(SENDSPIN_CMD_STOP);
-            toast(T(STR_QUIET_HOURS));
         } else if (s_tuner_active) {
             // Someone is tuning an instrument in front of the device: the
             // local user wins over a remote Music Assistant push (which
@@ -5351,6 +5394,35 @@ static void sleep_timer_cb(lv_timer_t *t)
                                source_sendspin_session_active();
                 if (s_stats_session_prev && !session) stats_flush();  // play -> idle edge
                 s_stats_session_prev = session;
+
+                // ---- Parental daily usage limit accumulation ----
+                // One second of usage = audible listening (same classification
+                // as the stats: beep and tuner never count) or time on the
+                // game screen with the display awake. The alarm is exempt: its
+                // ring must never burn the child's quota. Persisted to NVS on
+                // usage_tick's ~1/min signal and on the play -> idle edge, so
+                // a power cycle loses at most the last unsaved minute.
+                static bool s_usage_counting_prev;
+                bool counting = (listening ||
+                                 (s_active_builder == build_game && !s_asleep)) &&
+                                s_alarm_state != ALARM_RINGING && !s_alarm_beeping;
+                int today = date_today();
+                if (counting && today > 0) {
+                    if (usage_tick(today))
+                        config_store_set_usage(usage_date(), usage_seconds());
+                    // One-shot warning per day when 5 minutes of quota remain.
+                    const config_t *lc = config_store_get();
+                    if (lc && lc->daily_limit.enabled && s_limit_warn_date != today) {
+                        int rem = lc->daily_limit.minutes * 60 - usage_today(today);
+                        if (rem > 0 && rem <= 300) {
+                            s_limit_warn_date = today;
+                            toast(T(STR_LIMIT_5MIN));
+                        }
+                    }
+                }
+                if (s_usage_counting_prev && !counting && usage_date() > 0)
+                    config_store_set_usage(usage_date(), usage_seconds());
+                s_usage_counting_prev = counting;
             }
 
             if (s_home_clock && s_active_builder == build_home) {
@@ -5584,14 +5656,16 @@ static void sleep_timer_cb(lv_timer_t *t)
                 sleep_label_refresh();
             }
 
-            // Parental quiet hours, edge-triggered. Runs after the alarm block on
-            // purpose: if the alarm minute equals the window start, the alarm fires
-            // first and the enter-edge skips the stop (the alarm always wins).
+            // Parental block (quiet hours or exhausted daily limit),
+            // edge-triggered. Runs after the alarm block on purpose: if the
+            // alarm minute equals the block start, the alarm fires first and
+            // the enter-edge skips the stop (the alarm always wins).
             bool q = quiet_active();
-            if ((int)q != s_quiet_applied) {
-                bool first = (s_quiet_applied == -1);
-                s_quiet_applied = (int)q;
-                if (q && !first && s_alarm_state == ALARM_IDLE && !s_alarm_beeping) {
+            bool blocked = q || limit_hit();
+            if ((int)blocked != s_block_applied) {
+                bool first = (s_block_applied == -1);
+                s_block_applied = (int)blocked;
+                if (blocked && !first && s_alarm_state == ALARM_IDLE && !s_alarm_beeping) {
                     if (source_sendspin_session_active())
                         source_sendspin_command(SENDSPIN_CMD_STOP);
                     // Also stop a stream reconnect in progress (audio is inactive
@@ -5602,10 +5676,11 @@ static void sleep_timer_cb(lv_timer_t *t)
                     if (s_active_builder == build_now_playing ||
                         s_active_builder == build_sendspin_playing ||
                         s_active_builder == build_game) show(build_home);
-                    toast(T(STR_QUIET_HOURS));
-                    ESP_LOGI(TAG, "quiet hours: window opened, playback stopped");
+                    toast(q ? T(STR_QUIET_HOURS) : T(STR_LIMIT_REACHED));
+                    ESP_LOGI(TAG, "%s, playback stopped",
+                             q ? "quiet hours: window opened" : "daily limit: quota reached");
                 }
-                if (!q && !first) ESP_LOGI(TAG, "quiet hours: window closed");
+                if (!blocked && !first) ESP_LOGI(TAG, "parental block lifted");
                 if (s_active_builder == build_home) show(build_home);  // grey/un-grey tiles
             }
         }
@@ -5672,6 +5747,11 @@ esp_err_t ui_start(i2c_master_bus_handle_t i2c_bus)
     // Load a persisted podcast resume point, if any. Not acted on here: it is
     // used lazily when the user re-selects that episode (play_ctx_at_ex).
     if (config_store_get_resume(&s_resume) != ESP_OK) memset(&s_resume, 0, sizeof(s_resume));
+    // Seed the daily usage counter so a power cycle cannot reset the child's
+    // consumed time (a stale day is discarded by usage.c on the first tick).
+    uint32_t use_day = 0, use_sec = 0;
+    if (config_store_get_usage(&use_day, &use_sec) == ESP_OK)
+        usage_seed((int)use_day, (int)use_sec);
     s_audio_idle_since_us = esp_timer_get_time();  // idle measured from boot: jobs and
                                                    // auto-maintenance run after 5 min idle
     lang_set_code(config_store_get()->ui.lang);    // apply the saved UI language

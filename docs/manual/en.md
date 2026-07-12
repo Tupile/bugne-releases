@@ -44,7 +44,7 @@ for it.
   recommended one. A few small self-tapping screws hold the board and
   close the back.
 
-<img src="../../case/preview_face.png" alt="Plain case" height="200"> <img src="../../case/preview_seventies_face.png" alt="Seventies cabinet" height="200">
+<img src="../../case/preview_seventies_face.png" alt="Seventies cabinet" height="200">
 
 ## 3. Installing the firmware (first flash)
 

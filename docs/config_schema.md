@@ -51,6 +51,7 @@ password live in NVS, written by the config web page.
     { "enabled": 0, "start_hour": 13, "start_minute": 0,
       "end_hour": 14, "end_minute": 0, "days": 127 }
   ],
+  "daily_limit": { "enabled": 0, "minutes": 120 },
   "favorites": [
     { "type": 0, "radio_id": 1, "path": "", "title": "FIP" },
     { "type": 1, "radio_id": 0, "path": "Music/Album/track.mp3", "title": "Track" }
@@ -97,6 +98,8 @@ password live in NVS, written by the config web page.
 | `quiet[].start_hour` / `quiet[].start_minute` | int | 0 to 23 / 0 to 59. Start of the window. |
 | `quiet[].end_hour` / `quiet[].end_minute` | int | 0 to 23 / 0 to 59. End of the window. |
 | `quiet[].days` | int | Weekday bitmask: bit0 = Monday .. bit6 = Sunday, the day the window STARTS. 0 or missing is coerced to 127 (every day) on load. |
+| `daily_limit.enabled` | int | 0 (default) or 1. Parental daily usage limit. |
+| `daily_limit.minutes` | int | Maximum usage minutes per local day, 5 to 720. Default 120. |
 | `favorites[].type` | int | 0 = web radio (by stable id), 1 = SD track path. Max 12 entries. |
 | `favorites[].radio_id` | int | The stable `webradios[].id` (type 0), not the array index. An id that no longer resolves shows as unavailable on the device. |
 | `favorites[].path` | string | SD path relative to the SD root (type 1). Required for type 1, empty otherwise. |
@@ -131,6 +134,18 @@ nothing is blocked, since there is no reliable time yet. The alarm and its
 beep fallback always sound, even during a quiet window. Podcast downloads
 and auto-maintenance keep running during quiet hours. Quiet hours are
 configured on the web page only, the device never writes this object.
+
+The daily usage limit caps how long the child can use the device per local
+day. A second of usage is counted while audio is audibly playing (SD, web
+radio, podcast, Music Assistant; not paused, not the alarm or its beep, not
+the tuner) or while the game screen is open with the display awake. When the
+configured minutes are used up, playback and the game are blocked exactly
+like quiet hours (tiles greyed, toast) until local midnight; a toast warns
+the child 5 minutes before. The alarm always rings and never consumes the
+quota. The consumed counter is not in this file: it persists in NVS
+(`use_day`/`use_sec`, written about once per minute of usage) so a power
+cycle cannot reset it. Before the first SNTP sync nothing is counted or
+blocked. Like quiet hours, this object is configured on the web page only.
 
 Favorites are up to 12 quick-play entries shown behind a Favorites home tile
 (the tile is hidden when the list is empty). The device adds and removes the

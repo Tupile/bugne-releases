@@ -88,6 +88,8 @@ typedef enum {
     STR_ALARM_N_FMT,        // printf with one %d (1-based alarm index), e.g. "Alarm %d"
     STR_ALARM_OFF,          // alarm list row: shown instead of the day letters when disabled
     STR_QUIET_HOURS,
+    STR_LIMIT_REACHED,      // toast: the parental daily usage limit is used up
+    STR_LIMIT_5MIN,         // toast: 5 minutes of daily quota remain
     STR_DAY_LETTERS,        // 7 chars, one per weekday, Monday first
     STR_SNOOZE_UNTIL_FMT,   // printf with two %02d (hour, minute)
     STR_TIME_NOT_SET,

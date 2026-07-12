@@ -1,6 +1,6 @@
 # ui drives the display and touch. Public header exposes the i2c_master type.
 idf_component_register(
-    SRCS "ui.c" "lang.c" "quiet.c" "alarm_next.c" "fonts/bugne_font_14.c" "fonts/bugne_font_20.c" "fonts/bugne_font_48.c" "lv_mem_psram.c"
+    SRCS "ui.c" "lang.c" "quiet.c" "usage.c" "alarm_next.c" "fonts/bugne_font_14.c" "fonts/bugne_font_20.c" "fonts/bugne_font_48.c" "lv_mem_psram.c"
     INCLUDE_DIRS "include"
     REQUIRES driver
     PRIV_REQUIRES esp_lcd esp_lcd_touch esp_driver_spi esp_timer esp_app_format
