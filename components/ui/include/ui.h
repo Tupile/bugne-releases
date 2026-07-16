@@ -36,6 +36,7 @@ typedef enum {
     UI_REMOTE_CANCEL_DOWNLOAD,     // clear the download job (no auto-resume)
     UI_REMOTE_PLAY_PATH,           // play an SD path sent by the web page
     UI_REMOTE_SLEEP,               // sleep timer: arg = minutes, 0 = off, -1 = end-of-track
+    UI_REMOTE_SEEK,                // arg = target position in ms (seekable file only)
 } ui_remote_t;
 
 // Queue a remote command. Thread-safe; returns immediately (applied within ~one
@@ -74,6 +75,7 @@ typedef struct {
     uint32_t pos_ms;       // 0 if unknown
     uint32_t dur_ms;       // 0 if unknown / live
     int      sleep_min;    // sleep timer (A2): 0 = off, -1 = end-of-track, else minutes left
+    bool     seekable;     // the playing file's format honors the "seek" action
 } ui_status_t;
 
 // Fill a status snapshot. Thread-safe (a best-effort read of live state).

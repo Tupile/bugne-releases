@@ -1397,12 +1397,17 @@ static void on_volume(lv_event_t *e)
     audio_set_volume((int)lv_slider_get_value(slider));
 }
 
-// Only FLAC supports seeking (dr_mp3 has no usable seek), so the MP3 progress
-// bar is shown read-only.
+// Seekable = the current playback is a local file in a format whose decode
+// loop honors decode_seek(): FLAC (exact), MP3 (byte seek) and .m4a (MP4
+// sample table). Ogg and raw ADTS stay read-only. Keyed on the real target
+// path, not the display title (tagged tracks and podcast episodes show a
+// title with no extension).
 static bool now_playing_seekable(void)
 {
-    const char *dot = strrchr(s_now_title, '.');
-    return dot && strcasecmp(dot, ".flac") == 0;
+    if (!s_now_is_file) return false;
+    const char *dot = strrchr(s_now_target, '.');
+    return dot && (strcasecmp(dot, ".flac") == 0 || strcasecmp(dot, ".mp3") == 0 ||
+                   strcasecmp(dot, ".m4a") == 0);
 }
 
 // Progress slider drag (SD files): hold updates while dragging, seek on release.
@@ -1634,8 +1639,9 @@ static void build_now_playing(lv_obj_t *scr)
 
     // Sources with a progress row get a shorter title block, so the rows
     // below (artist, progress, time) keep fixed non-overlapping positions.
-    const bool has_prog = (s_play_ctx == PLAY_CTX_SD || s_play_ctx == PLAY_CTX_PODCAST ||
-                           s_play_ctx == PLAY_CTX_LIBRARY);
+    // Any local file gets the row, including single tracks played with
+    // PLAY_CTX_NONE (web remote, favorites, alarm SD track).
+    const bool has_prog = (s_play_ctx != PLAY_CTX_NONE) || s_now_is_file;
 
     // Overline: small muted header, the big label below is the track name.
     lv_obj_t *over = lv_label_create(scr);
@@ -1680,14 +1686,15 @@ static void build_now_playing(lv_obj_t *scr)
     }
 
     if (has_prog) {
-        // SD files, podcasts and library tracks: a progress slider plus a time label.
-        // Draggable to seek only for SD FLAC (MP3, podcasts and library are read-only).
+        // Local files (SD, library, cached episodes): a progress slider plus a
+        // time label. Draggable to seek when the format supports it; streamed
+        // episodes keep a read-only bar.
         lv_obj_t *prog = lv_slider_create(scr);
         lv_obj_set_width(prog, scr_w() - 32);
         lv_slider_set_range(prog, 0, 1000);
         lv_slider_set_value(prog, 0, LV_ANIM_OFF);
         lv_obj_align(prog, LV_ALIGN_TOP_MID, 0, ls ? 106 : 116);
-        if (s_play_ctx == PLAY_CTX_SD && now_playing_seekable()) {
+        if (now_playing_seekable()) {
             lv_obj_add_event_cb(prog, on_seek_pressed, LV_EVENT_PRESSED, NULL);
             lv_obj_add_event_cb(prog, on_seek_released, LV_EVENT_RELEASED, NULL);
         } else {
@@ -2186,6 +2193,21 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         sleep_label_refresh();  // reflect on an open now-playing screen at once
         break;
     }
+    case UI_REMOTE_SEEK:
+        // Ungated like VOLUME (it does not start playback). Clamp against the
+        // decoder's duration, not the RSS override: a client working from an
+        // overridden dur_ms must not seek past the file (same choice as the
+        // on-device on_seek_released). An open now-playing screen follows via
+        // its periodic decode_progress refresh; nothing to update here.
+        if (now_playing_seekable()) {
+            uint32_t pos = 0, dur = 0;
+            decode_progress(&pos, &dur);
+            if (dur > 0) {
+                uint32_t t = arg < 0 ? 0 : (uint32_t)arg;
+                decode_seek(t > dur ? dur : t);
+            }
+        }
+        break;
     }
 }
 
@@ -2283,6 +2305,7 @@ void ui_status(ui_status_t *out)
     if (s_np_dur_override_ms > 0) dur = s_np_dur_override_ms;
     out->pos_ms = pos;
     out->dur_ms = dur;
+    out->seekable = now_playing_seekable();  // sendspin/idle returned above: false there
 }
 
 // Classify the currently playing source for listening stats (C3), and its
@@ -4688,6 +4711,7 @@ static void beep_start(void)
     // source's stale title/artist.
     strlcpy(s_now_title, T(STR_ALARM_BEEP), sizeof(s_now_title));
     s_now_target[0] = '\0';  // the beep has no favorite identity (star button)
+    s_now_is_file = false;   // and no progress row / seek
     s_meta_title[0] = '\0';
     s_meta_artist[0] = '\0';
     source_sd_stop();

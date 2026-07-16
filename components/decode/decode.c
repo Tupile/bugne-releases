@@ -45,6 +45,8 @@ static volatile uint32_t s_dur_ms;
 static volatile int32_t  s_seek_ms = -1;
 static volatile uint32_t s_start_skip_ms;  // one-shot: skip this much at the next decode start
 static uint64_t s_bytes_read;  // bytes pulled from the source, for MP3 duration estimate
+static uint8_t  s_xing_toc[100];  // Xing/Info seek TOC (percent -> bytes/256), for MP3 seek
+static bool     s_xing_toc_valid;
 
 void decode_progress(uint32_t *pos_ms, uint32_t *dur_ms)
 {
@@ -199,6 +201,22 @@ static void cb_mp3_meta(void *p, const drmp3_metadata *m)
     (void)p;
     if (m->type == DRMP3_METADATA_TYPE_ID3V2 && m->pRawData && m->rawDataSize >= 10) {
         parse_id3v2((const uint8_t *)m->pRawData, m->rawDataSize);
+    } else if ((m->type == DRMP3_METADATA_TYPE_XING || m->type == DRMP3_METADATA_TYPE_VBRI) &&
+               m->pRawData && m->rawDataSize >= 8) {
+        // Xing/Info tag (dr_mp3 posts "Info" under the VBRI label, same layout):
+        // capture the 100-byte seek TOC for the MP3 byte seek. After the 4-byte
+        // ident: 4-byte BE flags, then FRAMES(4) and BYTES(4) when flagged, then
+        // the TOC. Tag data is untrusted: bound every read against rawDataSize.
+        const uint8_t *d = m->pRawData;
+        uint32_t flags = (uint32_t)d[4] << 24 | (uint32_t)d[5] << 16 |
+                         (uint32_t)d[6] << 8 | d[7];
+        size_t pos = 8;
+        if (flags & 0x01) pos += 4;  // FRAMES
+        if (flags & 0x02) pos += 4;  // BYTES
+        if ((flags & 0x04) && pos + 100 <= m->rawDataSize) {
+            memcpy(s_xing_toc, d + pos, 100);
+            s_xing_toc_valid = true;
+        }
     }
 }
 
@@ -302,6 +320,37 @@ static const drmp3_allocation_callbacks MP3_PSRAM_CB =
 static const drflac_allocation_callbacks FLAC_PSRAM_CB =
     { NULL, psram_malloc_cb, psram_realloc_cb, psram_free_cb };
 
+// Map target_ms to an absolute byte offset in the source for the MP3 byte
+// seek: Xing TOC when the file carries one (bounds VBR error to ~1% of the
+// duration), else linear interpolation over the audio-only byte span (exact
+// for CBR; trimmed podcast files have no Xing but their displayed duration is
+// the same linear byte estimate, so the landing stays self-consistent).
+static uint64_t mp3_seek_byte_for_ms(const drmp3 *mp3, const decode_source_t *src,
+                                     uint32_t target_ms, uint32_t dur_ms)
+{
+    uint64_t start = mp3->streamStartOffset;
+    uint64_t end = (mp3->streamLength != DRMP3_UINT64_MAX) ? mp3->streamLength
+                 : (src->total_bytes > 0 ? (uint64_t)src->total_bytes : 0);
+    if (end <= start || dur_ms == 0) {
+        return start;
+    }
+    uint64_t span = end - start;
+    if (s_xing_toc_valid) {
+        // x = percent * 256: index the TOC at the whole percent, interpolate
+        // to the next entry with the fractional part. TOC values are untrusted
+        // (kept monotonic) and scaled 0..255 over the stream span.
+        uint64_t x = (uint64_t)target_ms * 100 * 256 / dur_ms;
+        uint32_t p = (uint32_t)(x >> 8);
+        uint32_t f = (uint32_t)(x & 0xFF);
+        if (p > 99) { p = 99; f = 256; }
+        uint32_t a = s_xing_toc[p];
+        uint32_t b = (p < 99) ? s_xing_toc[p + 1] : 256;
+        if (b < a) b = a;
+        return start + span * ((uint64_t)a * 256 + (uint64_t)(b - a) * f) / 65536;
+    }
+    return start + (uint64_t)target_ms * span / dur_ms;
+}
+
 static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
 {
     // Heap-allocate: the drmp3 struct embeds minimp3's large decoder (~7 KB);
@@ -343,8 +392,9 @@ static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
         }
         uint64_t cur = 0;
         // Skip a podcast intro by decoding and discarding the leading frames
-        // (dr_mp3 has no seek table, so this is the only way for MP3). Used only
-        // when streaming; a downloaded MP3 is already trimmed on disk.
+        // (a byte seek needs the duration, unknown this early for files without
+        // a Xing header). Used only when streaming; a downloaded MP3 is already
+        // trimmed on disk.
         if (skip_ms > 0) {
             uint64_t target = (uint64_t)skip_ms * rate / 1000;
             while (cur < target) {
@@ -355,8 +405,21 @@ static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
             s_pos_ms = (uint32_t)(cur * 1000 / rate);
         }
         for (;;) {
-            // MP3 seek is not supported (dr_mp3 has no seek table; it does not work
-            // reliably here), so the UI keeps the MP3 progress bar read-only.
+            // One-shot seek request from the UI: map the target time to a byte
+            // offset (Xing TOC or linear), jump there and let minimp3 resync on
+            // the next frame header. The position becomes the estimated target
+            // (exact sample positions would need a full frame walk).
+            int32_t seek = s_seek_ms;
+            s_seek_ms = -1;
+            if (seek >= 0 && src->seek && s_dur_ms > 0) {
+                uint32_t target = (uint32_t)seek > s_dur_ms ? s_dur_ms : (uint32_t)seek;
+                uint64_t off = mp3_seek_byte_for_ms(mp3, src, target, s_dur_ms);
+                if (drmp3__on_seek_64(mp3, off, DRMP3_SEEK_SET)) {
+                    drmp3_reset(mp3);  // flush input buffer + decoder state, clears atEnd
+                    cur = (uint64_t)target * rate / 1000;
+                    s_pos_ms = target;
+                }
+            }
             drmp3_uint64 got = drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm);
             if (got == 0) break;
             if (audio_write(pcm, (size_t)got * ch * sizeof(int16_t)) != ESP_OK) break;
@@ -871,6 +934,7 @@ esp_err_t decode_run(decode_format_t fmt, const decode_source_t *src)
     s_dur_ms = 0;
     s_seek_ms = -1;
     s_bytes_read = 0;
+    s_xing_toc_valid = false;
     uint32_t skip = s_start_skip_ms;  // one-shot, consume it
     s_start_skip_ms = 0;
     decode_clear_metadata();

@@ -924,6 +924,7 @@ static esp_err_t playback_get(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "pos_ms", st.pos_ms);
     cJSON_AddNumberToObject(o, "dur_ms", st.dur_ms);
     cJSON_AddNumberToObject(o, "sleep_min", st.sleep_min);  // A2: 0=off, -1=end-of-track
+    cJSON_AddBoolToObject(o, "seekable", st.seekable);
     char *txt = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
     if (!txt) {
@@ -936,7 +937,7 @@ static esp_err_t playback_get(httpd_req_t *req)
     return ESP_OK;
 }
 
-// POST /api/playback: {"action":"toggle|stop|next|prev|volume|radio|path|sleep","value":N|str}
+// POST /api/playback: {"action":"toggle|stop|next|prev|volume|radio|path|sleep|seek","value":N|str}
 static esp_err_t playback_post(httpd_req_t *req)
 {
     if (!is_authed(req)) {
@@ -960,6 +961,9 @@ static esp_err_t playback_post(httpd_req_t *req)
         else if (!strcmp(a, "next"))   ui_remote(UI_REMOTE_NEXT, 0);
         else if (!strcmp(a, "prev"))   ui_remote(UI_REMOTE_PREV, 0);
         else if (!strcmp(a, "volume")) ui_remote(UI_REMOTE_VOLUME, v);
+        // Seek to value ms; no-op unless the playing file is seekable (see
+        // GET "seekable"). Clamped to the track duration on the UI task.
+        else if (!strcmp(a, "seek"))   ui_remote(UI_REMOTE_SEEK, v);
         else if (!strcmp(a, "radio"))  ui_remote(UI_REMOTE_PLAY_RADIO, v);
         // A2 sleep timer: 0=off, -1=end-of-track, else minutes (1..180, clamped
         // on the UI task in ui_remote_apply).

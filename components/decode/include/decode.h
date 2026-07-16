@@ -37,8 +37,10 @@ esp_err_t decode_run(decode_format_t fmt, const decode_source_t *src);
 void decode_progress(uint32_t *pos_ms, uint32_t *dur_ms);
 
 // Request a seek to target_ms in the running decode. Honored on the next decode
-// iteration; only effective for a seekable source (SD files). No-op if nothing
-// is decoding.
+// iteration; only effective for a seekable source (SD files) and a format whose
+// decode loop supports it: FLAC (exact), MP3 (byte estimate: Xing TOC or linear)
+// and .m4a (MP4 sample table). Ogg and ADTS ignore it. No-op if nothing is
+// decoding.
 void decode_seek(uint32_t target_ms);
 
 // Skip the first ms of audio of the NEXT decode_run() (one-shot, consumed and
