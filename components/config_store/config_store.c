@@ -364,6 +364,17 @@ static esp_err_t save_to_disk(const config_t *c)
     cJSON_Delete(root);
     if (!txt) return ESP_ERR_NO_MEM;
 
+    // Refuse to write a config larger than load_config accepts: writing it would
+    // succeed, but the next boot rejects it as out-of-bounds and overwrites with
+    // defaults, silently wiping every radio/podcast/alarm/parental setting. Keep
+    // the good on-disk config instead and surface the error to the caller.
+    if (strlen(txt) >= CONFIG_FILE_MAX) {
+        ESP_LOGE(TAG, "config too large to persist (%u >= %d), not written",
+                 (unsigned)strlen(txt), CONFIG_FILE_MAX);
+        cJSON_free(txt);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     esp_err_t err = ESP_OK;
     FILE *f = fopen(CONFIG_TMP_PATH, "w");
     if (!f) {

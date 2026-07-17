@@ -205,7 +205,9 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
                 break;
             }
             int n = esp_http_client_read(client, chunk, HTTP_CHUNK);
-            if (n <= 0) break;
+            if (n < 0) { net_ok = false; break; }  // transport error / premature
+                                                    // close: keep the old manifest
+            if (n == 0) break;                      // clean EOF
             if (!rss_parse_feed(p, chunk, (size_t)n)) { net_ok = false; break; }
             if (p->emitted >= RSS_MAX_EPISODES) break;  // safety cap
         }

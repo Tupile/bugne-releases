@@ -178,7 +178,8 @@ static void parse_id3v2(const uint8_t *tag, size_t size)
             const uint8_t *s = id + 4;
             fsize = ((size_t)s[0] << 24) | ((size_t)s[1] << 16) | ((size_t)s[2] << 8) | s[3];
         }
-        if (fsize == 0 || pos + hdrlen + fsize > size) break;
+        if (fsize == 0 || fsize > size - pos - hdrlen) break;  // wrap-safe: the
+                                        // while-condition guarantees pos + hdrlen <= size
         const uint8_t *data = tag + pos + hdrlen;
         bool title  = v22 ? !memcmp(id, "TT2", 3)  : !memcmp(id, "TIT2", 4);
         bool artist = v22 ? !memcmp(id, "TP1", 3)  : !memcmp(id, "TPE1", 4);
@@ -1048,7 +1049,8 @@ static void parse_vorbis(const uint8_t *p, uint32_t n)
     uint32_t off = 0;
     if (off + 4 > n) return;
     uint32_t vlen = p[off] | (p[off+1] << 8) | (p[off+2] << 16) | ((uint32_t)p[off+3] << 24);
-    off += 4 + vlen;  // skip vendor string
+    if (vlen > n - off - 4) return;  // wrap-safe: skip vendor string within bounds
+    off += 4 + vlen;
     if (off + 4 > n) return;
     uint32_t cnt = p[off] | (p[off+1] << 8) | (p[off+2] << 16) | ((uint32_t)p[off+3] << 24);
     off += 4;
@@ -1056,7 +1058,7 @@ static void parse_vorbis(const uint8_t *p, uint32_t n)
         if (off + 4 > n) return;
         uint32_t clen = p[off] | (p[off+1] << 8) | (p[off+2] << 16) | ((uint32_t)p[off+3] << 24);
         off += 4;
-        if (off + clen > n) return;
+        if (clen > n - off) return;  // wrap-safe (off <= n here)
         const char *c = (const char *)(p + off);
         if      (clen > 6  && !strncasecmp(c, "TITLE=", 6)  && !s_title[0])  copy_utf8(s_title,  sizeof(s_title),  c + 6,  clen - 6);
         else if (clen > 12 && !strncasecmp(c, "ALBUMARTIST=", 12) && !s_album_artist[0]) copy_utf8(s_album_artist, sizeof(s_album_artist), c + 12, clen - 12);

@@ -533,7 +533,9 @@ static esp_err_t stream_decode_mp4_seek(const char *url, int64_t total)
     int64_t moov_sz = -1;
     int64_t moov_off = find_moov_off(front, fn, total, &moov_sz);
     esp_err_t err = ESP_FAIL;
-    if (moov_off < 0 || moov_sz <= 0) {
+    if (moov_off < 0 || moov_sz < 8) {  // a moov box is always >= 8 bytes; a
+                                        // smaller size would underflow the 8-byte
+                                        // header memcpy in the moov-at-end path
         ESP_LOGE(TAG, "streamed .m4a: moov not locatable (off=%lld sz=%lld); download it",
                  (long long)moov_off, (long long)moov_sz);
         goto cleanup;
