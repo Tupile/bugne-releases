@@ -99,6 +99,37 @@ static void test_sample(void)
     }
 }
 
+// An attribute on a content element (e.g. Atom-style <title type="text">, or a
+// pubDate/enclosure ordering) must not bleed into or truncate the content.
+static void test_attr_on_content(void)
+{
+    static const char xml[] =
+        "<rss><channel>\n"
+        " <title type=\"text\">Chan Title</title>\n"
+        " <item>\n"
+        "  <title type=\"text\">Real Episode Title</title>\n"
+        "  <pubDate foo=\"bar\">Mon, 02 Jun 2026 06:00:00 GMT</pubDate>\n"
+        "  <itunes:duration baz=\"1\">12:34</itunes:duration>\n"
+        "  <enclosure length=\"99\" url=\"https://ex.com/a.mp3\" type=\"audio/mpeg\"/>\n"
+        " </item>\n"
+        "</channel></rss>\n";
+
+    char ybuf[RSS_YXML_BUF_SIZE];
+    collector_t c = {0};
+    rss_parser_t p;
+    rss_parse_init(&p, ybuf, sizeof(ybuf), collect_cb, &c);
+    feed_chunked(&p, xml, 5);
+
+    CHECK_STR(p.podcast_title, "Chan Title", "channel title with attr");
+    CHECK_INT(c.count, 1, "one episode");
+    if (c.count >= 1) {
+        CHECK_STR(c.eps[0].title, "Real Episode Title", "item title with attr");
+        CHECK_STR(c.eps[0].date, "Mon, 02 Jun 2026 06:00:00 GMT", "pubDate with attr");
+        CHECK_INT(c.eps[0].duration_seconds, 754, "duration with attr");
+        CHECK_STR(c.eps[0].url, "https://ex.com/a.mp3", "url attr not first");
+    }
+}
+
 static void test_duration(void)
 {
     CHECK_INT(rss_parse_duration("3600"), 3600, "duration plain seconds");
@@ -135,6 +166,7 @@ int main(void)
 {
     test_duration();
     test_sample();
+    test_attr_on_content();
     test_truncation();
     if (g_fail == 0) {
         printf("OK: all rss_parse host tests passed\n");

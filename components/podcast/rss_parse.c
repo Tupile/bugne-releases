@@ -22,6 +22,15 @@ static void set_target(rss_parser_t *r, char *buf, size_t max)
     if (buf && max) buf[0] = '\0';
 }
 
+// Set the element's content-capture destination and make it the active target.
+// Attributes may redirect the active target and then restore it (see ATTREND).
+static void set_content_target(rss_parser_t *r, char *buf, size_t max)
+{
+    r->content_target = buf;
+    r->content_max = max;
+    set_target(r, buf, max);
+}
+
 static void append_target(rss_parser_t *r, const char *s)
 {
     if (!r->target) return;
@@ -59,27 +68,33 @@ static void on_token(rss_parser_t *r, yxml_t *x, yxml_ret_t t)
         } else if (strcmp(x->elem, "enclosure") == 0) {
             r->cur_is_enclosure = true;
         } else if (strcmp(x->elem, "title") == 0) {
-            if (r->in_item) set_target(r, r->cur.title, sizeof(r->cur.title));
-            else if (!r->got_podcast_title) set_target(r, r->podcast_title, sizeof(r->podcast_title));
+            if (r->in_item) set_content_target(r, r->cur.title, sizeof(r->cur.title));
+            else if (!r->got_podcast_title) set_content_target(r, r->podcast_title, sizeof(r->podcast_title));
         } else if (r->in_item && strcmp(x->elem, "pubDate") == 0) {
-            set_target(r, r->cur.date, sizeof(r->cur.date));
+            set_content_target(r, r->cur.date, sizeof(r->cur.date));
         } else if (r->in_item && strcmp(x->elem, "itunes:duration") == 0) {
-            set_target(r, r->dur_buf, sizeof(r->dur_buf));
+            set_content_target(r, r->dur_buf, sizeof(r->dur_buf));
         }
         break;
     case YXML_CONTENT:
         append_target(r, x->data);
         break;
     case YXML_ATTRSTART:
+        // Capture the enclosure url attribute; for any other attribute, drop its
+        // value (target = NULL) so it cannot bleed into the element content.
         if (r->cur_is_enclosure && strcmp(x->attr, "url") == 0) {
             set_target(r, r->cur.url, sizeof(r->cur.url));
+        } else {
+            r->target = NULL;
         }
         break;
     case YXML_ATTRVAL:
         append_target(r, x->data);
         break;
     case YXML_ATTREND:
-        r->target = NULL;
+        // Resume content capture (content always follows the start tag's
+        // attributes), so a preceding attribute does not truncate the content.
+        set_target(r, r->content_target, r->content_max);
         break;
     case YXML_ELEMEND: {
         // yxml reports the parent in x->elem here, so use our own stack to know
@@ -102,6 +117,7 @@ static void on_token(rss_parser_t *r, yxml_t *x, yxml_ret_t t)
             }
             r->in_item = false;
         }
+        r->content_target = NULL;
         r->target = NULL;
         break;
     }

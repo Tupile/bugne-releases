@@ -12,6 +12,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"  // xTaskCreateWithCaps (PSRAM scan-task stack)
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -20,6 +21,10 @@ static const char *TAG = "library";
 #define SD_MOUNT    "/sdcard"
 #define INDEX_PATH  "/sdcard/.bugne_library.tsv"
 #define LIB_MAX_TRACKS 4000   // PSRAM model cap (~1.8 MB)
+#define LIB_MAX_DEPTH  12     // recursion bound: each scan_dir frame is ~1 KB of
+                              // stack, so a pathological deep tree on the card
+                              // must not blow the scan task stack. Real music
+                              // libraries never nest this deep.
 
 typedef struct {
     char artist[LIB_NAME_MAX];
@@ -37,7 +42,9 @@ static volatile bool *s_scan_cancel;  // polled during scan_dir; NULL = not canc
 static bool ensure_alloc(void)
 {
     if (!s_tracks) {
-        s_tracks = heap_caps_malloc(sizeof(lib_track_t) * LIB_MAX_TRACKS, MALLOC_CAP_SPIRAM);
+        // calloc: a web reader may see s_count grow mid-scan; a zero-filled entry
+        // is a safe (NUL-terminated) read even before its fields are populated.
+        s_tracks = heap_caps_calloc(LIB_MAX_TRACKS, sizeof(lib_track_t), MALLOC_CAP_SPIRAM);
     }
     return s_tracks != NULL;
 }
@@ -70,7 +77,7 @@ static bool fmt_from(const char *name, decode_format_t *fmt)
 }
 
 // ---- scan ----
-static void scan_dir(const char *absdir, const char *reldir)
+static void scan_dir(const char *absdir, const char *reldir, int depth)
 {
     DIR *d = opendir(absdir);
     if (!d) return;
@@ -84,7 +91,7 @@ static void scan_dir(const char *absdir, const char *reldir)
                            : snprintf(rel, sizeof(rel), "%s", e->d_name);
         if (an <= 0 || an >= (int)sizeof(ab) || rn <= 0 || rn >= (int)sizeof(rel)) continue;
         if (e->d_type == DT_DIR) {
-            scan_dir(ab, rel);
+            if (depth + 1 < LIB_MAX_DEPTH) scan_dir(ab, rel, depth + 1);
             continue;
         }
         decode_format_t fmt;
@@ -96,7 +103,7 @@ static void scan_dir(const char *absdir, const char *reldir)
         esp_err_t r = decode_read_tags(fmt, &src, &tg);
         fclose(f);
         if (r != ESP_OK) continue;
-        lib_track_t *t = &s_tracks[s_count++];
+        lib_track_t *t = &s_tracks[s_count];
         // Group by album artist (ALBUMARTIST) so a compilation's tracks, which
         // carry different per-track ARTIST tags, stay under one album. Fall back
         // to the track artist, then "Unknown artist".
@@ -113,6 +120,7 @@ static void scan_dir(const char *absdir, const char *reldir)
         }
         strlcpy(t->path, rel, sizeof(t->path));
         t->track = tg.track;
+        s_count++;  // publish only after the entry is fully populated
     }
     closedir(d);
 }
@@ -145,7 +153,7 @@ esp_err_t library_scan_cancelable(volatile bool *cancel)
     if (!ensure_alloc()) return ESP_ERR_NO_MEM;
     s_scan_cancel = cancel;
     s_count = 0;
-    scan_dir(SD_MOUNT, "");
+    scan_dir(SD_MOUNT, "", 0);
     bool cancelled = (cancel && *cancel);
     s_scan_cancel = NULL;
     if (cancelled) {
@@ -185,12 +193,13 @@ esp_err_t library_load(void)
         }
         if (!ok) continue;
         fields[4] = p;  // path (rest of the line)
-        lib_track_t *t = &s_tracks[s_count++];
+        lib_track_t *t = &s_tracks[s_count];
         strlcpy(t->artist, fields[0], sizeof(t->artist));
         strlcpy(t->album,  fields[1], sizeof(t->album));
         t->track = atoi(fields[2]);
         strlcpy(t->title,  fields[3], sizeof(t->title));
         strlcpy(t->path,   fields[4], sizeof(t->path));
+        s_count++;  // publish only after the entry is fully populated
     }
     fclose(f);
     ESP_LOGI(TAG, "loaded %u tracks", (unsigned)s_count);
@@ -321,14 +330,20 @@ static void scan_task(void *arg)
     (void)arg;
     library_scan();
     s_scanning = false;
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 bool library_scan_start(void)
 {
     if (s_scanning || !source_sd_present()) return false;
     s_scanning = true;
-    if (xTaskCreate(scan_task, "lib_scan", 8192, NULL, 4, NULL) != pdPASS) {
+    // 16 KB stack in PSRAM: scan_dir recurses up to LIB_MAX_DEPTH frames (~1 KB
+    // each) plus the leaf's tag-reading call chain, with margin. The stack goes to
+    // PSRAM (xTaskCreateWithCaps) because internal RAM is scarce and a 16 KB
+    // internal allocation fails on a memory-pressured device; the scan path only
+    // touches SD/FATFS (no NVS/LittleFS/OTA), so a PSRAM stack is safe.
+    if (xTaskCreateWithCaps(scan_task, "lib_scan", 16384, NULL, 4, NULL,
+                            MALLOC_CAP_SPIRAM) != pdPASS) {
         s_scanning = false;
         return false;
     }

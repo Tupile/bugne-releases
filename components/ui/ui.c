@@ -326,6 +326,8 @@ static time_t  s_alarm_snooze_until;   // absolute epoch of the snooze re-fire
 static int64_t s_alarm_ring_start_us;  // esp_timer clock: ramp + auto-stop timing
 static int     s_alarm_saved_vol;      // user volume, restored at alarm end
 static bool    s_alarm_beeping;        // the beep fallback took over this ring
+static bool    s_alarm_beep_confirmed; // the beep was observed actually sounding
+                                       // (arbiter == BEEP): only then stop retrying
 static volatile bool s_beep_stop;      // set by ui_play/ui_stop: end the beep loop
 static time_t  s_last_wall;            // previous 1 Hz wall clock (SNTP jump guard)
 
@@ -2690,7 +2692,10 @@ static void on_refresh(lv_event_t *e)
         if (s_ep_msg) lv_label_set_text(s_ep_msg, T(STR_WAITING_WIFI));
         return;
     }
-    if (s_refreshing || s_nav_podcast_rss[0] == '\0') {
+    if (s_refreshing || s_downloading || s_nav_podcast_rss[0] == '\0') {
+        // s_downloading: the worker is busy for the whole download, so a queued
+        // REQ_REFRESH would sit behind it and could be clobbered by a later
+        // REQ_PLAY, leaving s_refreshing stuck true forever (matches the web path).
         return;
     }
     s_refreshing = true;
@@ -3911,7 +3916,8 @@ static void on_set_pod_refresh(lv_event_t *e)
         if (s_set_pod_lbl) lv_label_set_text(s_set_pod_lbl, T(STR_STOP_PLAYBACK_FIRST));
         return;
     }
-    if (s_refreshing) return;
+    if (s_refreshing || s_downloading) return;  // see on_refresh: a download holds
+                                                 // the worker; don't queue behind it
     s_refreshing = true;
     s_pod_was_refreshing = true;
     play_req_t req = { .kind = REQ_REFRESH_ALL };
@@ -4734,6 +4740,7 @@ static void alarm_fire(int idx)
     s_alarm_fired_min[idx] = time(NULL) / 60;   // latch this minute so it fires once
     s_alarm_saved_vol = audio_get_volume(); // restored at alarm end
     s_alarm_beeping = false;
+    s_alarm_beep_confirmed = false;
     sleep_clear();  // the alarm always wins over a sleep timer (A2)
 
     if (s_asleep) exit_sleep();
@@ -5614,7 +5621,15 @@ static void sleep_timer_cb(lv_timer_t *t)
                     // stream, or a track shorter than the ring). Beep instead so
                     // the alarm keeps sounding. s_play_failed is read-only here;
                     // the now-playing consumer never runs on the ringing screen.
-                    if (!s_alarm_beeping &&
+                    // Gate on the beep actually SOUNDING (arbiter == BEEP), not on
+                    // s_alarm_beeping: if a REQ_BEEP was clobbered in the queue or
+                    // beep_run could not acquire the arbiter, s_alarm_beeping would
+                    // wedge the retry and the alarm would stay silent. Re-firing an
+                    // already-pending beep is harmless (single-slot queue).
+                    if (audio_arbiter_active() == AUDIO_SOURCE_BEEP && audio_is_active()) {
+                        s_alarm_beep_confirmed = true;
+                    }
+                    if (!s_alarm_beep_confirmed &&
                         (s_play_failed || (!audio_is_active() && elapsed_s > 20))) {
                         beep_start();
                     }

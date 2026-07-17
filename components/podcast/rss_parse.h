@@ -44,6 +44,11 @@ typedef struct {
     char  *target;
     size_t target_max;
     size_t target_len;
+    // The element content capture destination, saved separately from `target`
+    // so an attribute (e.g. <title type="text">) can redirect `target` for its
+    // value and then restore content capture, instead of clobbering the title.
+    char  *content_target;
+    size_t content_max;
     // Element-name stack: yxml reports the parent (not the closing element) at
     // YXML_ELEMEND, so we track names ourselves to know what just closed.
     char   stack[16][24];
