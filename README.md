@@ -147,7 +147,7 @@ Build above) does the same in one step.
 
 After flashing, the device boots into Bugne and, with no Wi-Fi stored,
 raises its `Bugne-Setup-XXXX` hotspot: the
-[user manual](docs/manual/en.md) walks through the setup.
+[quick start](docs/quickstart.md) walks through the setup.
 
 ## Releasing an update on GitHub
 
@@ -169,6 +169,8 @@ deliberate downgrade). A crash-looping image is rolled back automatically.
 
 ## Documentation
 
+- [docs/quickstart.md](docs/quickstart.md): quick start, from purchase to the
+  first radio ([français](docs/quickstart_fr.md)).
 - [docs/manual/en.md](docs/manual/en.md): user manual, with screenshots.
 - [docs/manual/fr.md](docs/manual/fr.md): mode d'emploi en français.
 - [docs/hardware.md](docs/hardware.md): GPIO map and board notes.
