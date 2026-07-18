@@ -101,8 +101,8 @@ generate them (edit a script and rerun it to customize):
   back.
 - Vintage radio cabinet (`es3c28p_radio_*.stl`): landscape, vertical front,
   sloped back, screwed rear cover.
-- Seventies cabinet (`es3c28p_seventies_*.stl`, inspired by Dieter Rams'
-  1970s designs): landscape, perforated speaker plate, separate stand.
+- Seventies cabinet (`es3c28p_seventies_*.stl`, a 1970s-inspired look):
+  landscape, perforated speaker plate, separate stand.
   This is the recommended design.
 
 The radio and seventies cabinets print face down (front on the bed) with no
@@ -149,24 +149,6 @@ After flashing, the device boots into Bugne and, with no Wi-Fi stored,
 raises its `Bugne-Setup-XXXX` hotspot: the
 [quick start](docs/quickstart.md) walks through the setup.
 
-## Releasing an update on GitHub
-
-Devices can install the latest GitHub release from their web page
-(Firmware tab: check, then one-click install). Publish workflow:
-
-1. Bump `version.txt` (the app version embedded in the image) and commit.
-2. Build, then create a GitHub release on the public releases repo
-   (Tupile/bugne-releases, see GH_OTA_URL in web_config.c), tag it the same
-   version (e.g. `v1.0.1`) and attach `build/bugne.bin` as an asset named
-   exactly `bugne.bin`. Also attach the first-flash bundle as a second
-   asset named exactly `bugne-flash.zip`: a zip of `bootloader.bin`,
-   `partition-table.bin`, `ota_data_initial.bin`, `bugne.bin` (from
-   `build/`) and `tools/flash.sh` (as `flash.sh`), all at the zip root.
-
-The device compares the release binary's embedded version with its own:
-any difference offers the update (so publishing an older version offers a
-deliberate downgrade). A crash-looping image is rolled back automatically.
-
 ## Documentation
 
 - [docs/quickstart.md](docs/quickstart.md): quick start, from purchase to the
@@ -174,6 +156,8 @@ deliberate downgrade). A crash-looping image is rolled back automatically.
 - [docs/manual/en.md](docs/manual/en.md): user manual, with screenshots.
 - [docs/manual/fr.md](docs/manual/fr.md): mode d'emploi en français.
 - [docs/hardware.md](docs/hardware.md): GPIO map and board notes.
+- [docs/releasing.md](docs/releasing.md): how releases are published
+  (maintainers and forks).
 - [docs/config_schema.md](docs/config_schema.md): JSON config contract.
 - [docs/manifest_schema.md](docs/manifest_schema.md): podcast manifest contract.
 

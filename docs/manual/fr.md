@@ -46,7 +46,7 @@ imprimé en 3D.
   Le coffret seventies est le modèle conseillé. Quelques petites vis
   autotaraudeuses fixent la carte et ferment le dos.
 
-<img src="../../case/preview_face.png" alt="Boîtier simple" height="200"> <img src="../../case/preview_seventies_face.png" alt="Coffret seventies" height="200">
+<img src="../../case/preview_seventies_face.png" alt="Coffret seventies" height="200">
 
 ## 3. Installer le firmware (premier flash)
 

@@ -1,5 +1,5 @@
 """
-Cabinet "seventies", inspire des designs Dieter Rams des annees 70, pour la carte LCDWIKI ES3C28P.
+Cabinet "seventies", inspire des designs des annees 70, pour la carte LCDWIKI ES3C28P.
 
 Forme : boite droite epuree, facade plate, capot arriere plat visse.
 Facade basse = fenetre ecran chanfreinee ; bande haute = plaque sombre a
