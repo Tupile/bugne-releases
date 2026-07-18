@@ -422,7 +422,7 @@ static bool ensure_eps(podcast_episode_t **ptr, size_t *cap, size_t need)
 static char s_sd_dir[SD_DIR_MAX];   // directory being browsed on the SD screen ("" = root)
 static source_sd_entry_t *s_sd_entries;  // PSRAM listing of s_sd_dir (folders + files)
 static size_t s_sd_entry_count;
-static char s_sd_names[SD_LIST_MAX][SOURCE_SD_NAME_MAX];  // playable files in s_sd_dir
+static char (*s_sd_names)[SOURCE_SD_NAME_MAX];  // playable files in s_sd_dir (PSRAM, ui_start)
 static size_t s_sd_count;
 // Snapshot of the folder that is playing, so next/previous and auto-advance stay
 // in it even if the user browses elsewhere (mirrors the podcast snapshot above).
@@ -434,7 +434,7 @@ static size_t s_play_sd_count;
 // the track title/path buffers (PSRAM) hold the album being browsed, snapshotted
 // into the play buffers when a track starts so auto-advance stays on that album.
 #define LIB_DISP_MAX 128
-static char s_lib_names[LIB_DISP_MAX][LIB_NAME_MAX];
+static char (*s_lib_names)[LIB_NAME_MAX];  // PSRAM, allocated in ui_start
 static size_t s_lib_name_count;
 static char s_lib_artist[LIB_NAME_MAX];
 static char s_lib_album[LIB_NAME_MAX];
@@ -2544,7 +2544,7 @@ static void build_library_albums(lv_obj_t *scr);     // albums of s_lib_artist
 static void build_library_albums_all(lv_obj_t *scr); // every album
 static void build_library_tracks(lv_obj_t *scr);
 
-static char s_lib_albumartists[LIB_DISP_MAX][LIB_NAME_MAX];  // artist of each album in the "By album" list
+static char (*s_lib_albumartists)[LIB_NAME_MAX];  // artist of each album in the "By album" list (PSRAM, ui_start)
 static bool s_lib_from_album;  // tracks screen reached via "By album" (back goes there, not to an artist)
 
 // A back button wired to a specific screen (drill-down levels go up, not home).
@@ -6402,14 +6402,13 @@ static void sleep_timer_cb(lv_timer_t *t)
 
                 // ---- Parental daily usage limit accumulation ----
                 // One second of usage = audible listening (same classification
-                // as the stats: beep and tuner never count) or time on the
-                // game screen with the display awake. The alarm is exempt: its
-                // ring must never burn the child's quota. Persisted to NVS on
-                // usage_tick's ~1/min signal and on the play -> idle edge, so
-                // a power cycle loses at most the last unsaved minute.
+                // as the stats: beep and tuner never count) or time with the
+                // display awake. The alarm is exempt: its ring must never burn
+                // the child's quota. Persisted to NVS on usage_tick's ~1/min
+                // signal and on the play -> idle edge, so a power cycle loses
+                // at most the last unsaved minute.
                 static bool s_usage_counting_prev;
-                bool counting = (listening ||
-                                 (s_active_builder == build_game && !s_asleep)) &&
+                bool counting = (listening || !s_asleep) &&
                                 s_alarm_state != ALARM_RINGING && !s_alarm_beeping;
                 int today = date_today();
                 if (counting && today > 0) {
@@ -6758,6 +6757,14 @@ esp_err_t ui_start(i2c_master_bus_handle_t i2c_bus)
 {
     s_play_q = xQueueCreate(1, sizeof(play_req_t));
     ESP_RETURN_ON_FALSE(s_play_q, ESP_ERR_NO_MEM, TAG, "play queue alloc failed");
+
+    // SD and library browse name tables (~18 KB): PSRAM, not internal .bss
+    // (internal RAM is the scarce resource; these are task-only data buffers).
+    s_sd_names = heap_caps_calloc(SD_LIST_MAX, sizeof(*s_sd_names), MALLOC_CAP_SPIRAM);
+    s_lib_names = heap_caps_calloc(LIB_DISP_MAX, sizeof(*s_lib_names), MALLOC_CAP_SPIRAM);
+    s_lib_albumartists = heap_caps_calloc(LIB_DISP_MAX, sizeof(*s_lib_albumartists), MALLOC_CAP_SPIRAM);
+    ESP_RETURN_ON_FALSE(s_sd_names && s_lib_names && s_lib_albumartists,
+                        ESP_ERR_NO_MEM, TAG, "browse tables alloc failed");
 
     // Resume any persisted background download job after a reboot. Set the idle
     // clock far in the past so the scheduler can start it as soon as Wi-Fi is up.
