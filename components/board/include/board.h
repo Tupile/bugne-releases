@@ -28,6 +28,11 @@ const char *board_device_id(void);
 // MAC (not a hardcoded shared secret). Stable across reboots, 12 hex chars.
 const char *board_ap_password(void);
 
+// Human-readable reason for the last chip reset ("POWERON", "PANIC", ...).
+// Logged at boot and served in /api/status so an unexpected reboot is
+// classifiable remotely (the PSRAM log ring does not survive a reset).
+const char *board_reset_reason_name(void);
+
 #ifdef __cplusplus
 }
 #endif

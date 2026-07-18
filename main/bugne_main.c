@@ -129,7 +129,7 @@ void app_main(void)
     // over Wi-Fi (/api/logs). Best-effort: the console still works without it.
     TRY(logstore_init());
 
-    ESP_LOGI(TAG, "Bugne booting");
+    ESP_LOGI(TAG, "Bugne booting (reset reason: %s)", board_reset_reason_name());
 
     // Dynamic frequency scaling: run at 240 MHz under load (decode, active UI),
     // drop to 160 MHz when idle to save power. The audio (I2S), display (SPI) and

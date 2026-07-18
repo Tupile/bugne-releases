@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "nvs_flash.h"
@@ -22,7 +23,13 @@ static const char *TAG = "config_store";
 #define CONFIG_TMP_PATH  LFS_BASE_PATH "/config.tmp"
 #define CONFIG_FILE_MAX  32768  // hard cap on config.json size
 
-static config_t s_config;
+// The in-memory config is ~31 KB (dominated by the 50 podcast slots): it is
+// allocated from PSRAM at the top of config_store_init instead of sitting in
+// internal .bss (the scarce resource). The alias macro keeps every existing
+// s_config.x / &s_config call site unchanged. Nothing touches the config
+// before config_store_init (it is the first init in app_main, and fatal).
+static config_t *s_cfg;
+#define s_config (*s_cfg)
 static bool s_ready;
 
 static int clampi(int v, int lo, int hi)
@@ -482,6 +489,8 @@ static esp_err_t mount_littlefs(void)
 
 esp_err_t config_store_init(void)
 {
+    s_cfg = heap_caps_calloc(1, sizeof(*s_cfg), MALLOC_CAP_SPIRAM);
+    ESP_RETURN_ON_FALSE(s_cfg, ESP_ERR_NO_MEM, TAG, "config alloc failed");
     ESP_RETURN_ON_ERROR(init_nvs(), TAG, "nvs init failed");
     ESP_RETURN_ON_ERROR(mount_littlefs(), TAG, "littlefs init failed");
     ESP_RETURN_ON_ERROR(load_config(), TAG, "config load failed");

@@ -8,7 +8,16 @@
 
 // ---- pure accumulation (host-testable) ----
 
-static stats_day_t s_days[STATS_MAX_DAYS];
+// The 30-day ring is ~33 KB: on the device it is allocated from PSRAM by
+// stats_init so it does not sit in internal .bss (the scarce resource). NULL
+// until stats_init runs (or forever if the alloc fails): every accessor
+// tolerates that. Host tests keep a plain static array.
+#ifdef ESP_PLATFORM
+static stats_day_t *s_days;
+#else
+static stats_day_t s_days_storage[STATS_MAX_DAYS];
+static stats_day_t *s_days = s_days_storage;
+#endif
 static int s_count;             // valid days; s_days[s_count-1] is the current day
 static int s_ticks_since_save;  // ticks accumulated since the last flush
 
@@ -43,6 +52,7 @@ static void add_title(stats_day_t *d, const char *title)
 bool stats_tick(int date, stats_source_t src, const char *title)
 {
     if (date <= 0) return false;  // no valid clock: drop the tick (no fake dates)
+    if (!s_days) return false;    // stats_init not run yet (or its alloc failed)
 
     bool rolled = false;
     if (s_count == 0 || s_days[s_count - 1].date != date) {
@@ -77,7 +87,7 @@ const stats_day_t *stats_day_at(int i)
 
 void stats_clear(void)
 {
-    memset(s_days, 0, sizeof(s_days));
+    if (s_days) memset(s_days, 0, sizeof(s_days[0]) * STATS_MAX_DAYS);
     s_count = 0;
     s_ticks_since_save = 0;
 }
@@ -89,6 +99,7 @@ void stats_clear(void)
 #ifdef ESP_PLATFORM
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 
 static const char *TAG = "stats";
@@ -167,6 +178,11 @@ static int json_int(const cJSON *o, const char *key)
 
 void stats_init(void)
 {
+    s_days = heap_caps_calloc(STATS_MAX_DAYS, sizeof(*s_days), MALLOC_CAP_SPIRAM);
+    if (!s_days) {
+        ESP_LOGE(TAG, "stats ring alloc failed, stats disabled");
+        return;  // s_ready stays false: flush/reset are no-ops, ticks are dropped
+    }
     FILE *f = fopen(STATS_FILE, "r");
     if (f) {
         fseek(f, 0, SEEK_END);

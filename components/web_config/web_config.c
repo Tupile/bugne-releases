@@ -1395,6 +1395,7 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddStringToObject(o, "version", esp_app_get_description()->version);
     cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(o, "heap_free", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddStringToObject(o, "reset_reason", board_reset_reason_name());
     cJSON_AddNumberToObject(o, "rssi", rssi);
     cJSON_AddStringToObject(o, "ip", ip);
     // Daily usage consumed today (parental limit counter, listening + game
