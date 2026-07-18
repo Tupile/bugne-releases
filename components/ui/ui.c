@@ -3567,13 +3567,25 @@ static void memo_from_name(char *from, size_t size)
     memo_sanitize_sender(from, size, raw);
 }
 
-// POST the finalized capture to the picked peer, as this device's name.
+// POST the finalized capture to the picked peer (or all peers if -1), as this device's name.
 static void memo_send_run(int peer)
 {
     esp_err_t r = ESP_FAIL;
-    if (peer >= 0 && peer < s_memo_peer_count) {
-        char from[MEMO_SENDER_MAX];
-        memo_from_name(from, sizeof(from));
+    char from[MEMO_SENDER_MAX];
+    memo_from_name(from, sizeof(from));
+
+    if (peer == -1) {
+        ESP_LOGI(TAG, "memo: sending to all %d peers", s_memo_peer_count);
+        bool any_ok = false;
+        for (int i = 0; i < s_memo_peer_count; i++) {
+            ESP_LOGI(TAG, "memo: sending to %s (%s:%u)", s_memo_peers[i].name,
+                     s_memo_peers[i].ip, (unsigned)s_memo_peers[i].port);
+            esp_err_t err = memo_send(s_memo_peers[i].ip, s_memo_peers[i].port, from,
+                                      MEMO_ABS_DIR "/" MEMO_REC_NAME, false, NULL, NULL);
+            if (err == ESP_OK) any_ok = true;
+        }
+        if (any_ok) r = ESP_OK;
+    } else if (peer >= 0 && peer < s_memo_peer_count) {
         ESP_LOGI(TAG, "memo: sending to %s (%s:%u)", s_memo_peers[peer].name,
                  s_memo_peers[peer].ip, (unsigned)s_memo_peers[peer].port);
         r = memo_send(s_memo_peers[peer].ip, s_memo_peers[peer].port, from,
@@ -3738,7 +3750,7 @@ static void on_memo_discard(lv_event_t *e)
 static void on_memo_peer(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    if (idx < 0 || idx >= s_memo_peer_count) return;
+    if (idx < -1 || idx >= s_memo_peer_count) return;
     s_memo_state = MEMO_UI_SENDING;
     play_req_t req = { .kind = REQ_MEMO_SEND, .id = idx };
     xQueueOverwrite(s_play_q, &req);
@@ -3824,6 +3836,11 @@ static void build_memo_record(lv_obj_t *scr)
             lv_obj_t *list = lv_list_create(scr);
             lv_obj_set_size(list, scr_w(), scr_h() - 56);
             lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+            if (s_memo_peer_count > 1) {
+                lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_UPLOAD, T(STR_MEMO_SEND_ALL));
+                lv_obj_set_user_data(btn, (void *)(intptr_t)-1);
+                lv_obj_add_event_cb(btn, on_memo_peer, LV_EVENT_CLICKED, NULL);
+            }
             for (int i = 0; i < s_memo_peer_count; i++) {
                 lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_UPLOAD, s_memo_peers[i].name);
                 lv_obj_set_user_data(btn, (void *)(intptr_t)i);

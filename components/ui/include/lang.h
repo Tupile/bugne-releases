@@ -119,6 +119,7 @@ typedef enum {
     STR_MEMO_TAP_RECORD,    // record screen idle hint
     STR_MEMO_SEARCHING,     // peer picker: mDNS browse running
     STR_MEMO_NO_PEERS,      // peer picker: no other Bugne found
+    STR_MEMO_SEND_ALL,      // peer picker: send to all peers
     STR_MEMO_SENDING,       // send in progress
     STR_MEMO_SENT,          // toast: send succeeded
     STR_MEMO_SEND_FAILED,   // toast: send failed
