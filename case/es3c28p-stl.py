@@ -34,6 +34,9 @@ STANDOFF_H = SPK_T + SPK_GAP + SMD_T     # 14.35 : speaker derriere les SMD
 STANDOFF_D = 7.0
 PILOT_D = 2.7
 WIN_W, WIN_H = 46.5, 60.5
+WIN_OPEN_H = WIN_H + 3.0         # ouverture allongee (ecran decale sur la carte)
+WIN_Y = 2.25                     # centre ecran reel (vers le haut), repris du seventies
+WIN_CH = 3.0                     # chanfrein en pente autour de l'ecran
 COVER_T = 2.0
 SCREW_D = 3.4
 
@@ -113,17 +116,34 @@ shell = shell.cut(cq.Workplane("XY",
 cover = (cq.Workplane("XY")
          .box(OUT_W, OUT_H, COVER_T, centered=(True, True, False))
          .edges("|Z").fillet(PCB_R + WALL / 2)
-         .cut(cq.Workplane("XY", origin=(0, GLASS_Y_OFF, 0))
-              .box(WIN_W, WIN_H, COVER_T, centered=(True, True, False))))
+         .cut(cq.Workplane("XY", origin=(0, WIN_Y, 0))
+              .box(WIN_W, WIN_OPEN_H, COVER_T, centered=(True, True, False))))
+# Chanfrein en pente autour de l'ecran (repris du seventies), depuis la face
+# exterieure ; le petit rectangle finit derriere la face interne (COVER_T <
+# WIN_CH) : tout le bord de fenetre est en pente.
+cham = (cq.Workplane("XY", origin=(0, WIN_Y, COVER_T))
+        .rect(WIN_W + 2 * WIN_CH, WIN_OPEN_H + 2 * WIN_CH)
+        .workplane(offset=-WIN_CH)
+        .rect(WIN_W, WIN_OPEN_H).loft())
+cover = cover.cut(cham)
 for x in (-HOLE_X, HOLE_X):
     for y in (-HOLE_Y, HOLE_Y):
         cover = cover.union(cq.Workplane("XY", origin=(x, y, -STACK_T))
                             .circle(STANDOFF_D / 2).extrude(STACK_T))
         cover = cover.cut(cq.Workplane("XY", origin=(x, y, -STACK_T))
                           .circle(SCREW_D / 2).extrude(STACK_T + COVER_T))
-# Trou micro, position approximative (a verifier sur la carte)
-cover = cover.cut(cq.Workplane("XY", origin=(15, 36, -STACK_T))
-                  .circle(1.0).extrude(STACK_T + COVER_T))
+# Trou micro, position approximative (a verifier sur la carte) ; decale de
+# 2.5 vers le haut du micro pour eviter le chanfrein fenetre (le son atteint
+# le micro par le jeu facade/carte), comme le seventies
+MIC_X, MIC_Y, MIC_R = 15, 38.5, 1.0
+cover = cover.cut(cq.Workplane("XY", origin=(MIC_X, MIC_Y, -STACK_T))
+                  .circle(MIC_R).extrude(STACK_T + COVER_T))
+
+# =================== Controles geometriques ===================
+CHAM_Y_TOP = WIN_Y + WIN_OPEN_H / 2 + WIN_CH        # emprise haute du chanfrein
+assert MIC_Y - MIC_R > CHAM_Y_TOP, "trou micro vs chanfrein fenetre"
+assert HOLE_Y - SCREW_D / 2 > CHAM_Y_TOP, "trous de vis vs chanfrein fenetre"
+assert WIN_Y + WIN_OPEN_H / 2 < GLASS_Y_OFF + GLASS_H / 2, "ouverture vs dalle"
 
 # =================== Export ===================
 cq.exporters.export(board, "./es3c28p_carte.stl")
