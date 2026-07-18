@@ -13,6 +13,15 @@ mixed through one shared output:
 It has a touch screen UI (LVGL), a self-hosted Wi-Fi setup flow with a captive
 portal, and an embedded web page to manage Wi-Fi, web radios and podcast feeds.
 
+To get from purchase to the first radio, follow the
+[quick start](docs/quickstart.md) ([français](docs/quickstart_fr.md)).
+
+<p>
+<img src="docs/photo_front.jpg" alt="Bugne home screen" height="300">
+<img src="docs/photo_angle.jpg" alt="Bugne, three-quarter view" height="300">
+<img src="docs/photo_playing.jpg" alt="Bugne playing a podcast" height="300">
+</p>
+
 The firmware was developed with substantial help from AI coding assistants.
 
 ## Status
