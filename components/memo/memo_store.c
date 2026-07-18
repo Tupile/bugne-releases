@@ -120,6 +120,24 @@ FILE *memo_rx_create(const char *sender, char *final_abs, size_t final_size,
     return NULL;
 }
 
+FILE *memo_tk_create(char *final_abs, size_t final_size,
+                     char *part_abs, size_t part_size)
+{
+    if (!source_sd_present()) return NULL;
+    if (source_sd_mkdir(MEMO_DIR) != ESP_OK) return NULL;
+    // tk files are few and short-lived: a static counter is enough, "wx"
+    // (O_EXCL) keeps concurrent receives collision-safe like memo_rx_create.
+    static int s_tk_seq;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        s_tk_seq = (s_tk_seq % 999) + 1;
+        snprintf(final_abs, final_size, MEMO_ABS_DIR "/" MEMO_TK_PREFIX "%03d.wav", s_tk_seq);
+        snprintf(part_abs, part_size, "%s.part", final_abs);
+        FILE *f = fopen(part_abs, "wx");
+        if (f) return f;
+    }
+    return NULL;
+}
+
 void memo_clean_parts(void)
 {
     DIR *dir = opendir(MEMO_ABS_DIR);
@@ -138,6 +156,25 @@ void memo_clean_parts(void)
         char abs[MEMO_NAME_MAX + 20];
         memo_abs_path(abs, sizeof(abs), victims[i]);
         ESP_LOGI(TAG, "removing leftover %s", victims[i]);
+        remove(abs);
+    }
+}
+
+void memo_clean_talkie(void)
+{
+    DIR *dir = opendir(MEMO_ABS_DIR);
+    if (!dir) return;
+    char victims[8][MEMO_NAME_MAX];
+    int nv = 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL && nv < 8) {
+        if (strncmp(de->d_name, MEMO_TK_PREFIX, strlen(MEMO_TK_PREFIX)) == 0)
+            strlcpy(victims[nv++], de->d_name, MEMO_NAME_MAX);
+    }
+    closedir(dir);
+    for (int i = 0; i < nv; i++) {
+        char abs[MEMO_NAME_MAX + 20];
+        memo_abs_path(abs, sizeof(abs), victims[i]);
         remove(abs);
     }
 }

@@ -129,6 +129,10 @@ static const lang_def_t LANGS[] = {
             [STR_MEMO_FULL]          = "Memo box is full",
             [STR_MEMO_EMPTY]         = "No memos yet",
             [STR_MEMO_REC_FAILED]    = "Recording failed",
+            [STR_TALKIE]             = "Walkie-talkie",
+            [STR_TALKIE_HOLD]        = "Hold to talk",
+            [STR_TALKIE_HOLD_HINT]   = "Hold the button to talk",
+            [STR_TALKIE_LEFT_MEMO]   = "Left as a memo",
         },
     },
     {
@@ -249,6 +253,10 @@ static const lang_def_t LANGS[] = {
             [STR_MEMO_FULL]          = "Boîte à mémos pleine",
             [STR_MEMO_EMPTY]         = "Pas encore de mémo",
             [STR_MEMO_REC_FAILED]    = "Échec de l'enregistrement",
+            [STR_TALKIE]             = "Talkie-walkie",
+            [STR_TALKIE_HOLD]        = "Maintenir pour parler",
+            [STR_TALKIE_HOLD_HINT]   = "Maintenez le bouton pour parler",
+            [STR_TALKIE_LEFT_MEMO]   = "Laissé en mémo",
         },
     },
 };

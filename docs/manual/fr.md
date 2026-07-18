@@ -110,9 +110,9 @@ point d'accès d'installation revient pour corriger la configuration.
 ![Écran d'accueil](img/fr/home.png)
 
 De grandes tuiles colorées : Radios web, Podcasts, Bibliothèque, Carte SD,
-et selon ce que les parents ont activé : Multiplications (le jeu), Favoris,
-Accordeur. La roue dentée en haut à droite ouvre les réglages. Quand rien
-ne joue et que l'heure est réglée, elle s'affiche en bas.
+Mémos, et selon ce que les parents ont activé : Multiplications (le jeu),
+Favoris, Accordeur. La roue dentée en haut à droite ouvre les réglages.
+Quand rien ne joue et que l'heure est réglée, elle s'affiche en bas.
 
 ### Écouter la radio
 
@@ -192,6 +192,32 @@ Ouvrez la tuile Accordeur et jouez une note près de l'appareil. L'écran
 affiche le nom de la note, sa fréquence, et une barre qui indique si vous
 êtes trop bas (à gauche) ou trop haut (à droite). Accordez jusqu'à centrer
 la barre.
+
+### Les mémos vocaux
+
+![Mémos](img/fr/memos.png) ![Enregistrement](img/fr/memo_record.png)
+
+La tuile Mémos est une petite boîte vocale. Touchez le bouton +, puis le
+grand bouton rouge, et parlez (jusqu'à une minute). Quand vous arrêtez,
+vous pouvez écouter votre message, le garder sur l'appareil, l'envoyer à
+une autre Bugne de la maison, ou le jeter.
+
+Quand un mémo arrive, un petit point rouge apparaît sur la tuile Mémos et
+un message s'affiche. Ouvrez la tuile et touchez la ligne avec la cloche
+pour l'écouter ; le bouton poubelle supprime le mémo ouvert. L'envoi
+demande le Wi-Fi et une autre Bugne sur le même réseau, et l'appareil
+garde au plus 20 mémos. Les parents peuvent refuser la réception depuis la
+page web (onglet Réglages) ; ce réglage coupe aussi le talkie-walkie
+ci-dessous.
+
+### Le talkie-walkie
+
+Le bouton téléphone de l'écran Mémos ouvre le talkie-walkie. Choisissez
+l'autre Bugne, puis maintenez le grand bouton rouge et parlez : le message
+part tout seul quand vous relâchez, et il est joué aussitôt si l'autre
+Bugne est elle aussi sur son écran talkie-walkie. Sinon, rien n'est perdu :
+le message est déposé dans sa boîte à mémos. Les messages du talkie-walkie
+ne sont pas conservés, et le curseur en bas règle le volume.
 
 ### Les réglages de l'appareil
 

@@ -104,10 +104,10 @@ comes back so you can fix the configuration.
 
 ![Home screen](img/en/home.png)
 
-Big colored tiles: Web radios, Podcasts, Library, SD card, and depending on
-what the parents enabled: Times tables (the game), Favorites, Tuner. The
-gear at the top right opens the settings. When nothing is playing and the
-clock is set, the time shows at the bottom.
+Big colored tiles: Web radios, Podcasts, Library, SD card, Memos, and
+depending on what the parents enabled: Times tables (the game), Favorites,
+Tuner. The gear at the top right opens the settings. When nothing is
+playing and the clock is set, the time shows at the bottom.
 
 ### Listening to web radio
 
@@ -185,6 +185,31 @@ Open the Tuner tile and play a note on your instrument close to the
 device. The screen shows the note name, its frequency, and a bar that tells
 you if you are flat (left) or sharp (right). Tune until the bar is
 centered.
+
+### Voice memos
+
+![Memos](img/en/memos.png) ![Recording](img/en/memo_record.png)
+
+The Memos tile is a little voice mailbox. Tap the + button, then the big
+red button, and speak (up to one minute). When you stop, you can listen to
+your message, keep it on the device, send it to another Bugne in the
+house, or discard it.
+
+When a memo arrives, a small red dot appears on the Memos tile and a
+message pops up. Open the tile and tap the line with the bell to listen to
+it; the trash button deletes the open memo. Sending needs Wi-Fi and
+another Bugne on the same network, and the device keeps at most 20 memos.
+Parents can turn off receiving from the web page (Settings tab); the same
+switch also turns off the walkie-talkie below.
+
+### Walkie-talkie
+
+The phone button on the Memos screen opens the walkie-talkie. Pick the
+other Bugne, then hold the big red button and talk: the message is sent by
+itself when you let go, and it plays right away if the other Bugne is on
+its walkie-talkie screen too. If not, nothing is lost: the message lands
+in its memo box instead. Walkie-talkie messages are not kept, and the
+slider at the bottom sets the volume.
 
 ### Device settings
 

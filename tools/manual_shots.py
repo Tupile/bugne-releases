@@ -32,6 +32,11 @@ SCREENS = [
     ("game", "game_setup"),
     ("game_play", "game_play"),
     ("tuner", "tuner"),
+    # For a non-empty memos list, seed one received memo first:
+    # curl -X POST --data-binary @<16kHz-mono-pcm16.wav> "http://<ip>/api/memo?from=Papa"
+    # and delete it afterwards (POST /api/sd/delete?path=memos).
+    ("memos", "memos"),
+    ("memo_record", "memo_record"),
     ("settings", "settings"),
     ("settings_theme", "settings_theme"),
     ("settings_alarm", "settings_alarm"),

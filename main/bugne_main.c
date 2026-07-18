@@ -110,6 +110,7 @@ static void bg_init_task(void *arg)
     }
     TRY(source_sd_init());
     memo_clean_parts();  // drop memo temporaries left by a power cut mid-record/receive
+    memo_clean_talkie(); // drop ephemeral walkie-talkie files left by a power cut
     library_load();  // load the SD music index if present (best-effort, no card = no-op)
     TRY(source_stream_init());
     TRY(source_sendspin_init());

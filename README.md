@@ -58,6 +58,15 @@ implemented feature set:
   GitHub release (check + one-click install in Settings).
 - Times-tables practice game (1 to 10): on-screen keypad, 10/5 points per
   first/second try, endless play, persistent high score.
+- Voice memos: record a message with the onboard mic (up to 60 s,
+  level-normalized), keep it on the SD card or send it to another Bugne
+  discovered on the same network; the receiver shows a discreet red-dot
+  alert on its home screen and plays the memo from the Memos screen.
+  Parents can turn off receiving from the web page.
+- Walkie-talkie mode: hold-to-talk voice messages between two Bugnes on
+  the same network, auto-played when both devices are on the talkie
+  screen (stored as a regular memo otherwise, never lost); ephemeral by
+  design, with a volume slider on the memo and talkie screens.
 - LVGL touch UI, kid-friendly "playful tiles" design: home screen of large
   rounded tiles, round transport buttons, floating mini player bar, card list
   rows, now-playing with big bold titles, two setup QR codes, screen sleep,

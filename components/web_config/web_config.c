@@ -923,8 +923,20 @@ static esp_err_t memo_post(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad memo size");
         return ESP_OK;
     }
+
+    char query[96] = "", raw_from[64] = "", talkie_v[4] = "", from[MEMO_SENDER_MAX];
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    httpd_query_key_value(query, "from", raw_from, sizeof(raw_from));
+    httpd_query_key_value(query, "talkie", talkie_v, sizeof(talkie_v));
+    memo_sanitize_sender(from, sizeof(from), raw_from);
+    // A talkie message is ephemeral (auto-played then deleted) only when this
+    // device is on the talkie screen right now; otherwise it falls back to a
+    // normal stored memo (answered 202, never lost to a leave-screen race).
+    bool talkie = (talkie_v[0] == '1');
+    bool ephemeral = talkie && ui_talkie_active();
+
     uint64_t free_b = 0;
-    bool full = memo_count() >= MEMO_MAX_COUNT ||
+    bool full = (!ephemeral && memo_count() >= MEMO_MAX_COUNT) ||
                 !source_sd_usage(NULL, &free_b) || free_b < req->content_len + (4u << 20);
     if (full) {
         httpd_resp_set_status(req, "507 Insufficient Storage");
@@ -932,13 +944,10 @@ static esp_err_t memo_post(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char query[96] = "", raw_from[64] = "", from[MEMO_SENDER_MAX];
-    httpd_req_get_url_query_str(req, query, sizeof(query));
-    httpd_query_key_value(query, "from", raw_from, sizeof(raw_from));
-    memo_sanitize_sender(from, sizeof(from), raw_from);
-
     char final_abs[96], part_abs[104];
-    FILE *f = memo_rx_create(from, final_abs, sizeof(final_abs), part_abs, sizeof(part_abs));
+    FILE *f = ephemeral
+            ? memo_tk_create(final_abs, sizeof(final_abs), part_abs, sizeof(part_abs))
+            : memo_rx_create(from, final_abs, sizeof(final_abs), part_abs, sizeof(part_abs));
     if (!f) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot create file");
         return ESP_OK;
@@ -989,8 +998,16 @@ static esp_err_t memo_post(httpd_req_t *req)
         else httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "receive failed");
         return ESP_OK;
     }
-    ESP_LOGI(TAG, "memo received from %s (%u bytes)", from, (unsigned)total);
-    ui_memo_received(from);
+    ESP_LOGI(TAG, "memo received from %s (%u bytes%s)", from, (unsigned)total,
+             ephemeral ? ", talkie" : "");
+    if (ephemeral) {
+        ui_talkie_received(from, final_abs);
+    } else {
+        ui_memo_received(from);
+        if (talkie) {  // talkie message but not in talkie mode: kept as a memo
+            httpd_resp_set_status(req, "202 Accepted");
+        }
+    }
     return httpd_resp_sendstr(req, "ok");
 }
 

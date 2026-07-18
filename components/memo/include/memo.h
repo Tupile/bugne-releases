@@ -7,6 +7,9 @@
 //   my-NNN.wav              own kept memo
 //   rx-<sender>-NNN.new.wav received, not listened to yet (unread)
 //   rx-<sender>-NNN.wav     received, listened to
+//   tk-NNN.wav              ephemeral walkie-talkie message (auto-played then
+//                           deleted; memo_name_parse rejects it, so it never
+//                           appears in the list, badge, or 20-memo cap)
 //   .rec.wav / *.part       in-flight temporaries, ignored by every scan
 //
 // memo_wav.c and memo_name.c are pure (no ESP includes), host-tested in
@@ -30,6 +33,7 @@ extern "C" {
 #define MEMO_DIR             "memos"              // relative to the SD root
 #define MEMO_ABS_DIR         "/sdcard/" MEMO_DIR
 #define MEMO_REC_NAME        ".rec.wav"           // finalized capture awaiting Keep/Send
+#define MEMO_TK_PREFIX       "tk-"                // ephemeral walkie-talkie files
 #define MEMO_SENDER_MAX      24
 #define MEMO_NAME_MAX        64
 #define MEMO_WAV_HEADER_BYTES 44
@@ -95,16 +99,28 @@ int memo_keep_rec(void);
 FILE *memo_rx_create(const char *sender, char *final_abs, size_t final_size,
                      char *part_abs, size_t part_size);
 
+// Allocate an ephemeral walkie-talkie slot (tk-NNN.wav), same contract as
+// memo_rx_create. Exempt from the 20-memo cap by construction.
+FILE *memo_tk_create(char *final_abs, size_t final_size,
+                     char *part_abs, size_t part_size);
+
 // Delete leftover temporaries (*.part, .rec.wav). Call once after SD mount.
 void memo_clean_parts(void);
 
+// Delete every ephemeral walkie-talkie file (tk-*). Call after SD mount and
+// when a talkie session ends. Never touches .rec.wav (a send may hold it).
+void memo_clean_talkie(void);
+
 // ---- memo_send.c ----
 
-// Stream a stored WAV to a peer as POST http://<ip>:<port>/api/memo?from=<from>.
-// from must already be sanitized. pct (may be NULL) gets 0..100 progress.
-// ESP_OK only when the whole file was sent and the peer answered 200.
+// Stream a stored WAV to a peer as POST http://<ip>:<port>/api/memo?from=<from>
+// (&talkie=1 appended when talkie). from must already be sanitized. pct (may be
+// NULL) gets 0..100 progress; http_status (may be NULL) gets the peer's answer.
+// ESP_OK only when the whole file was sent and the peer answered 200 or 202
+// (202 = talkie message stored as a normal memo, receiver not in talkie mode).
 esp_err_t memo_send(const char *ip, uint16_t port, const char *from,
-                    const char *abs_path, volatile int *pct);
+                    const char *abs_path, bool talkie, int *http_status,
+                    volatile int *pct);
 
 #ifdef __cplusplus
 }

@@ -15,8 +15,10 @@
 static const char *TAG = "memo";
 
 esp_err_t memo_send(const char *ip, uint16_t port, const char *from,
-                    const char *abs_path, volatile int *pct)
+                    const char *abs_path, bool talkie, int *http_status,
+                    volatile int *pct)
 {
+    if (http_status) *http_status = 0;
     struct stat st;
     if (stat(abs_path, &st) != 0 || st.st_size <= MEMO_WAV_HEADER_BYTES)
         return ESP_ERR_INVALID_ARG;
@@ -24,7 +26,8 @@ esp_err_t memo_send(const char *ip, uint16_t port, const char *from,
     if (!f) return ESP_FAIL;
 
     char url[160];
-    snprintf(url, sizeof(url), "http://%s:%u/api/memo?from=%s", ip, (unsigned)port, from);
+    snprintf(url, sizeof(url), "http://%s:%u/api/memo?from=%s%s", ip, (unsigned)port,
+             from, talkie ? "&talkie=1" : "");
     esp_http_client_config_t cfg = {
         .url = url,
         .method = HTTP_METHOD_POST,
@@ -55,7 +58,10 @@ esp_err_t memo_send(const char *ip, uint16_t port, const char *from,
         if (ok) {
             if (esp_http_client_fetch_headers(client) < 0) ok = false;
             int status = esp_http_client_get_status_code(client);
-            if (status != 200) {
+            if (http_status) *http_status = status;
+            // 202 = talkie message accepted but stored as a normal memo
+            // (receiver not in talkie mode); delivery still succeeded.
+            if (status != 200 && status != 202) {
                 ESP_LOGW(TAG, "peer answered %d", status);
                 ok = false;
             }

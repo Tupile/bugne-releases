@@ -68,6 +68,13 @@ bool ui_remote_nav(const char *screen);
 // flag consumed by the UI task (toast + home badge refresh); no LVGL call here.
 void ui_memo_received(const char *from);
 
+// Walkie-talkie bridges for the memo receive endpoint (httpd task safe).
+// ui_talkie_active: true while the talkie screen is shown (incoming talkie
+// messages auto-play). ui_talkie_received: hand over a stored ephemeral tk
+// file for auto-play; keep-latest, flag-only, consumed by the UI tick.
+bool ui_talkie_active(void);
+void ui_talkie_received(const char *from, const char *abs_path);
+
 // Snapshot of what is currently playing, for the web status view.
 typedef struct {
     bool     active;       // something is playing (or paused)

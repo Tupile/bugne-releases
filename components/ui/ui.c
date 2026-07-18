@@ -226,7 +226,8 @@ static char s_meta_artist[64];  // tag artist of the playing SD file
 // The worker task handles blocking operations off the UI task: track playback
 // and podcast RSS refresh (network fetch + parse).
 typedef enum { REQ_PLAY, REQ_REFRESH, REQ_REFRESH_ALL, REQ_DOWNLOAD_JOB, REQ_BEEP,
-               REQ_MEMO_RECORD, REQ_MEMO_PLAY, REQ_MEMO_PEERS, REQ_MEMO_SEND } req_kind_t;
+               REQ_MEMO_RECORD, REQ_MEMO_PLAY, REQ_MEMO_PEERS, REQ_MEMO_SEND,
+               REQ_TALKIE_SEND, REQ_TALKIE_PLAY } req_kind_t;
 typedef struct {
     req_kind_t kind;
     bool is_file;
@@ -257,6 +258,21 @@ static lv_obj_t *s_memo_time_lbl, *s_memo_prog_bar, *s_memo_play_btn;  // reset 
 static void memo_record_run(void);
 static void memo_play_run(const char *path);
 static void memo_send_run(int peer);
+
+// ---- Walkie-talkie session state (push-to-talk over the memo pipeline) ----
+// A session = the talkie screen is shown; the correspondent is picked at the
+// start and pinned for the whole session. Incoming talkie messages (ephemeral
+// tk- files stored by web_config's memo_post) auto-play only while the screen
+// is up; s_talkie_active is read by the httpd task (ui_talkie_active).
+static net_peer_t s_talkie_peer;           // session correspondent (name + ip pinned)
+static bool s_talkie_have_peer;
+static volatile bool s_talkie_active;      // talkie screen shown right now
+static volatile bool s_talkie_rx_pending;  // an ephemeral tk file awaits auto-play
+static char s_talkie_rx_from[MEMO_SENDER_MAX];  // sender behind the pending file
+static char s_talkie_rx_path[96];               // absolute path of the pending file
+static lv_obj_t *s_talkie_status_lbl;      // updated in place by the tick; reset in show()
+static int s_talkie_peers_shown;           // peer count build_talkie last rendered
+static void talkie_send_run(void);
 static char s_now_title[64];
 // Current play target as passed to ui_play, so the now-playing star button
 // (B2 favorites) can resolve a stable identity: a stream URL matching a
@@ -1061,6 +1077,15 @@ static void play_task(void *arg)
                 memo_send_run(req.id);
                 continue;
             }
+            if (req.kind == REQ_TALKIE_SEND) {
+                talkie_send_run();
+                continue;
+            }
+            if (req.kind == REQ_TALKIE_PLAY) {
+                memo_play_run(req.target);
+                remove(req.target);  // ephemeral: never kept, even when interrupted
+                continue;
+            }
             ESP_LOGI(TAG, "play request: %s (%s)", req.target, req.is_file ? "file" : "stream");
             s_stop_requested = false;  // a fresh play; a later stop re-arms it
             // Clear here too (not only in ui_play): if the previous play failed
@@ -1284,6 +1309,7 @@ static void show(screen_builder_t builder)
     s_memo_time_lbl = NULL;  // same for the memo record/play widgets
     s_memo_prog_bar = NULL;
     s_memo_play_btn = NULL;
+    s_talkie_status_lbl = NULL;  // same for the talkie status line
     s_sleep_lbl = NULL;  // same for the sleep timer label
     s_ep_msg = NULL;  // same for the episodes status line (rebuilt by its builder)
     s_home_clock = NULL;  // same for the home clock label (rebuilt by build_home)
@@ -1320,6 +1346,8 @@ static void build_game_setup(lv_obj_t *scr);  // table picker shown before build
 static void build_memos(lv_obj_t *scr);        // memo list (tile target)
 static void build_memo_record(lv_obj_t *scr);  // record/preview/send state machine
 static void build_memo_play(lv_obj_t *scr);    // single-memo player
+static void build_talkie(lv_obj_t *scr);       // walkie-talkie session screen
+static void on_open_talkie(lv_event_t *e);     // entry button on build_memos
 static lv_obj_t *alarm_row(lv_obj_t *parent, lv_flex_align_t main_align);  // card row, defined with build_alarm_edit
 static void alarm_fire(int idx);     // alarm engine, defined after exit_sleep
 static void alarm_finish(bool snooze);
@@ -3529,20 +3557,27 @@ static void memo_play_run(const char *path)
     audio_arbiter_release(AUDIO_SOURCE_MEMO);
 }
 
+// This device's sanitized sender name (device name, else "Bugne <id>").
+static void memo_from_name(char *from, size_t size)
+{
+    char raw[48];
+    const config_t *c = config_store_get();
+    if (c && c->device_name[0]) strlcpy(raw, c->device_name, sizeof(raw));
+    else snprintf(raw, sizeof(raw), "Bugne %s", board_device_id());
+    memo_sanitize_sender(from, size, raw);
+}
+
 // POST the finalized capture to the picked peer, as this device's name.
 static void memo_send_run(int peer)
 {
     esp_err_t r = ESP_FAIL;
     if (peer >= 0 && peer < s_memo_peer_count) {
-        char raw[48], from[MEMO_SENDER_MAX];
-        const config_t *c = config_store_get();
-        if (c && c->device_name[0]) strlcpy(raw, c->device_name, sizeof(raw));
-        else snprintf(raw, sizeof(raw), "Bugne %s", board_device_id());
-        memo_sanitize_sender(from, sizeof(from), raw);
+        char from[MEMO_SENDER_MAX];
+        memo_from_name(from, sizeof(from));
         ESP_LOGI(TAG, "memo: sending to %s (%s:%u)", s_memo_peers[peer].name,
                  s_memo_peers[peer].ip, (unsigned)s_memo_peers[peer].port);
         r = memo_send(s_memo_peers[peer].ip, s_memo_peers[peer].port, from,
-                      MEMO_ABS_DIR "/" MEMO_REC_NAME, NULL);
+                      MEMO_ABS_DIR "/" MEMO_REC_NAME, false, NULL, NULL);
     }
     if (r == ESP_OK) {
         remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);  // delivered: nothing kept locally
@@ -3552,6 +3587,27 @@ static void memo_send_run(int peer)
         s_memo_state = MEMO_UI_PREVIEW;  // keep the capture so the child can retry
         s_memo_result = -1;
     }
+}
+
+// POST the finalized capture to the session correspondent as a talkie message.
+// Ephemeral semantics: the capture is never kept for a retry (you just talk
+// again). s_memo_result: 1 = auto-played live (200), 2 = peer not in talkie
+// mode, stored as a normal memo there (202), -1 = failed.
+static void talkie_send_run(void)
+{
+    esp_err_t r = ESP_FAIL;
+    int status = 0;
+    if (s_talkie_have_peer) {
+        char from[MEMO_SENDER_MAX];
+        memo_from_name(from, sizeof(from));
+        ESP_LOGI(TAG, "talkie: sending to %s (%s:%u)", s_talkie_peer.name,
+                 s_talkie_peer.ip, (unsigned)s_talkie_peer.port);
+        r = memo_send(s_talkie_peer.ip, s_talkie_peer.port, from,
+                      MEMO_ABS_DIR "/" MEMO_REC_NAME, true, &status, NULL);
+    }
+    remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);
+    s_memo_state = MEMO_UI_IDLE;
+    s_memo_result = (r != ESP_OK) ? -1 : (status == 202 ? 2 : 1);
 }
 
 // Stop a memo playback and wait for the worker to close the file (bounded;
@@ -3834,7 +3890,18 @@ static void build_memo_play(lv_obj_t *scr)
     lv_obj_align(del, LV_ALIGN_TOP_RIGHT, -8, 8);
     s_memo_play_btn = make_round_btn(scr, s_memo_playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
                                      72, true, on_memo_play_toggle);
-    lv_obj_align(s_memo_play_btn, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(s_memo_play_btn, LV_ALIGN_CENTER, 0, -8);
+    // Volume, now-playing pattern: s_np_vol so a web volume change moves it.
+    lv_obj_t *vol = lv_slider_create(scr);
+    lv_obj_set_width(vol, scr_w() - 60);
+    lv_slider_set_range(vol, 0, audio_get_volume_limit());
+    lv_slider_set_value(vol, audio_get_volume(), LV_ANIM_OFF);
+    lv_obj_align(vol, LV_ALIGN_BOTTOM_MID, 12, -16);
+    lv_obj_add_event_cb(vol, on_volume, LV_EVENT_VALUE_CHANGED, NULL);
+    s_np_vol = vol;
+    lv_obj_t *vicon = lv_label_create(scr);
+    lv_label_set_text(vicon, LV_SYMBOL_VOLUME_MAX);
+    lv_obj_align(vicon, LV_ALIGN_BOTTOM_LEFT, PAD_SIDE, -18);
 }
 
 static void on_memo_row(lv_event_t *e)
@@ -3866,9 +3933,21 @@ static void on_memo_row(lv_event_t *e)
 static void build_memos(lv_obj_t *scr)
 {
     add_back_button(scr);
-    add_title(scr, T(STR_MEMOS));  // two corner widgets: never add_title_wide
+    // Two round 44 px icon buttons top-right (record at -8, talkie at -60):
+    // center the title in the free gap, same trick as build_settings.
+    lv_obj_t *title = add_title(scr, T(STR_MEMOS));
+    if (scr_w() > scr_h()) {
+        lv_obj_set_width(title, 138);
+        lv_obj_align(title, LV_ALIGN_TOP_MID, -30, 8);
+    } else {
+        lv_obj_set_style_text_font(title, &bugne_font_14, 0);
+        lv_obj_set_width(title, 76);
+        lv_obj_align(title, LV_ALIGN_TOP_MID, -26, 12);
+    }
     lv_obj_t *rec = make_round_btn(scr, LV_SYMBOL_PLUS, 44, true, on_memo_new);
     lv_obj_align(rec, LV_ALIGN_TOP_RIGHT, -8, 8);
+    lv_obj_t *tk = make_round_btn(scr, LV_SYMBOL_CALL, 44, false, on_open_talkie);
+    lv_obj_align(tk, LV_ALIGN_TOP_RIGHT, -60, 8);
 
     if (!s_memo_entries) {
         s_memo_entries = heap_caps_malloc(sizeof(*s_memo_entries) * MEMO_MAX_COUNT,
@@ -3904,6 +3983,145 @@ void ui_memo_received(const char *from)
 {
     strlcpy(s_memo_rx_from, from ? from : "", sizeof(s_memo_rx_from));
     s_memo_rx_flag = true;
+}
+
+// ---- Walkie-talkie (push-to-talk over the memo pipeline) ----
+// The session screen: pick a correspondent (same mDNS browse as the memo
+// send), then hold the big button to talk; release auto-sends. Incoming
+// talkie messages auto-play while this screen is up and are deleted after
+// playback (ephemeral tk- files, invisible to the memo list and the 20-cap).
+
+bool ui_talkie_active(void) { return s_talkie_active; }
+
+// httpd-task bridge (mirror of ui_memo_received: flag only, no LVGL).
+// Keep-latest: a newer message replaces (and deletes) a still-pending one;
+// walkie-talkie semantics want the latest utterance, not a queue.
+void ui_talkie_received(const char *from, const char *abs_path)
+{
+    if (s_talkie_rx_pending && strcmp(s_talkie_rx_path, abs_path) != 0) {
+        remove(s_talkie_rx_path);
+    }
+    strlcpy(s_talkie_rx_from, from ? from : "", sizeof(s_talkie_rx_from));
+    strlcpy(s_talkie_rx_path, abs_path, sizeof(s_talkie_rx_path));
+    s_talkie_rx_pending = true;
+}
+
+// Session teardown, run by the tick's exit edge so every way off the screen
+// (back button, quiet-hours kick, remote nav, alarm) shares one code path.
+static void talkie_session_end(void)
+{
+    s_talkie_active = false;
+    s_talkie_have_peer = false;
+    s_talkie_rx_pending = false;
+    memo_stop_sync();       // end an auto-play before deleting its file
+    s_memo_state = MEMO_UI_IDLE;  // drop an unsent finalized capture (ephemeral)
+    memo_clean_talkie();    // tk- files only, never .rec.wav (a send may hold it)
+}
+
+static void on_open_talkie(lv_event_t *e)
+{
+    (void)e;
+    if (play_denied()) return;
+    if (!source_sd_present()) return;
+    s_memo_state = MEMO_UI_IDLE;
+    s_talkie_have_peer = false;
+    s_talkie_rx_pending = false;
+    s_talkie_active = true;
+    s_memo_peer_count = -1;  // browse running
+    play_req_t req = { .kind = REQ_MEMO_PEERS };
+    xQueueOverwrite(s_play_q, &req);
+    show(build_talkie);
+}
+
+static void on_talkie_back(lv_event_t *e)
+{
+    (void)e;
+    show(build_memos);  // teardown runs on the tick's exit edge
+}
+
+static void on_talkie_peer(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (idx < 0 || idx >= s_memo_peer_count) return;
+    s_talkie_peer = s_memo_peers[idx];
+    s_talkie_have_peer = true;
+    show(build_talkie);
+}
+
+// Hold-to-talk. Press starts the capture (inert unless idle, so a re-press
+// cannot stomp a queued auto-send: the play queue is depth-1 overwrite);
+// pressing during an incoming auto-play interrupts it, like a real
+// walkie-talkie. Release (or slide-off) finalizes; the tick auto-sends.
+static void on_talkie_press(lv_event_t *e)
+{
+    (void)e;
+    if (s_memo_state != MEMO_UI_IDLE) return;
+    uint64_t free_b = 0;
+    if (!source_sd_present() || !source_sd_usage(NULL, &free_b) || free_b < (4u << 20)) {
+        toast(T(STR_MEMO_REC_FAILED));  // no card or almost full
+        return;
+    }
+    s_memo_rec_ms = 0;
+    s_memo_state = MEMO_UI_RECORDING;
+    memo_request(REQ_MEMO_RECORD, NULL);
+}
+
+static void on_talkie_release(lv_event_t *e)
+{
+    (void)e;  // idempotent: PRESS_LOST then RELEASED is harmless
+    if (s_memo_state == MEMO_UI_RECORDING) s_memo_stop = true;
+}
+
+static void build_talkie(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_talkie_back);
+    s_talkie_peers_shown = s_memo_peer_count;
+    if (!s_talkie_have_peer) {  // session start: pick the correspondent
+        add_title_wide(scr, T(STR_TALKIE));
+        if (s_memo_peer_count < 0) {
+            empty_state_label(scr, STR_MEMO_SEARCHING);
+        } else if (s_memo_peer_count == 0) {
+            empty_state_label(scr, STR_MEMO_NO_PEERS);
+        } else {
+            lv_obj_t *list = lv_list_create(scr);
+            lv_obj_set_size(list, scr_w(), scr_h() - 56);
+            lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+            for (int i = 0; i < s_memo_peer_count; i++) {
+                lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_CALL, s_memo_peers[i].name);
+                lv_obj_set_user_data(btn, (void *)(intptr_t)i);
+                lv_obj_add_event_cb(btn, on_talkie_peer, LV_EVENT_CLICKED, NULL);
+            }
+            list_titles_static(list);
+        }
+        return;
+    }
+    // Session layout. The tick updates the status label IN PLACE: this layout
+    // must never be rebuilt while recording (the held button would be
+    // destroyed under the finger and its release event lost).
+    add_title_wide(scr, s_talkie_peer.name);
+    s_talkie_status_lbl = lv_label_create(scr);
+    lv_label_set_text(s_talkie_status_lbl, T(STR_TALKIE_HOLD));
+    muted(s_talkie_status_lbl);
+    lv_obj_align(s_talkie_status_lbl, LV_ALIGN_CENTER, 0, -58);
+    // Filled red circle, same record affordance as build_memo_record.
+    lv_obj_t *ptt = make_round_btn(scr, "", 96, true, NULL);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0xE53935), 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0xB71C1C), LV_STATE_PRESSED);
+    lv_obj_align(ptt, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_add_event_cb(ptt, on_talkie_press, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ptt, on_talkie_release, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ptt, on_talkie_release, LV_EVENT_PRESS_LOST, NULL);
+    // Volume, now-playing pattern: s_np_vol so a web volume change moves it.
+    lv_obj_t *vol = lv_slider_create(scr);
+    lv_obj_set_width(vol, scr_w() - 60);
+    lv_slider_set_range(vol, 0, audio_get_volume_limit());
+    lv_slider_set_value(vol, audio_get_volume(), LV_ANIM_OFF);
+    lv_obj_align(vol, LV_ALIGN_BOTTOM_MID, 12, -16);
+    lv_obj_add_event_cb(vol, on_volume, LV_EVENT_VALUE_CHANGED, NULL);
+    s_np_vol = vol;
+    lv_obj_t *vicon = lv_label_create(scr);
+    lv_label_set_text(vicon, LV_SYMBOL_VOLUME_MAX);
+    lv_obj_align(vicon, LV_ALIGN_BOTTOM_LEFT, PAD_SIDE, -18);
 }
 
 static void on_open_sd(lv_event_t *e)        { (void)e; show(build_sd); }
@@ -5446,6 +5664,8 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "tuner",             build_tuner },
     { "memos",             build_memos },
     { "memo_record",       build_memo_record },
+    { "talkie",            build_talkie },       // correspondent picker
+    { "talkie_ready",      build_talkie },       // fake session peer, PTT state
     { "settings",          build_settings },
     { "settings_theme",    build_settings_theme },
     { "settings_alarm",    build_settings_alarm },
@@ -5584,13 +5804,35 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         } else if (strcmp(name, "tuner") == 0) {
             tuner_begin();  // mimic on_open_tuner: takeover + capture task
-        } else if (strcmp(name, "memos") == 0 || strcmp(name, "memo_record") == 0) {
+        } else if (strcmp(name, "memos") == 0 || strcmp(name, "memo_record") == 0 ||
+                   strcmp(name, "talkie") == 0 || strcmp(name, "talkie_ready") == 0) {
             if (parental_blocked()) {
                 strlcpy(name, "home", sizeof(name));  // same refusal as the tile
             } else if (strcmp(name, "memo_record") == 0) {
                 s_memo_state = MEMO_UI_IDLE;  // mimic on_memo_new: fresh record screen
                 s_memo_rec_ms = 0;
                 s_memo_state_shown = MEMO_UI_IDLE;
+            } else if (strcmp(name, "talkie") == 0) {
+                // Mimic on_open_talkie: fresh session, browse for peers.
+                s_memo_state = MEMO_UI_IDLE;
+                s_talkie_have_peer = false;
+                s_talkie_rx_pending = false;
+                s_talkie_active = true;
+                s_memo_peer_count = -1;
+                play_req_t req = { .kind = REQ_MEMO_PEERS };
+                xQueueOverwrite(s_play_q, &req);
+            } else if (strcmp(name, "talkie_ready") == 0) {
+                // Fake session peer so remote screenshots and the curl
+                // auto-play bench test reach the PTT state without touch
+                // taps (same precedent as "game_play").
+                s_memo_state = MEMO_UI_IDLE;
+                s_talkie_rx_pending = false;
+                s_talkie_active = true;
+                memset(&s_talkie_peer, 0, sizeof(s_talkie_peer));
+                strlcpy(s_talkie_peer.name, "Bench", sizeof(s_talkie_peer.name));
+                strlcpy(s_talkie_peer.ip, "192.0.2.1", sizeof(s_talkie_peer.ip));
+                s_talkie_peer.port = 80;
+                s_talkie_have_peer = true;
             }
         }
         for (int i = 0; i < NAV_SCREEN_COUNT; i++) {
@@ -5772,7 +6014,7 @@ static void sleep_timer_cb(lv_timer_t *t)
                     lv_bar_set_value(s_memo_prog_bar, s_memo_rec_ms, LV_ANIM_OFF);
                 }
             }
-        } else {
+        } else if (s_active_builder != build_talkie) {  // talkie records off this screen
             if (s_memo_state == MEMO_UI_RECORDING) s_memo_stop = true;  // capture ends off-screen
             s_memo_state_shown = s_memo_state;  // track silently for a fresh re-entry
             s_memo_peers_shown = s_memo_peer_count;
@@ -5787,8 +6029,13 @@ static void sleep_timer_cb(lv_timer_t *t)
         if (s_memo_result != 0) {
             int r = s_memo_result;
             s_memo_result = 0;
+            // On the talkie screen a failed capture is a too-short tap, not an
+            // error: hint at the hold gesture instead of "Recording failed".
             toast(r == 1 ? T(STR_MEMO_SENT)
-                : r == -1 ? T(STR_MEMO_SEND_FAILED) : T(STR_MEMO_REC_FAILED));
+                : r == 2 ? T(STR_TALKIE_LEFT_MEMO)
+                : r == -1 ? T(STR_MEMO_SEND_FAILED)
+                : (s_active_builder == build_talkie ? T(STR_TALKIE_HOLD_HINT)
+                                                    : T(STR_MEMO_REC_FAILED)));
             if (r == 1 && s_active_builder == build_memo_record) show(build_memos);
         }
         if (s_memo_rx_flag) {
@@ -5803,6 +6050,72 @@ static void sleep_timer_cb(lv_timer_t *t)
             if (s_active_builder == build_home || s_active_builder == build_memos) {
                 show(s_active_builder);  // badge dot / new list row appears
             }
+        }
+
+        // ---- Walkie-talkie glue ----
+        bool is_talkie = (s_active_builder == build_talkie);
+        static bool s_was_talkie;
+        if (s_was_talkie && !is_talkie) talkie_session_end();
+        s_was_talkie = is_talkie;
+        s_talkie_active = is_talkie;
+        if (is_talkie && !s_talkie_have_peer) {
+            // Correspondent picker: rebuild when the mDNS browse lands.
+            if (s_memo_peer_count != s_talkie_peers_shown) show(build_talkie);
+        } else if (is_talkie) {
+            // Auto-send: the capture just finalized (.rec.wav ready). Queue
+            // only when the depth-1 queue is empty so a just-queued alarm
+            // beep is never stomped (retried next tick).
+            if (s_memo_state == MEMO_UI_PREVIEW &&
+                uxQueueMessagesWaiting(s_play_q) == 0) {
+                s_memo_state = MEMO_UI_SENDING;
+                play_req_t req = { .kind = REQ_TALKIE_SEND };
+                xQueueOverwrite(s_play_q, &req);
+            }
+            // Auto-play a pending incoming message once the worker is free.
+            // memo_request, not a bare queue write: it must take the arbiter
+            // over from a still-playing source or the bounded acquire loop in
+            // memo_play_run would give up and the message would die unheard.
+            if (s_talkie_rx_pending && s_memo_state == MEMO_UI_IDLE &&
+                uxQueueMessagesWaiting(s_play_q) == 0 && !play_denied()) {
+                char path[sizeof(s_talkie_rx_path)];
+                strlcpy(path, s_talkie_rx_path, sizeof(path));
+                s_talkie_rx_pending = false;
+                memo_request(REQ_TALKIE_PLAY, path);
+            }
+            // Status line, updated IN PLACE (never rebuild this layout: the
+            // PTT button may be under the child's finger).
+            if (s_talkie_status_lbl) {
+                char buf[64];
+                const char *want;
+                if (s_memo_state == MEMO_UI_RECORDING) {
+                    int sdur = s_memo_rec_ms / 1000;
+                    snprintf(buf, sizeof(buf), "%d:%02d / %d:00", sdur / 60,
+                             sdur % 60, MEMO_MAX_MS / 60000);
+                    want = buf;
+                } else if (s_memo_state == MEMO_UI_PREVIEW ||
+                           s_memo_state == MEMO_UI_SENDING) {
+                    want = T(STR_MEMO_SENDING);
+                } else if (s_memo_playing) {
+                    char nice[MEMO_SENDER_MAX];
+                    strlcpy(nice, s_talkie_rx_from, sizeof(nice));
+                    for (char *p = nice; *p; p++) {
+                        if (*p == '-') *p = ' ';
+                    }
+                    snprintf(buf, sizeof(buf), T(STR_MEMO_FROM_FMT), nice);
+                    want = buf;
+                } else {
+                    want = T(STR_TALKIE_HOLD);
+                }
+                if (strcmp(lv_label_get_text(s_talkie_status_lbl), want) != 0) {
+                    lv_label_set_text(s_talkie_status_lbl, want);
+                }
+            }
+        } else if (s_talkie_rx_pending) {
+            // Stored between the httpd-side ui_talkie_active check and this
+            // tick, but the screen is gone: drop it (the sender was already
+            // answered 200; walkie messages are ephemeral).
+            remove(s_talkie_rx_path);
+            s_talkie_rx_pending = false;
         }
     }
 
@@ -5834,8 +6147,12 @@ static void sleep_timer_cb(lv_timer_t *t)
     // its volume slider range matches the new ceiling.
     if (config_store_get()->ui.volume_max != audio_get_volume_limit()) {
         audio_set_volume_limit(config_store_get()->ui.volume_max);
+        // NOT build_talkie: a rebuild while the child holds the PTT button
+        // would destroy it under the finger and lose the release event; its
+        // slider range goes stale but audio_set_volume clamps anyway.
         if (s_active_builder == build_now_playing ||
-            s_active_builder == build_sendspin_playing) {
+            s_active_builder == build_sendspin_playing ||
+            s_active_builder == build_memo_play) {
             show(s_active_builder);
         }
     }
@@ -6371,7 +6688,8 @@ static void sleep_timer_cb(lv_timer_t *t)
                     if (audio_is_active() || s_play_retrying) ui_stop();
                     if (s_active_builder == build_now_playing ||
                         s_active_builder == build_sendspin_playing ||
-                        s_active_builder == build_game) show(build_home);
+                        s_active_builder == build_game ||
+                        s_active_builder == build_talkie) show(build_home);
                     toast(q ? T(STR_QUIET_HOURS) : T(STR_LIMIT_REACHED));
                     ESP_LOGI(TAG, "%s, playback stopped",
                              q ? "quiet hours: window opened" : "daily limit: quota reached");
@@ -6427,9 +6745,11 @@ static void sleep_timer_cb(lv_timer_t *t)
         if (inactive < 400) exit_sleep();
     } else if (s_sleep_ms > 0 && inactive >= s_sleep_ms &&
                s_active_builder != build_tuner &&
+               s_active_builder != build_talkie &&
                s_memo_state != MEMO_UI_RECORDING) {
-        // No screen sleep while tuning or recording a memo: the user watches
-        // without touching (and a capture shows no audio activity).
+        // No screen sleep while tuning, recording a memo, or in a talkie
+        // session: the user watches without touching (and waits for the
+        // correspondent's messages, which must not play to a dark panel).
         enter_sleep();
     }
 }

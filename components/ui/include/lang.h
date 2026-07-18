@@ -128,6 +128,10 @@ typedef enum {
     STR_MEMO_FULL,          // toast: stored-memo cap reached
     STR_MEMO_EMPTY,         // memo list empty state
     STR_MEMO_REC_FAILED,    // toast: recording failed (SD error, mic busy)
+    STR_TALKIE,             // talkie screen title (correspondent picker)
+    STR_TALKIE_HOLD,        // talkie status line: idle, hold the button to talk
+    STR_TALKIE_HOLD_HINT,   // toast: tap too short to capture anything
+    STR_TALKIE_LEFT_MEMO,   // toast: peer not in talkie mode, stored as a memo
     STR__COUNT
 } str_id_t;
 
