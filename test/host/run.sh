@@ -88,3 +88,20 @@ gcc -std=c11 -Wall -Wextra -g \
 
 echo "=== running ==="
 "$OUT/test_lang"
+
+echo "=== building memo host tests ==="
+# memo.h pulls esp_err.h only for the memo_send declaration; stubs/ covers it.
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/memo/include \
+    -o "$OUT/test_memo_wav" \
+    test_memo_wav.c ../../components/memo/memo_wav.c
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/memo/include \
+    -o "$OUT/test_memo_name" \
+    test_memo_name.c ../../components/memo/memo_name.c
+
+echo "=== running ==="
+"$OUT/test_memo_wav"
+"$OUT/test_memo_name"

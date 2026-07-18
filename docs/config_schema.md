@@ -35,6 +35,7 @@ password live in NVS, written by the config web page.
     "accent": 0,
     "game": 1,
     "tuner": 1,
+    "memo_rx": 1,
     "tz": "CET-1CEST,M3.5.0,M10.5.0/3"
   },
   "alarms": [
@@ -82,6 +83,7 @@ password live in NVS, written by the config web page.
 | `ui.accent` | int | Button/accent color, 0 to 4: 0 Blue (default), 1 Ocean, 2 Pink, 3 Forest, 4 Orange. |
 | `ui.game` | int | Times-tables game on the home screen: 1 shown (default), 0 hidden. |
 | `ui.tuner` | int | Instrument tuner on the home screen: 1 shown (default), 0 hidden. |
+| `ui.memo_rx` | int | Accept voice memos from other Bugnes: 1 yes (default), 0 refuse. The receive endpoint (`POST /api/memo?from=<name>`) is unauthenticated on the LAN but bounded: content length required and capped at 2 MB, at most 20 stored memos (own + received, further memos are refused, never purged), WAV format checked (PCM 16-bit mono 16 kHz), sender name sanitized, storage path chosen by the receiver (`/sdcard/memos/`). |
 | `ui.tz` | string | POSIX TZ string, used for the wall clock and the alarm. Default `CET-1CEST,M3.5.0,M10.5.0/3` (Paris). Set from the web Settings page, live-applied (no reboot). |
 | `alarms[]` | array | Up to 3 alarms (`CFG_MAX_ALARMS`), e.g. weekday / weekend / free use. Each entry has the fields below. A legacy single `alarm` object (pre-B3 firmware) is still read forever and maps to `alarms[0]`; it is parsed BEFORE `alarms`, so if a config carries both, the array wins. Only `alarms` is written back. |
 | `alarms[].enabled` | int | 0 (default) or 1. |

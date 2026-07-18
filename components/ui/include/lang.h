@@ -111,6 +111,23 @@ typedef enum {
     STR_RESET_MSG,
     STR_TUNER,              // home tile + tuner screen title
     STR_TUNER_PLAY_NOTE,    // tuner idle state: waiting for a note
+    STR_MEMOS,              // home tile + memo list screen title
+    STR_MEMO_RECORD,        // record screen title
+    STR_MEMO_KEEP,          // preview action: keep the recording
+    STR_MEMO_SEND,          // preview action: send to another Bugne
+    STR_MEMO_DISCARD,       // preview action: drop the recording
+    STR_MEMO_TAP_RECORD,    // record screen idle hint
+    STR_MEMO_SEARCHING,     // peer picker: mDNS browse running
+    STR_MEMO_NO_PEERS,      // peer picker: no other Bugne found
+    STR_MEMO_SENDING,       // send in progress
+    STR_MEMO_SENT,          // toast: send succeeded
+    STR_MEMO_SEND_FAILED,   // toast: send failed
+    STR_MEMO_NEW_FROM_FMT,  // toast: new memo received, %s = sender
+    STR_MEMO_FROM_FMT,      // list row title of a received memo, %s = sender
+    STR_MEMO_MINE_FMT,      // list row title of an own memo, %d = number
+    STR_MEMO_FULL,          // toast: stored-memo cap reached
+    STR_MEMO_EMPTY,         // memo list empty state
+    STR_MEMO_REC_FAILED,    // toast: recording failed (SD error, mic busy)
     STR__COUNT
 } str_id_t;
 

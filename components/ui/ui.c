@@ -21,6 +21,7 @@
 #include "alarm_next.h"
 #include "stats.h"
 #include "pitch.h"
+#include "memo.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -224,16 +225,38 @@ static char s_meta_artist[64];  // tag artist of the playing SD file
 // Playback worker: source_*_play() block, so run them off the UI task.
 // The worker task handles blocking operations off the UI task: track playback
 // and podcast RSS refresh (network fetch + parse).
-typedef enum { REQ_PLAY, REQ_REFRESH, REQ_REFRESH_ALL, REQ_DOWNLOAD_JOB, REQ_BEEP } req_kind_t;
+typedef enum { REQ_PLAY, REQ_REFRESH, REQ_REFRESH_ALL, REQ_DOWNLOAD_JOB, REQ_BEEP,
+               REQ_MEMO_RECORD, REQ_MEMO_PLAY, REQ_MEMO_PEERS, REQ_MEMO_SEND } req_kind_t;
 typedef struct {
     req_kind_t kind;
     bool is_file;
-    int id;                        // podcast id (REQ_REFRESH / REQ_DOWNLOAD)
+    int id;                        // podcast id (REQ_REFRESH / REQ_DOWNLOAD), peer index (REQ_MEMO_SEND)
     int skip_ms;                   // intro to skip at playback (REQ_PLAY)
     bool force;                    // REQ_DOWNLOAD: re-download episodes already on SD
     char target[PODCAST_URL_MAX];  // play target, or RSS url for REQ_REFRESH
 } play_req_t;
 static QueueHandle_t s_play_q;
+
+// ---- Voice memo worker state ----
+// The engine and the screens live after the tuner section; declared this early
+// because play_task dispatches the runners and ui_play/ui_stop/beep_start set
+// s_memo_stop (same takeover discipline as the beep).
+typedef enum { MEMO_UI_IDLE, MEMO_UI_RECORDING, MEMO_UI_PREVIEW,
+               MEMO_UI_PICK_PEER, MEMO_UI_SENDING } memo_ui_state_t;
+#define MEMO_PEERS_MAX 8
+static volatile int  s_memo_state;       // memo_ui_state_t; worker advances, UI resets
+static volatile bool s_memo_stop;        // ends the memo record AND playback loops
+static volatile int  s_memo_rec_ms;      // live elapsed capture time, worker -> UI tick
+static volatile int  s_memo_result;      // one-shot: 1 sent, -1 send failed, -2 record failed
+static volatile bool s_memo_playing;     // worker is inside the memo playback loop
+static volatile bool s_memo_rx_flag;     // set by ui_memo_received (httpd task)
+static char s_memo_rx_from[MEMO_SENDER_MAX];   // sender behind s_memo_rx_flag
+static net_peer_t s_memo_peers[MEMO_PEERS_MAX];
+static volatile int s_memo_peer_count;   // -1 = mDNS browse running on the worker
+static lv_obj_t *s_memo_time_lbl, *s_memo_prog_bar, *s_memo_play_btn;  // reset in show()
+static void memo_record_run(void);
+static void memo_play_run(const char *path);
+static void memo_send_run(int peer);
 static char s_now_title[64];
 // Current play target as passed to ui_play, so the now-playing star button
 // (B2 favorites) can resolve a stable identity: a stream URL matching a
@@ -1022,6 +1045,22 @@ static void play_task(void *arg)
                 beep_run();
                 continue;
             }
+            if (req.kind == REQ_MEMO_RECORD) {
+                memo_record_run();
+                continue;
+            }
+            if (req.kind == REQ_MEMO_PLAY) {
+                memo_play_run(req.target);
+                continue;
+            }
+            if (req.kind == REQ_MEMO_PEERS) {
+                s_memo_peer_count = net_memo_peers(s_memo_peers, MEMO_PEERS_MAX);
+                continue;
+            }
+            if (req.kind == REQ_MEMO_SEND) {
+                memo_send_run(req.id);
+                continue;
+            }
             ESP_LOGI(TAG, "play request: %s (%s)", req.target, req.is_file ? "file" : "stream");
             s_stop_requested = false;  // a fresh play; a later stop re-arms it
             // Clear here too (not only in ui_play): if the previous play failed
@@ -1168,6 +1207,7 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
 {
     tuner_stop_sync();        // free the mic and the arbiter before a source starts
     s_beep_stop = true;       // end the alarm beep if it is sounding (source takes over)
+    s_memo_stop = true;       // end a memo record/playback the same way
     s_stop_requested = true;  // the current play (if any) is being taken over
     s_play_failed = false;    // a fresh start clears a stale error
     s_play_retrying = false;  // and any in-progress reconnect display
@@ -1213,6 +1253,7 @@ static void sleep_clear(void)
 static void ui_stop(void)
 {
     s_beep_stop = true;       // end the alarm beep if it is sounding
+    s_memo_stop = true;       // end a memo record/playback the same way
     s_stop_requested = true;  // an expected end: not a playback failure
     s_user_stopped = true;    // hide the mini bar at once, before the source tears down
     audio_output_off();       // mute now so playback stops instantly, not after buffers drain
@@ -1240,6 +1281,9 @@ static void show(screen_builder_t builder)
     s_tuner_note_lbl = NULL;  // same for the tuner widgets (rebuilt by build_tuner)
     s_tuner_freq_lbl = NULL;
     s_tuner_bar = NULL;
+    s_memo_time_lbl = NULL;  // same for the memo record/play widgets
+    s_memo_prog_bar = NULL;
+    s_memo_play_btn = NULL;
     s_sleep_lbl = NULL;  // same for the sleep timer label
     s_ep_msg = NULL;  // same for the episodes status line (rebuilt by its builder)
     s_home_clock = NULL;  // same for the home clock label (rebuilt by build_home)
@@ -1273,6 +1317,9 @@ static void build_settings_alarm(lv_obj_t *scr);  // 3-row alarm list
 static void build_alarm_edit(lv_obj_t *scr);       // single-alarm editor, s_alarm_edit_idx
 static void build_game(lv_obj_t *scr);
 static void build_game_setup(lv_obj_t *scr);  // table picker shown before build_game
+static void build_memos(lv_obj_t *scr);        // memo list (tile target)
+static void build_memo_record(lv_obj_t *scr);  // record/preview/send state machine
+static void build_memo_play(lv_obj_t *scr);    // single-memo player
 static lv_obj_t *alarm_row(lv_obj_t *parent, lv_flex_align_t main_align);  // card row, defined with build_alarm_edit
 static void alarm_fire(int idx);     // alarm engine, defined after exit_sleep
 static void alarm_finish(bool snooze);
@@ -2321,6 +2368,9 @@ void ui_status(ui_status_t *out)
 static bool stats_classify(stats_source_t *src, const char **title)
 {
     if (audio_arbiter_active() == AUDIO_SOURCE_BEEP) return false;  // alarm beep: not listening
+    // A voice memo is a seconds-long message, not listening; counting it would
+    // also misclassify (s_play_ctx still holds the previous session's context).
+    if (audio_arbiter_active() == AUDIO_SOURCE_MEMO) return false;
     if (source_sendspin_session_active()) {
         if (!source_sendspin_active()) return false;  // paused
         static char t[64];
@@ -3352,6 +3402,510 @@ static void build_tuner(lv_obj_t *scr)
     lv_obj_align(tick, LV_ALIGN_CENTER, 0, 28);
 }
 
+// ---- Voice memos (record, keep, send to another Bugne, play received) ----
+// Files live in /sdcard/memos (see components/memo). Capture and playback run
+// on the ui_play worker (internal stack: they write/read the SD); the arbiter
+// source is AUDIO_SOURCE_MEMO. State machine: s_memo_state, advanced by the
+// worker and rendered by build_memo_record via the 50 ms tick edge detector.
+
+#define MEMO_REC_CHUNK 4096  // bytes per mic read/SD write: 128 ms at 16 kHz mono
+
+static memo_entry_t *s_memo_entries;         // list rows (SPIRAM, lazy)
+static int  s_memo_entry_count;
+static char s_memo_sel_name[MEMO_NAME_MAX];  // memo behind build_memo_play
+static char s_memo_sel_title[56];
+static int  s_memo_state_shown = MEMO_UI_IDLE;  // what build_memo_record last rendered
+static int  s_memo_peers_shown;
+
+// Record the mic to memos/.rec.part, finalize the WAV header, rename to
+// .rec.wav (kept hidden until Keep/Send). Ends on Stop, the 60 s cap, a
+// takeover (s_memo_stop or a queued request), or an SD/mic error.
+static void memo_record_run(void)
+{
+    s_memo_rec_ms = 0;
+    bool ok = false;
+    uint64_t free_b = 0;
+    bool room = source_sd_present() && source_sd_usage(NULL, &free_b) && free_b >= (4u << 20);
+    bool acquired = false;
+    for (int i = 0; room && i < 80 && !s_memo_stop; i++) {  // tuner-style retry: sources
+        if (audio_arbiter_acquire(AUDIO_SOURCE_MEMO) == ESP_OK) { acquired = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(50));                       // release asynchronously
+    }
+    if (acquired && !s_memo_stop && audio_record_open(MEMO_RATE_HZ) == ESP_OK) {
+        source_sd_mkdir(MEMO_DIR);
+        FILE *f = source_sd_create(MEMO_DIR "/.rec.part");
+        uint8_t *buf = heap_caps_malloc(MEMO_REC_CHUNK, MALLOC_CAP_SPIRAM);
+        if (f && buf) {
+            uint8_t hdr[MEMO_WAV_HEADER_BYTES] = {0};
+            uint32_t data_bytes = 0;
+            ok = fwrite(hdr, 1, sizeof(hdr), f) == sizeof(hdr);  // placeholder header
+            // Discard the capture-start transient (same warm-up as the tuner:
+            // the first windows carry a loud pop). Without this the pop is the
+            // file's peak and caps the normalization gain on the actual voice.
+            for (int w = 0; ok && w < 2 && !s_memo_stop; w++) {
+                if (audio_record_read(buf, MEMO_REC_CHUNK) != ESP_OK) ok = false;
+            }
+            while (ok && !s_memo_stop && s_memo_rec_ms < MEMO_MAX_MS &&
+                   uxQueueMessagesWaiting(s_play_q) == 0) {
+                if (audio_record_read(buf, MEMO_REC_CHUNK) != ESP_OK ||
+                    fwrite(buf, 1, MEMO_REC_CHUNK, f) != MEMO_REC_CHUNK) {
+                    ok = false;
+                    break;
+                }
+                data_bytes += MEMO_REC_CHUNK;
+                s_memo_rec_ms = (int)((uint64_t)data_bytes * 1000 / (MEMO_RATE_HZ * 2));
+            }
+            if (ok && data_bytes == 0) ok = false;  // stopped before the first chunk
+            if (ok) {  // rewrite the header with the real size
+                memo_wav_header(hdr, data_bytes);
+                ok = fseek(f, 0, SEEK_SET) == 0 &&
+                     fwrite(hdr, 1, sizeof(hdr), f) == sizeof(hdr);
+            }
+        }
+        if (f) fclose(f);
+        audio_record_close();
+        if (ok && buf) {
+            // Voice through the onboard mic records quietly even at the 42 dB
+            // PGA max (bench-confirmed): normalize the finished file so the
+            // peak lands near full scale (digital gain capped at x16).
+            FILE *nf = fopen(MEMO_ABS_DIR "/.rec.part", "r+b");
+            if (nf) {
+                if (!memo_wav_normalize(nf, buf, MEMO_REC_CHUNK)) {
+                    ESP_LOGW(TAG, "memo: normalize failed, keeping raw level");
+                }
+                fclose(nf);
+            }
+        }
+        free(buf);
+    }
+    if (acquired) audio_arbiter_release(AUDIO_SOURCE_MEMO);
+    if (ok && rename(MEMO_ABS_DIR "/.rec.part", MEMO_ABS_DIR "/" MEMO_REC_NAME) != 0) ok = false;
+    if (!ok) {
+        remove(MEMO_ABS_DIR "/.rec.part");
+        s_memo_result = -2;
+        s_memo_state = MEMO_UI_IDLE;
+        ESP_LOGW(TAG, "memo: recording failed or empty");
+        return;
+    }
+    ESP_LOGI(TAG, "memo: recorded %d ms", s_memo_rec_ms);
+    s_memo_state = MEMO_UI_PREVIEW;
+}
+
+// Play a memo WAV straight to the PCM output (beep_run shape: audio_write
+// blocks on the I2S DMA and paces the loop; no decoder involved).
+static void memo_play_run(const char *path)
+{
+    bool acquired = false;
+    for (int i = 0; i < 80 && !s_memo_stop; i++) {
+        if (audio_arbiter_acquire(AUDIO_SOURCE_MEMO) == ESP_OK) { acquired = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!acquired) return;
+    FILE *f = fopen(path, "rb");
+    uint8_t head[512];
+    uint32_t off = 0, len = 0;
+    bool ok = false;
+    if (f) {
+        size_t n = fread(head, 1, sizeof(head), f);
+        ok = memo_wav_parse(head, n, &off, &len) && fseek(f, (long)off, SEEK_SET) == 0;
+    }
+    if (ok && audio_open(MEMO_RATE_HZ, 16, 1) == ESP_OK) {
+        uint8_t *buf = heap_caps_malloc(MEMO_REC_CHUNK, MALLOC_CAP_SPIRAM);
+        uint32_t left = len;
+        s_memo_playing = true;
+        while (buf && left > 0 && !s_memo_stop && uxQueueMessagesWaiting(s_play_q) == 0) {
+            size_t want = left < MEMO_REC_CHUNK ? left : MEMO_REC_CHUNK;
+            size_t n = fread(buf, 1, want, f);
+            if (n == 0 || audio_write(buf, n) != ESP_OK) break;
+            left -= (uint32_t)n;
+        }
+        free(buf);
+        audio_close();
+    } else if (f) {
+        ESP_LOGW(TAG, "memo: cannot play %s", path);
+    }
+    if (f) fclose(f);
+    s_memo_playing = false;  // after fclose: memo_stop_sync callers rename/delete the file
+    audio_arbiter_release(AUDIO_SOURCE_MEMO);
+}
+
+// POST the finalized capture to the picked peer, as this device's name.
+static void memo_send_run(int peer)
+{
+    esp_err_t r = ESP_FAIL;
+    if (peer >= 0 && peer < s_memo_peer_count) {
+        char raw[48], from[MEMO_SENDER_MAX];
+        const config_t *c = config_store_get();
+        if (c && c->device_name[0]) strlcpy(raw, c->device_name, sizeof(raw));
+        else snprintf(raw, sizeof(raw), "Bugne %s", board_device_id());
+        memo_sanitize_sender(from, sizeof(from), raw);
+        ESP_LOGI(TAG, "memo: sending to %s (%s:%u)", s_memo_peers[peer].name,
+                 s_memo_peers[peer].ip, (unsigned)s_memo_peers[peer].port);
+        r = memo_send(s_memo_peers[peer].ip, s_memo_peers[peer].port, from,
+                      MEMO_ABS_DIR "/" MEMO_REC_NAME, NULL);
+    }
+    if (r == ESP_OK) {
+        remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);  // delivered: nothing kept locally
+        s_memo_state = MEMO_UI_IDLE;
+        s_memo_result = 1;
+    } else {
+        s_memo_state = MEMO_UI_PREVIEW;  // keep the capture so the child can retry
+        s_memo_result = -1;
+    }
+}
+
+// Stop a memo playback and wait for the worker to close the file (bounded;
+// needed before deleting or renaming the file under it).
+static void memo_stop_sync(void)
+{
+    s_memo_stop = true;
+    for (int i = 0; i < 50 && s_memo_playing; i++) vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+// Take over playback (same sequence as tuner_begin) and queue a memo request.
+static void memo_request(req_kind_t kind, const char *path)
+{
+    ui_stop();
+    if (source_sendspin_session_active()) {
+        source_sendspin_command(SENDSPIN_CMD_STOP);
+    }
+    tuner_stop_sync();
+    s_memo_stop = false;  // ui_stop just set it; this is a fresh memo operation
+    play_req_t req = { .kind = kind };
+    if (path) strlcpy(req.target, path, sizeof(req.target));
+    xQueueOverwrite(s_play_q, &req);
+}
+
+// Show the record screen for the current state and remember what was shown, so
+// the tick's edge detector does not rebuild it again on its next run.
+static void memo_show_record(void)
+{
+    s_memo_state_shown = s_memo_state;
+    s_memo_peers_shown = s_memo_peer_count;
+    show(build_memo_record);
+}
+
+// Human title of a memo entry. The sender inside the filename is sanitized
+// ("Bugne-Alpha"); show the dashes as spaces.
+static void memo_row_title(const memo_entry_t *en, char *dst, size_t size)
+{
+    if (en->is_mine) {
+        snprintf(dst, size, T(STR_MEMO_MINE_FMT), en->seq);
+    } else {
+        char nice[MEMO_SENDER_MAX];
+        strlcpy(nice, en->sender, sizeof(nice));
+        for (char *p = nice; *p; p++) {
+            if (*p == '-') *p = ' ';
+        }
+        snprintf(dst, size, T(STR_MEMO_FROM_FMT), nice);
+    }
+}
+
+static void on_open_memos(lv_event_t *e)
+{
+    (void)e;
+    if (play_denied()) return;
+    if (!source_sd_present()) return;  // the tile is greyed; belt and braces
+    show(build_memos);
+}
+
+static void on_memo_new(lv_event_t *e)
+{
+    (void)e;
+    s_memo_state = MEMO_UI_IDLE;
+    s_memo_rec_ms = 0;
+    memo_show_record();
+}
+
+static void on_memo_rec_start(lv_event_t *e)
+{
+    (void)e;
+    uint64_t free_b = 0;
+    if (!source_sd_present() || !source_sd_usage(NULL, &free_b) || free_b < (4u << 20)) {
+        toast(T(STR_MEMO_REC_FAILED));  // no card or almost full
+        return;
+    }
+    s_memo_rec_ms = 0;
+    s_memo_state = MEMO_UI_RECORDING;
+    memo_request(REQ_MEMO_RECORD, NULL);
+    memo_show_record();
+}
+
+static void on_memo_rec_stop(lv_event_t *e)
+{
+    (void)e;
+    s_memo_stop = true;  // the worker finalizes and advances to PREVIEW
+}
+
+static void on_memo_prev_play(lv_event_t *e)
+{
+    (void)e;
+    memo_request(REQ_MEMO_PLAY, MEMO_ABS_DIR "/" MEMO_REC_NAME);
+}
+
+static void on_memo_keep(lv_event_t *e)
+{
+    (void)e;
+    memo_stop_sync();
+    if (memo_count() >= MEMO_MAX_COUNT) {
+        toast(T(STR_MEMO_FULL));
+        return;
+    }
+    if (memo_keep_rec() < 0) {
+        toast(T(STR_MEMO_REC_FAILED));
+        return;
+    }
+    s_memo_state = MEMO_UI_IDLE;
+    show(build_memos);
+}
+
+static void on_memo_send_open(lv_event_t *e)
+{
+    (void)e;
+    memo_stop_sync();
+    s_memo_peer_count = -1;  // browse running
+    s_memo_state = MEMO_UI_PICK_PEER;
+    play_req_t req = { .kind = REQ_MEMO_PEERS };
+    xQueueOverwrite(s_play_q, &req);
+    memo_show_record();
+}
+
+static void on_memo_discard(lv_event_t *e)
+{
+    (void)e;
+    memo_stop_sync();
+    remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);
+    s_memo_state = MEMO_UI_IDLE;
+    memo_show_record();  // fresh record screen, ready to retry
+}
+
+static void on_memo_peer(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (idx < 0 || idx >= s_memo_peer_count) return;
+    s_memo_state = MEMO_UI_SENDING;
+    play_req_t req = { .kind = REQ_MEMO_SEND, .id = idx };
+    xQueueOverwrite(s_play_q, &req);
+    memo_show_record();
+}
+
+static void on_memo_record_back(lv_event_t *e)
+{
+    (void)e;
+    int st = s_memo_state;
+    if (st == MEMO_UI_RECORDING) {
+        s_memo_stop = true;  // finalize to PREVIEW, stay: never silently lose a capture
+        return;
+    }
+    if (st == MEMO_UI_PICK_PEER) {
+        s_memo_state = MEMO_UI_PREVIEW;
+        memo_show_record();
+        return;
+    }
+    if (st == MEMO_UI_SENDING) return;  // let the send finish (a toast follows)
+    if (st == MEMO_UI_PREVIEW) {        // back out of the preview = discard
+        memo_stop_sync();
+        remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);
+        s_memo_state = MEMO_UI_IDLE;
+    }
+    show(build_memos);
+}
+
+// Small labeled action button (icon + text) for the preview row.
+static lv_obj_t *memo_btn(lv_obj_t *scr, const char *icon, str_id_t id,
+                          int x, int y, int w, int h, lv_event_cb_t cb)
+{
+    lv_obj_t *b = lv_button_create(scr);
+    lv_obj_set_size(b, w, h);
+    lv_obj_align(b, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text_fmt(l, "%s %s", icon, T(id));
+    lv_obj_center(l);
+    return b;
+}
+
+static void build_memo_record(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_memo_record_back);
+    add_title_wide(scr, T(STR_MEMO_RECORD));  // only corner widget is the back button
+    switch ((memo_ui_state_t)s_memo_state) {
+    case MEMO_UI_RECORDING: {
+        s_memo_time_lbl = lv_label_create(scr);
+        lv_obj_set_style_text_font(s_memo_time_lbl, &bugne_font_20, 0);
+        lv_label_set_text(s_memo_time_lbl, "0:00");
+        lv_obj_align(s_memo_time_lbl, LV_ALIGN_CENTER, 0, -52);
+        s_memo_prog_bar = lv_bar_create(scr);
+        lv_bar_set_range(s_memo_prog_bar, 0, MEMO_MAX_MS);
+        lv_obj_set_size(s_memo_prog_bar, scr_w() - 2 * PAD_SIDE - 32, 14);
+        lv_obj_align(s_memo_prog_bar, LV_ALIGN_CENTER, 0, -16);
+        lv_obj_t *stop = make_round_btn(scr, LV_SYMBOL_STOP, 72, true, on_memo_rec_stop);
+        lv_obj_align(stop, LV_ALIGN_CENTER, 0, 56);
+        break;
+    }
+    case MEMO_UI_PREVIEW: {
+        lv_obj_t *play = make_round_btn(scr, LV_SYMBOL_PLAY, 56, false, on_memo_prev_play);
+        lv_obj_align(play, LV_ALIGN_TOP_MID, 0, 46);
+        lv_obj_t *len = lv_label_create(scr);
+        int sdur = s_memo_rec_ms / 1000;
+        lv_label_set_text_fmt(len, "%d:%02d", sdur / 60, sdur % 60);
+        muted(len);
+        lv_obj_align(len, LV_ALIGN_TOP_MID, 0, 106);
+        const int bw = (scr_w() - 2 * PAD_SIDE - 10) / 2;
+        memo_btn(scr, LV_SYMBOL_OK, STR_MEMO_KEEP, PAD_SIDE, 128, bw, 42, on_memo_keep);
+        memo_btn(scr, LV_SYMBOL_UPLOAD, STR_MEMO_SEND, PAD_SIDE + bw + 10, 128, bw, 42,
+                 on_memo_send_open);
+        memo_btn(scr, LV_SYMBOL_TRASH, STR_MEMO_DISCARD, PAD_SIDE, 180, 2 * bw + 10, 42,
+                 on_memo_discard);
+        break;
+    }
+    case MEMO_UI_PICK_PEER:
+        if (s_memo_peer_count < 0) {
+            empty_state_label(scr, STR_MEMO_SEARCHING);
+        } else if (s_memo_peer_count == 0) {
+            empty_state_label(scr, STR_MEMO_NO_PEERS);
+        } else {
+            lv_obj_t *list = lv_list_create(scr);
+            lv_obj_set_size(list, scr_w(), scr_h() - 56);
+            lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+            for (int i = 0; i < s_memo_peer_count; i++) {
+                lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_UPLOAD, s_memo_peers[i].name);
+                lv_obj_set_user_data(btn, (void *)(intptr_t)i);
+                lv_obj_add_event_cb(btn, on_memo_peer, LV_EVENT_CLICKED, NULL);
+            }
+            list_titles_static(list);
+        }
+        break;
+    case MEMO_UI_SENDING:
+        empty_state_label(scr, STR_MEMO_SENDING);
+        break;
+    default: {  // MEMO_UI_IDLE
+        lv_obj_t *hint = lv_label_create(scr);
+        lv_label_set_text(hint, T(STR_MEMO_TAP_RECORD));
+        muted(hint);
+        lv_obj_align(hint, LV_ALIGN_CENTER, 0, -64);
+        // A filled red circle is the universal record affordance; deliberately
+        // not the theme accent (which can be red-adjacent, but the tile look
+        // keeps this readable in every theme).
+        lv_obj_t *rec = make_round_btn(scr, "", 80, true, on_memo_rec_start);
+        lv_obj_set_style_bg_color(rec, lv_color_hex(0xE53935), 0);
+        lv_obj_set_style_bg_color(rec, lv_color_hex(0xB71C1C), LV_STATE_PRESSED);
+        lv_obj_align(rec, LV_ALIGN_CENTER, 0, 4);
+        break;
+    }
+    }
+}
+
+static void on_memo_play_back(lv_event_t *e)
+{
+    (void)e;
+    memo_stop_sync();
+    show(build_memos);
+}
+
+static void on_memo_del(lv_event_t *e)
+{
+    (void)e;
+    memo_stop_sync();  // never delete the file under the worker's fread
+    char rel[MEMO_NAME_MAX + 8];
+    snprintf(rel, sizeof(rel), MEMO_DIR "/%s", s_memo_sel_name);
+    source_sd_delete(rel);
+    show(build_memos);
+}
+
+static void on_memo_play_toggle(lv_event_t *e)
+{
+    (void)e;
+    if (s_memo_playing) {
+        s_memo_stop = true;
+    } else {
+        if (play_denied()) return;
+        char path[MEMO_NAME_MAX + 20];
+        memo_abs_path(path, sizeof(path), s_memo_sel_name);
+        memo_request(REQ_MEMO_PLAY, path);
+    }
+}
+
+static void build_memo_play(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_memo_play_back);
+    add_title(scr, s_memo_sel_title);  // two corner widgets: never add_title_wide
+    lv_obj_t *del = make_round_btn(scr, LV_SYMBOL_TRASH, 44, false, on_memo_del);
+    lv_obj_align(del, LV_ALIGN_TOP_RIGHT, -8, 8);
+    s_memo_play_btn = make_round_btn(scr, s_memo_playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
+                                     72, true, on_memo_play_toggle);
+    lv_obj_align(s_memo_play_btn, LV_ALIGN_CENTER, 0, 0);
+}
+
+static void on_memo_row(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (!s_memo_entries || idx < 0 || idx >= s_memo_entry_count) return;
+    if (play_denied()) return;
+    memo_entry_t *en = &s_memo_entries[idx];
+    // Opening a received memo marks it read at once (the rename drops ".new"):
+    // the home badge means "something you have not listened to yet".
+    if (en->unread) {
+        char oldp[MEMO_NAME_MAX + 20], newn[MEMO_NAME_MAX], newp[MEMO_NAME_MAX + 20];
+        memo_abs_path(oldp, sizeof(oldp), en->name);
+        snprintf(newn, sizeof(newn), "rx-%s-%03d.wav", en->sender, en->seq);
+        memo_abs_path(newp, sizeof(newp), newn);
+        if (rename(oldp, newp) == 0) {
+            strlcpy(en->name, newn, sizeof(en->name));
+            en->unread = false;
+        }
+    }
+    strlcpy(s_memo_sel_name, en->name, sizeof(s_memo_sel_name));
+    memo_row_title(en, s_memo_sel_title, sizeof(s_memo_sel_title));
+    show(build_memo_play);
+    char path[MEMO_NAME_MAX + 20];
+    memo_abs_path(path, sizeof(path), s_memo_sel_name);
+    memo_request(REQ_MEMO_PLAY, path);  // tapping a memo plays it right away
+}
+
+static void build_memos(lv_obj_t *scr)
+{
+    add_back_button(scr);
+    add_title(scr, T(STR_MEMOS));  // two corner widgets: never add_title_wide
+    lv_obj_t *rec = make_round_btn(scr, LV_SYMBOL_PLUS, 44, true, on_memo_new);
+    lv_obj_align(rec, LV_ALIGN_TOP_RIGHT, -8, 8);
+
+    if (!s_memo_entries) {
+        s_memo_entries = heap_caps_malloc(sizeof(*s_memo_entries) * MEMO_MAX_COUNT,
+                                          MALLOC_CAP_SPIRAM);
+    }
+    s_memo_entry_count = s_memo_entries ? memo_list(s_memo_entries, MEMO_MAX_COUNT) : 0;
+    if (s_memo_entry_count == 0) {
+        empty_state_label(scr, STR_MEMO_EMPTY);
+        return;
+    }
+    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the round corner buttons
+    lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);
+    lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+    for (int i = 0; i < s_memo_entry_count; i++) {
+        const memo_entry_t *en = &s_memo_entries[i];
+        char title[56], line[80];
+        memo_row_title(en, title, sizeof(title));
+        snprintf(line, sizeof(line), "%s (%d:%02d)", title,
+                 en->duration_s / 60, en->duration_s % 60);
+        const char *icon = en->unread ? LV_SYMBOL_BELL
+                         : en->is_mine ? LV_SYMBOL_AUDIO : LV_SYMBOL_ENVELOPE;
+        lv_obj_t *btn = lv_list_add_button(list, icon, line);
+        lv_obj_set_user_data(btn, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn, on_memo_row, LV_EVENT_CLICKED, NULL);
+    }
+    list_titles_static(list);
+}
+
+// Receive-side bridge: the httpd task calls this after storing a memo; the
+// 50 ms tick consumes the flag (toast + badge/list rebuild). No LVGL here.
+void ui_memo_received(const char *from)
+{
+    strlcpy(s_memo_rx_from, from ? from : "", sizeof(s_memo_rx_from));
+    s_memo_rx_flag = true;
+}
+
 static void on_open_sd(lv_event_t *e)        { (void)e; show(build_sd); }
 
 // Favorites (B2) ------------------------------------------------------------
@@ -3609,16 +4163,36 @@ static void build_home(lv_obj_t *scr)
     const bool ls = scr_w() > scr_h();
     const int M = PAD_SIDE, G = 10, Y0 = 54;
     const int limit = scr_h() - MINI_CLEAR;
-    lv_obj_t *wr, *pod, *lib, *sd, *game = NULL, *fav = NULL;
+    lv_obj_t *wr, *pod, *lib, *sd, *game = NULL, *fav = NULL, *mem = NULL;
+
+    // Extras beyond the 4 base tiles, in display order. Memos is always shown
+    // (it greys out without SD like the other SD features), so nb is 1..4.
+    const char *ex_icon[4];
+    str_id_t ex_id[4];
+    lv_event_cb_t ex_cb[4];
+    lv_obj_t **ex_out[4];
+    int nb = 0;
+    if (game_on) {
+        ex_icon[nb] = LV_SYMBOL_EDIT; ex_id[nb] = STR_GAME;
+        ex_cb[nb] = on_open_game; ex_out[nb] = &game; nb++;
+    }
+    if (fav_on) {
+        ex_icon[nb] = LV_SYMBOL_CHARGE; ex_id[nb] = STR_FAVORITES;
+        ex_cb[nb] = on_open_favorites; ex_out[nb] = &fav; nb++;
+    }
+    if (tuner_on) {
+        ex_icon[nb] = LV_SYMBOL_VOLUME_MID; ex_id[nb] = STR_TUNER;
+        ex_cb[nb] = on_open_tuner; ex_out[nb] = NULL; nb++;
+    }
+    ex_icon[nb] = LV_SYMBOL_ENVELOPE; ex_id[nb] = STR_MEMOS;
+    ex_cb[nb] = on_open_memos; ex_out[nb] = &mem; nb++;
 
     if (!ls) {
-        // Portrait: a 2x2 grid of vertical tiles plus banner rows below
-        // (game, favorites, tuner). One banner keeps the original 38 px
-        // game-banner geometry; two shrink to 34 px each. All three extras
-        // do not fit as full rows, so game and favorites pack side by side
-        // on one row and the tuner keeps a full row: still 2 banner rows.
-        const int nb = (game_on ? 1 : 0) + (fav_on ? 1 : 0) + (tuner_on ? 1 : 0);
-        const int rows = (nb > 2) ? 2 : nb;
+        // Portrait: a 2x2 grid of vertical tiles plus banner rows below for
+        // the extras, packed two per row in display order; a lone last extra
+        // spans the full width. One banner row keeps the original 38 px
+        // game-banner geometry; two shrink to 34 px each.
+        const int rows = (nb + 1) / 2;  // nb is 1..4: one or two rows
         const int banner_h = (rows == 2) ? 34 : 38;
         const int w2 = (scr_w() - 2 * M - G) / 2;
         const int h2 = (limit - Y0 - (1 + rows) * G - rows * banner_h) / 2;
@@ -3626,59 +4200,44 @@ static void build_home(lv_obj_t *scr)
         pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + w2 + G, Y0, w2, h2, false, on_open_podcasts);
         lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M, Y0 + h2 + G, w2, h2, false, on_open_library);
         sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + w2 + G, Y0 + h2 + G, w2, h2, false, on_open_sd);
-        int by = Y0 + 2 * (h2 + G);
-        if (nb == 3) {
-            // The game needs neither network nor SD: always enabled when shown.
-            game = make_tile(scr, LV_SYMBOL_EDIT, STR_GAME, M, by, w2, banner_h, true, on_open_game);
-            fav = make_tile(scr, LV_SYMBOL_CHARGE, STR_FAVORITES, M + w2 + G, by, w2, banner_h, true, on_open_favorites);
-            by += banner_h + G;
-            make_tile(scr, LV_SYMBOL_VOLUME_MID, STR_TUNER, M, by, 2 * w2 + G, banner_h, true, on_open_tuner);
-        } else {
-            if (game_on) {
-                game = make_tile(scr, LV_SYMBOL_EDIT, STR_GAME, M, by, 2 * w2 + G, banner_h, true, on_open_game);
-                by += banner_h + G;
-            }
-            if (fav_on) {
-                fav = make_tile(scr, LV_SYMBOL_CHARGE, STR_FAVORITES, M, by, 2 * w2 + G, banner_h, true, on_open_favorites);
-                by += banner_h + G;
-            }
-            if (tuner_on) {
-                make_tile(scr, LV_SYMBOL_VOLUME_MID, STR_TUNER, M, by, 2 * w2 + G, banner_h, true, on_open_tuner);
-            }
+        const int by = Y0 + 2 * (h2 + G);
+        for (int i = 0; i < nb; i++) {
+            const bool lone = (i == nb - 1) && (nb % 2 == 1);  // odd count: last row is full width
+            const int bx = M + (i % 2) * (w2 + G);
+            const int y = by + (i / 2) * (banner_h + G);
+            lv_obj_t *b = make_tile(scr, ex_icon[i], ex_id[i], bx, y,
+                                    lone ? 2 * w2 + G : w2, banner_h, true, ex_cb[i]);
+            if (ex_out[i]) *ex_out[i] = b;
         }
-    } else if (!game_on && !fav_on && !tuner_on) {
-        // Landscape, 4 tiles: 2x2 horizontal chips.
-        const int w2 = (scr_w() - 2 * M - G) / 2;
-        const int h2 = (limit - Y0 - G) / 2;
-        wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, w2, h2, true, on_open_webradios);
-        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + w2 + G, Y0, w2, h2, true, on_open_podcasts);
-        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M, Y0 + h2 + G, w2, h2, true, on_open_library);
-        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + w2 + G, Y0 + h2 + G, w2, h2, true, on_open_sd);
     } else {
-        // Landscape, 5 to 7 tiles: a 3-column top row of vertical mini-tiles;
-        // row 2 holds the SD card plus the enabled extras (game, favorites,
-        // tuner). With 1 extra the pair is centered; with 2 the row fills the
-        // 3 columns; with all 3 the row switches to 4 narrower cells.
+        // Landscape: a 3-column top row of vertical mini-tiles; row 2 holds
+        // the SD card plus the extras. With 1 extra the pair is centered;
+        // 2 extras fill the 3 columns; 3 switch row 2 to 4 narrower cells;
+        // with all 4 the memos tile is promoted to the top row and the grid
+        // becomes a symmetric 4x2 (row 2 never shrinks below 4 cells).
+        const bool e4 = (nb == 4);
         const int w3 = (scr_w() - 2 * M - 2 * G) / 3;
+        const int w4 = (scr_w() - 2 * M - 3 * G) / 4;
+        const int wt = e4 ? w4 : w3;               // top-row cell width
+        const int w2b = (nb >= 3) ? w4 : w3;       // row-2 cell width
         const int h3 = (limit - Y0 - G) / 2;
-        const int e = (game_on ? 1 : 0) + (fav_on ? 1 : 0) + (tuner_on ? 1 : 0);
-        const int w2b = (e == 3) ? (scr_w() - 2 * M - 3 * G) / 4 : w3;  // row-2 cell width
-        const int row2_off = (e == 1) ? (w3 + G) / 2 : 0;  // centers a 2-tile row
-        wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, w3, h3, false, on_open_webradios);
-        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + w3 + G, Y0, w3, h3, false, on_open_podcasts);
-        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M + 2 * (w3 + G), Y0, w3, h3, false, on_open_library);
+        const int row2_off = (nb == 1) ? (w3 + G) / 2 : 0;  // centers a 2-tile row
+        wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, wt, h3, false, on_open_webradios);
+        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + wt + G, Y0, wt, h3, false, on_open_podcasts);
+        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M + 2 * (wt + G), Y0, wt, h3, false, on_open_library);
+        const int n_row2 = e4 ? nb - 1 : nb;
+        if (e4) {  // memos (always the last extra) joins the top row
+            lv_obj_t *b = make_tile(scr, ex_icon[nb - 1], ex_id[nb - 1],
+                                    M + 3 * (wt + G), Y0, wt, h3, false, ex_cb[nb - 1]);
+            if (ex_out[nb - 1]) *ex_out[nb - 1] = b;
+        }
         sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + row2_off, Y0 + h3 + G, w2b, h3, false, on_open_sd);
         int x5 = M + row2_off + w2b + G;
-        if (game_on) {
-            game = make_tile(scr, LV_SYMBOL_EDIT, STR_GAME, x5, Y0 + h3 + G, w2b, h3, false, on_open_game);
+        for (int i = 0; i < n_row2; i++) {
+            lv_obj_t *b = make_tile(scr, ex_icon[i], ex_id[i], x5, Y0 + h3 + G, w2b, h3,
+                                    false, ex_cb[i]);
+            if (ex_out[i]) *ex_out[i] = b;
             x5 += w2b + G;
-        }
-        if (fav_on) {
-            fav = make_tile(scr, LV_SYMBOL_CHARGE, STR_FAVORITES, x5, Y0 + h3 + G, w2b, h3, false, on_open_favorites);
-            x5 += w2b + G;
-        }
-        if (tuner_on) {
-            make_tile(scr, LV_SYMBOL_VOLUME_MID, STR_TUNER, x5, Y0 + h3 + G, w2b, h3, false, on_open_tuner);
         }
     }
 
@@ -3695,6 +4254,22 @@ static void build_home(lv_obj_t *scr)
         if (game) lv_obj_add_state(game, LV_STATE_DISABLED);
         if (fav) lv_obj_add_state(fav, LV_STATE_DISABLED);
         // The tuner tile stays enabled on purpose: it makes no sound.
+    }
+    if (mem && (q || !source_sd_present())) lv_obj_add_state(mem, LV_STATE_DISABLED);
+    // Discreet unread-memos alert: a small red dot on the memos tile. Computed
+    // at build time only; the receive flag, the SD-presence edge and the memo
+    // list actions all rebuild home (no per-tick directory scan).
+    if (mem && source_sd_present() && memo_unread_count() > 0) {
+        lv_obj_t *dot = lv_obj_create(mem);
+        lv_obj_set_size(dot, 12, 12);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(0xE53935), 0);  // notification red
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(dot, lv_color_white(), 0);    // ring: visible on any accent
+        lv_obj_set_style_border_width(dot, 2, 0);
+        lv_obj_set_style_pad_all(dot, 0, 0);
+        lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -4, 4);
+        lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     }
     if (net_state() != NET_STATE_CONNECTED) {
         lv_obj_t *hint = lv_label_create(scr);
@@ -4554,6 +5129,10 @@ typedef enum { NP_NONE, NP_LOCAL, NP_SENDSPIN } np_source_t;
 // source (the audio layer is open between audio_open/close).
 static np_source_t np_current(void)
 {
+    // A memo playing/previewing stays out of the mini bar and the home clock
+    // logic: it is a seconds-long message tied to its own screen, and the
+    // s_now_* metadata still describes the previous source.
+    if (audio_arbiter_active() == AUDIO_SOURCE_MEMO) return NP_NONE;
     np_source_t real = source_sendspin_session_active() ? NP_SENDSPIN
                      : audio_is_active() ? NP_LOCAL : NP_NONE;
     if (s_user_stopped) {
@@ -4708,6 +5287,7 @@ static void beep_start(void)
 {
     ESP_LOGI(TAG, "alarm: starting beep fallback");
     tuner_stop_sync();  // free the arbiter: the alarm must always sound
+    s_memo_stop = true; // a memo record/playback yields too: the alarm always sounds
     s_alarm_beeping = true;
     s_beep_stop = false;
     s_stop_requested = true;
@@ -4864,6 +5444,8 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "game",              build_game_setup },
     { "game_play",         build_game },
     { "tuner",             build_tuner },
+    { "memos",             build_memos },
+    { "memo_record",       build_memo_record },
     { "settings",          build_settings },
     { "settings_theme",    build_settings_theme },
     { "settings_alarm",    build_settings_alarm },
@@ -5002,6 +5584,14 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         } else if (strcmp(name, "tuner") == 0) {
             tuner_begin();  // mimic on_open_tuner: takeover + capture task
+        } else if (strcmp(name, "memos") == 0 || strcmp(name, "memo_record") == 0) {
+            if (parental_blocked()) {
+                strlcpy(name, "home", sizeof(name));  // same refusal as the tile
+            } else if (strcmp(name, "memo_record") == 0) {
+                s_memo_state = MEMO_UI_IDLE;  // mimic on_memo_new: fresh record screen
+                s_memo_rec_ms = 0;
+                s_memo_state_shown = MEMO_UI_IDLE;
+            }
         }
         for (int i = 0; i < NAV_SCREEN_COUNT; i++) {
             if (strcmp(name, NAV_SCREENS[i].name) == 0) { show(NAV_SCREENS[i].fn); break; }
@@ -5156,6 +5746,73 @@ static void sleep_timer_cb(lv_timer_t *t)
                 lv_bar_set_value(s_tuner_bar, 0, LV_ANIM_OFF);
             }
         }
+    }
+
+    // ---- Voice memo UI glue ----
+    // Rebuild the record screen on worker-driven state changes (capture
+    // finalized to preview, peer browse finished), refresh the live capture
+    // readout, stop a capture when the user navigates away, mirror the
+    // play/stop icon, surface one-shot results, and consume the receive flag
+    // set by the httpd task (toast + home badge / open list refresh).
+    {
+        if (s_active_builder == build_memo_record) {
+            if (s_memo_state != s_memo_state_shown ||
+                (s_memo_state == MEMO_UI_PICK_PEER &&
+                 s_memo_peer_count != s_memo_peers_shown)) {
+                memo_show_record();
+            } else if (s_memo_state == MEMO_UI_RECORDING && s_memo_time_lbl) {
+                char tt[20];
+                int sdur = s_memo_rec_ms / 1000;
+                snprintf(tt, sizeof(tt), "%d:%02d / %d:00", sdur / 60, sdur % 60,
+                         MEMO_MAX_MS / 60000);
+                if (strcmp(lv_label_get_text(s_memo_time_lbl), tt) != 0) {
+                    lv_label_set_text(s_memo_time_lbl, tt);
+                }
+                if (s_memo_prog_bar) {
+                    lv_bar_set_value(s_memo_prog_bar, s_memo_rec_ms, LV_ANIM_OFF);
+                }
+            }
+        } else {
+            if (s_memo_state == MEMO_UI_RECORDING) s_memo_stop = true;  // capture ends off-screen
+            s_memo_state_shown = s_memo_state;  // track silently for a fresh re-entry
+            s_memo_peers_shown = s_memo_peer_count;
+        }
+        if (s_memo_play_btn && s_active_builder == build_memo_play) {
+            lv_obj_t *icon = lv_obj_get_child(s_memo_play_btn, 0);
+            const char *want = s_memo_playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY;
+            if (icon && strcmp(lv_label_get_text(icon), want) != 0) {
+                lv_label_set_text(icon, want);
+            }
+        }
+        if (s_memo_result != 0) {
+            int r = s_memo_result;
+            s_memo_result = 0;
+            toast(r == 1 ? T(STR_MEMO_SENT)
+                : r == -1 ? T(STR_MEMO_SEND_FAILED) : T(STR_MEMO_REC_FAILED));
+            if (r == 1 && s_active_builder == build_memo_record) show(build_memos);
+        }
+        if (s_memo_rx_flag) {
+            s_memo_rx_flag = false;
+            char nice[MEMO_SENDER_MAX], msg[64];
+            strlcpy(nice, s_memo_rx_from, sizeof(nice));
+            for (char *p = nice; *p; p++) {
+                if (*p == '-') *p = ' ';
+            }
+            snprintf(msg, sizeof(msg), T(STR_MEMO_NEW_FROM_FMT), nice);
+            toast(msg);
+            if (s_active_builder == build_home || s_active_builder == build_memos) {
+                show(s_active_builder);  // badge dot / new list row appears
+            }
+        }
+    }
+
+    // Rebuild home when the SD card comes or goes: the memos tile (grey state
+    // and unread badge) keys off it. The SD browser handles its own message.
+    static int s_sd_present_applied = -1;
+    if ((int)source_sd_present() != s_sd_present_applied) {
+        bool first = (s_sd_present_applied == -1);
+        s_sd_present_applied = (int)source_sd_present();
+        if (!first && s_active_builder == build_home) show(build_home);
     }
 
     // Rebuild home (the Favorites tile appears/disappears) and an open
@@ -5421,7 +6078,7 @@ static void sleep_timer_cb(lv_timer_t *t)
                 }
                 audio_source_t sa = audio_arbiter_active();
                 bool session = (sa != AUDIO_SOURCE_NONE && sa != AUDIO_SOURCE_BEEP &&
-                                sa != AUDIO_SOURCE_TUNER) ||
+                                sa != AUDIO_SOURCE_TUNER && sa != AUDIO_SOURCE_MEMO) ||
                                source_sendspin_session_active();
                 if (s_stats_session_prev && !session) stats_flush();  // play -> idle edge
                 s_stats_session_prev = session;
@@ -5769,8 +6426,10 @@ static void sleep_timer_cb(lv_timer_t *t)
     if (s_asleep) {
         if (inactive < 400) exit_sleep();
     } else if (s_sleep_ms > 0 && inactive >= s_sleep_ms &&
-               s_active_builder != build_tuner) {
-        // No screen sleep while tuning: the user watches without touching.
+               s_active_builder != build_tuner &&
+               s_memo_state != MEMO_UI_RECORDING) {
+        // No screen sleep while tuning or recording a memo: the user watches
+        // without touching (and a capture shows no audio activity).
         enter_sleep();
     }
 }

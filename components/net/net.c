@@ -263,6 +263,33 @@ static void start_mdns(void)
     }
 }
 
+int net_memo_peers(net_peer_t *out, int max)
+{
+    if (s_state != NET_STATE_CONNECTED || max <= 0) return 0;
+    mdns_result_t *results = NULL;
+    if (mdns_query_ptr("_bugne", "_tcp", 2500, 8, &results) != ESP_OK) return 0;
+    int count = 0;
+    for (mdns_result_t *r = results; r && count < max; r = r->next) {
+        const char *id = NULL, *name = NULL;
+        for (size_t i = 0; i < r->txt_count; i++) {
+            if (strcmp(r->txt[i].key, "id") == 0) id = r->txt[i].value;
+            else if (strcmp(r->txt[i].key, "name") == 0) name = r->txt[i].value;
+        }
+        if (id && strcasecmp(id, board_device_id()) == 0) continue;  // this device
+        mdns_ip_addr_t *a = r->addr;
+        while (a && a->addr.type != ESP_IPADDR_TYPE_V4) a = a->next;
+        if (!a) continue;
+        net_peer_t *p = &out[count];
+        if (name && name[0]) strlcpy(p->name, name, sizeof(p->name));
+        else snprintf(p->name, sizeof(p->name), "Bugne %s", id ? id : "?");
+        esp_ip4addr_ntoa(&a->addr.u_addr.ip4, p->ip, sizeof(p->ip));
+        p->port = r->port ? r->port : 80;
+        count++;
+    }
+    mdns_query_results_free(results);
+    return count;
+}
+
 // Minimal captive DNS: answer every A query with the AP gateway (192.168.4.1),
 // so any hostname a client probes resolves to us and pops the captive portal.
 #define DNS_PORT 53

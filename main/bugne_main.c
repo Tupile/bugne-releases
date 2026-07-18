@@ -26,6 +26,7 @@
 #include "source_sendspin.h"
 #include "played.h"
 #include "stats.h"
+#include "memo.h"
 
 static const char *TAG = "bugne";
 
@@ -108,6 +109,7 @@ static void bg_init_task(void *arg)
         ESP_LOGE(TAG, "web_config_start() failed: %s", esp_err_to_name(wc_err));
     }
     TRY(source_sd_init());
+    memo_clean_parts();  // drop memo temporaries left by a power cut mid-record/receive
     library_load();  // load the SD music index if present (best-effort, no card = no-op)
     TRY(source_stream_init());
     TRY(source_sendspin_init());

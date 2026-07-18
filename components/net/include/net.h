@@ -47,6 +47,18 @@ bool net_ip(char *buf, size_t size);
 // provisioning. Returns an esp_err_t from the scan.
 esp_err_t net_scan(net_ap_t *out, size_t max, size_t *count);
 
+// Another Bugne discovered on the LAN.
+typedef struct {
+    char     name[32];  // TXT "name", or "Bugne <id>" when unset
+    char     ip[16];
+    uint16_t port;
+} net_peer_t;
+
+// Browse mDNS for other Bugnes (_bugne._tcp), excluding this device
+// (blocking, ~2.5s: call from a worker task, never from the LVGL task).
+// Fills out (up to max) and returns the count; 0 when none or not connected.
+int net_memo_peers(net_peer_t *out, int max);
+
 #ifdef __cplusplus
 }
 #endif

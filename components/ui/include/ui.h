@@ -64,6 +64,10 @@ void ui_screenshot_release(void);
 // 400), true when queued for the UI task.
 bool ui_remote_nav(const char *screen);
 
+// A voice memo landed on the SD card (POST /api/memo, httpd task). Only sets a
+// flag consumed by the UI task (toast + home badge refresh); no LVGL call here.
+void ui_memo_received(const char *from);
+
 // Snapshot of what is currently playing, for the web status view.
 typedef struct {
     bool     active;       // something is playing (or paused)

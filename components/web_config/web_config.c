@@ -14,6 +14,7 @@
 #include "usage.h"
 #include "source_sd.h"
 #include "library.h"
+#include "memo.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -901,6 +902,98 @@ static esp_err_t sd_delete_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+// POST /api/memo?from=<name>: receive a voice memo from another Bugne on the
+// LAN. Deliberately NOT behind is_authed (peers do not know this device's web
+// password); bounded instead: ui.memo_rx kill switch, content length required
+// and capped, stored-memo cap (refuse, never purge), WAV format check, sender
+// name sanitized, storage path chosen here. See docs/config_schema.md.
+static esp_err_t memo_post(httpd_req_t *req)
+{
+    if (config_store_get()->ui.memo_rx == 0) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "memo receiving disabled");
+        return ESP_OK;
+    }
+    if (!source_sd_present()) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "no sd card");
+        return ESP_OK;
+    }
+    // A chunked request has content_len 0 and is rejected by the same check.
+    if (req->content_len <= MEMO_WAV_HEADER_BYTES || req->content_len > MEMO_RX_MAX_BYTES) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad memo size");
+        return ESP_OK;
+    }
+    uint64_t free_b = 0;
+    bool full = memo_count() >= MEMO_MAX_COUNT ||
+                !source_sd_usage(NULL, &free_b) || free_b < req->content_len + (4u << 20);
+    if (full) {
+        httpd_resp_set_status(req, "507 Insufficient Storage");
+        httpd_resp_sendstr(req, "memo box full");
+        return ESP_OK;
+    }
+
+    char query[96] = "", raw_from[64] = "", from[MEMO_SENDER_MAX];
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    httpd_query_key_value(query, "from", raw_from, sizeof(raw_from));
+    memo_sanitize_sender(from, sizeof(from), raw_from);
+
+    char final_abs[96], part_abs[104];
+    FILE *f = memo_rx_create(from, final_abs, sizeof(final_abs), part_abs, sizeof(part_abs));
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot create file");
+        return ESP_OK;
+    }
+    // PSRAM buffer: receives can coincide with auto-maintenance HTTPS, and the
+    // bench cap-loop test drove internal RAM down to ~500 B free with heavier
+    // internal allocations in flight. Data buffers are fine in PSRAM.
+    char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        fclose(f);
+        remove(part_abs);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    // The first 512 bytes are stashed and format-checked as soon as they are
+    // complete, so a non-WAV body is refused without writing megabytes first.
+    uint8_t head[512];
+    size_t head_len = 0, total = req->content_len, rcvd = 0;
+    bool ok = true, head_ok = false, bad_format = false;
+    while (rcvd < total) {
+        size_t want = total - rcvd < 4096 ? total - rcvd : 4096;
+        int r = httpd_req_recv(req, buf, want);
+        if (r <= 0) { ok = false; break; }
+        if (head_len < sizeof(head)) {
+            size_t c = sizeof(head) - head_len;
+            if (c > (size_t)r) c = (size_t)r;
+            memcpy(head + head_len, buf, c);
+            head_len += c;
+        }
+        rcvd += (size_t)r;
+        if (!head_ok && (head_len >= sizeof(head) || rcvd >= total)) {
+            uint32_t off, len;
+            if (!memo_wav_parse(head, head_len, &off, &len)) {
+                ok = false;
+                bad_format = true;
+                break;
+            }
+            head_ok = true;
+        }
+        if (fwrite(buf, 1, (size_t)r, f) != (size_t)r) { ok = false; break; }
+    }
+    free(buf);
+    fclose(f);
+    if (ok && rename(part_abs, final_abs) != 0) ok = false;
+    if (!ok) {
+        remove(part_abs);
+        if (bad_format) httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a memo wav");
+        else httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "receive failed");
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "memo received from %s (%u bytes)", from, (unsigned)total);
+    ui_memo_received(from);
+    return httpd_resp_sendstr(req, "ok");
+}
+
 // GET /api/playback: a JSON snapshot of what the device is playing.
 static esp_err_t playback_get(httpd_req_t *req)
 {
@@ -1356,7 +1449,7 @@ esp_err_t web_config_start(void)
                                // class of bug as the Sendspin httpd fix). Stays
                                // internal RAM: these handlers write flash.
     cfg.max_open_sockets = 3;  // keep lwip sockets free for streaming + Sendspin
-    cfg.max_uri_handlers = 34; // default 8 is below our route count (registration
+    cfg.max_uri_handlers = 36; // default 8 is below our route count (registration
                                // past the limit fails silently, e.g. /api/playback)
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd start failed");
 
@@ -1380,6 +1473,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/sd/upload", .method = HTTP_POST, .handler = sd_upload_post},
         {.uri = "/api/sd/mkdir",  .method = HTTP_POST, .handler = sd_mkdir_post},
         {.uri = "/api/sd/delete", .method = HTTP_POST, .handler = sd_delete_post},
+        {.uri = "/api/memo",      .method = HTTP_POST, .handler = memo_post},
         {.uri = "/api/library",      .method = HTTP_GET,  .handler = library_get},
         {.uri = "/api/library/scan", .method = HTTP_POST, .handler = library_scan_post},
         {.uri = "/api/podcasts/refresh", .method = HTTP_POST, .handler = podcasts_refresh_post},

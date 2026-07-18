@@ -109,6 +109,7 @@ typedef struct {
     int  accent;               // button/accent color 0..4, see docs/config_schema.md
     int  game;                 // times-tables game on the home screen: 1 = shown (default)
     int  tuner;                // instrument tuner on the home screen: 1 = shown (default)
+    int  memo_rx;              // accept voice memos from other Bugnes: 1 = yes (default)
     char tz[CFG_TZ_MAX];       // POSIX TZ string; default Paris ("CET-1CEST,M3.5.0,M10.5.0/3")
 } config_ui_t;
 

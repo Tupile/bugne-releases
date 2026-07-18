@@ -19,4 +19,5 @@ idf_component_register(
         source_sendspin
         podcast
         stats
+        memo
 )

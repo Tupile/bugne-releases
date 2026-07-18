@@ -19,6 +19,7 @@ typedef enum {
     AUDIO_SOURCE_SENDSPIN,
     AUDIO_SOURCE_BEEP,      // alarm beep fallback (generated tone, no decoder)
     AUDIO_SOURCE_TUNER,     // instrument tuner: mic capture only, no output
+    AUDIO_SOURCE_MEMO,      // voice memo: mic capture, or raw WAV playback
 } audio_source_t;
 
 // Create the arbiter state. Called by audio_init().
