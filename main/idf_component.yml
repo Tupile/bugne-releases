@@ -9,14 +9,14 @@ dependencies:
 
   # ES8311 codec support. Mature.
   espressif/esp_codec_dev:
-    version: "^1.5.10"
+    version: "^1.6.1"
 
   # AAC-LC decoder (for .m4a podcasts and AAC web radio). The MP4 container is
   # demuxed by the vendored minimp4 (Radio France .m4a has moov at the end, which
   # this component's own M4A parser does not handle), so only the raw AAC frame
   # decoder is used here.
   espressif/esp_audio_codec:
-    version: "^2.5.0"
+    version: "^2.6.0"
 
   # UI toolkit. Pinned to the 9.x line: the v8 and v9 APIs differ.
   lvgl/lvgl:
@@ -33,11 +33,11 @@ dependencies:
 
   # LittleFS for the JSON config in internal flash. Mature.
   joltwallet/littlefs:
-    version: "^1.22.1"
+    version: "^1.22.2"
 
   # mDNS for bugne-XXXX.local and Sendspin discovery.
   espressif/mdns:
-    version: "^1.11.2"
+    version: "^1.11.3"
 
   # Sendspin player protocol. Highest-risk dependency: pre-1.0 and tracks the
   # Music Assistant protocol. Pinned to an exact version on purpose.
