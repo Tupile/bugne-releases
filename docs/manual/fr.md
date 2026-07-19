@@ -111,8 +111,8 @@ point d'accès d'installation revient pour corriger la configuration.
 
 De grandes tuiles colorées : Radios web, Podcasts, Bibliothèque, Carte SD,
 Mémos, et selon ce que les parents ont activé : Multiplications (le jeu),
-Favoris, Accordeur. La roue dentée en haut à droite ouvre les réglages.
-Quand rien ne joue et que l'heure est réglée, elle s'affiche en bas.
+Favoris, Accordeur, et Lampe. La roue dentée en haut à droite ouvre les
+réglages. Quand rien ne joue et que l'heure est réglée, elle s'affiche en bas.
 
 ### Écouter la radio
 
@@ -192,6 +192,11 @@ Ouvrez la tuile Accordeur et jouez une note près de l'appareil. L'écran
 affiche le nom de la note, sa fréquence, et une barre qui indique si vous
 êtes trop bas (à gauche) ou trop haut (à droite). Accordez jusqu'à centrer
 la barre.
+
+### La Lampe
+
+Si vos parents l'ont configurée, une tuile Lampe apparaît sur l'écran d'accueil.
+Touchez-la pour allumer ou éteindre la lumière de la chambre.
 
 ### Les mémos vocaux
 
@@ -303,6 +308,9 @@ Tout le reste est ici :
 - Statistiques d'écoute : minutes écoutées par jour et par source sur la
   dernière semaine, et les titres les plus écoutés. Les données ne
   quittent jamais l'appareil et peuvent être remises à zéro à tout moment.
+- Home Assistant : configurez une connexion à votre serveur Home Assistant
+  (URL, Entité, et un Jeton d'accès longue durée) pour ajouter une tuile
+  Lampe sur l'écran d'accueil de l'appareil.
 - Réseaux Wi-Fi : ajouter, modifier ou supprimer les réseaux enregistrés.
 - Mot de passe de la page, sauvegarde et restauration de la configuration,
   journaux de l'appareil, et mises à jour du firmware (voir plus bas).

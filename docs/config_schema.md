@@ -19,6 +19,10 @@ password live in NVS, written by the config web page.
   "device": {
     "name": "Bugne-A1B2"
   },
+  "ha": {
+    "url": "http://homeassistant.local:8123",
+    "entity_id": "light.kids_room"
+  },
   "webradios": [
     { "id": 1, "name": "FIP", "url": "https://icecast.example/fip", "skip_preroll": 0 }
   ],
@@ -66,6 +70,8 @@ password live in NVS, written by the config web page.
 | --- | --- | --- |
 | `schema_version` | int | Schema version. Currently 1. Bump on breaking changes. |
 | `device.name` | string | Friendly display name. The unique device ID is derived from the MAC, not stored here. |
+| `ha.url` | string | Home Assistant base URL (e.g., `http://homeassistant.local:8123`). The Long-Lived Access Token is stored securely in NVS, not in this file. |
+| `ha.entity_id` | string | Home Assistant entity ID to toggle (e.g., `light.ceiling`). The Lamp tile appears if this and the URL are set. |
 | `webradios[].id` | int | Stable small integer, unique within the list. |
 | `webradios[].name` | string | Display name. |
 | `webradios[].url` | string | Stream or playlist URL (`.m3u`/`.pls` allowed). |

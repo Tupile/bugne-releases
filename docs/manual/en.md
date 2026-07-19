@@ -106,8 +106,8 @@ comes back so you can fix the configuration.
 
 Big colored tiles: Web radios, Podcasts, Library, SD card, Memos, and
 depending on what the parents enabled: Times tables (the game), Favorites,
-Tuner. The gear at the top right opens the settings. When nothing is
-playing and the clock is set, the time shows at the bottom.
+Tuner, and Lamp. The gear at the top right opens the settings. When nothing
+is playing and the clock is set, the time shows at the bottom.
 
 ### Listening to web radio
 
@@ -185,6 +185,11 @@ Open the Tuner tile and play a note on your instrument close to the
 device. The screen shows the note name, its frequency, and a bar that tells
 you if you are flat (left) or sharp (right). Tune until the bar is
 centered.
+
+### The Lamp
+
+If your parents configured it, a Lamp tile appears on the home screen.
+Tap it to turn the room's light on or off.
 
 ### Voice memos
 
@@ -291,6 +296,9 @@ Everything else lives here:
 - Listening statistics: minutes listened per day and per source over the
   last week, and the most-listened titles. The data never leaves the
   device and can be reset at any time.
+- Home Assistant: configure a connection to your Home Assistant server
+  (URL, Entity ID, and a Long-Lived Access Token) to add a Lamp tile to
+  the device's home screen.
 - Wi-Fi networks: add, edit or remove saved networks.
 - Page password, backup and restore of the configuration, device logs, and
   firmware updates (see below).

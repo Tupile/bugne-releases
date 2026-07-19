@@ -94,8 +94,9 @@ implemented feature set:
 - Home Assistant ready: the device advertises an `_bugne._tcp` mDNS service
   (TXT: id, version, name) for discovery, exposes a GET /api/status snapshot
   (version, uptime, RSSI, free RAM, SD usage) and POST /api/reboot, and the
-  whole API accepts stateless HTTP Basic auth (the web page password) so
-  external clients do not fight the browser session.
+  whole API accepts stateless HTTP Basic auth. The device can also act as a
+  client to toggle a Home Assistant light directly from a home screen tile
+  (configured with a Long-Lived Access Token).
 
 ## Hardware
 
