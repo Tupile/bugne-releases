@@ -113,9 +113,18 @@ typedef struct {
     char tz[CFG_TZ_MAX];       // POSIX TZ string; default Paris ("CET-1CEST,M3.5.0,M10.5.0/3")
 } config_ui_t;
 
+#define CFG_HA_URL_MAX 128
+#define CFG_HA_ENTITY_MAX 64
+
+typedef struct {
+    char url[CFG_HA_URL_MAX];
+    char entity_id[CFG_HA_ENTITY_MAX];
+} config_ha_t;
+
 typedef struct {
     int  schema_version;
     char device_name[CFG_DEVICE_NAME_MAX];
+    config_ha_t ha;
 
     config_webradio_t webradios[CFG_MAX_WEBRADIOS];
     size_t            webradio_count;
@@ -270,6 +279,10 @@ esp_err_t config_store_clear_password(void);
 // ESP_OK if it matches, ESP_ERR_NOT_FOUND if no password is set, ESP_FAIL on
 // mismatch.
 esp_err_t config_store_check_password(const char *plain);
+
+// Home Assistant access token. Stored in NVS.
+esp_err_t config_store_get_ha_token(char *token, size_t max_len);
+esp_err_t config_store_set_ha_token(const char *token);
 
 #ifdef __cplusplus
 }

@@ -609,6 +609,14 @@ static esp_err_t config_post(httpd_req_t *req)
                  strstr(buf, "\"alarms\"") ? "present" : "MISSING",
                  strstr(buf, "\"sunrise\"") ? "present" : "MISSING",
                  strstr(buf, "\"daily_limit\"") ? "present" : "MISSING");
+        cJSON *root = cJSON_Parse(buf);
+        if (root) {
+            cJSON *ha_t = cJSON_GetObjectItemCaseSensitive(root, "ha_token");
+            if (cJSON_IsString(ha_t)) {
+                config_store_set_ha_token(ha_t->valuestring);
+            }
+            cJSON_Delete(root);
+        }
         err = config_store_write_json(buf);
     }
     free(buf);

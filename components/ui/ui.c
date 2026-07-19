@@ -22,7 +22,7 @@
 #include "stats.h"
 #include "pitch.h"
 #include "memo.h"
-
+#include "ha_client.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1348,6 +1348,7 @@ static void build_memo_record(lv_obj_t *scr);  // record/preview/send state mach
 static void build_memo_play(lv_obj_t *scr);    // single-memo player
 static void build_talkie(lv_obj_t *scr);       // walkie-talkie session screen
 static void on_open_talkie(lv_event_t *e);     // entry button on build_memos
+static void on_open_lamp(lv_event_t *e);       // entry button on build_home
 static lv_obj_t *alarm_row(lv_obj_t *parent, lv_flex_align_t main_align);  // card row, defined with build_alarm_edit
 static void alarm_fire(int idx);     // alarm engine, defined after exit_sleep
 static void alarm_finish(bool snooze);
@@ -4401,11 +4402,11 @@ static void build_home(lv_obj_t *scr)
     lv_obj_t *wr, *pod, *lib, *sd, *game = NULL, *fav = NULL, *mem = NULL;
 
     // Extras beyond the 4 base tiles, in display order. Memos is always shown
-    // (it greys out without SD like the other SD features), so nb is 1..4.
-    const char *ex_icon[4];
-    str_id_t ex_id[4];
-    lv_event_cb_t ex_cb[4];
-    lv_obj_t **ex_out[4];
+    // (it greys out without SD like the other SD features), so nb is 1..5.
+    const char *ex_icon[5];
+    str_id_t ex_id[5];
+    lv_event_cb_t ex_cb[5];
+    lv_obj_t **ex_out[5];
     int nb = 0;
     if (game_on) {
         ex_icon[nb] = LV_SYMBOL_EDIT; ex_id[nb] = STR_GAME;
@@ -4419,6 +4420,10 @@ static void build_home(lv_obj_t *scr)
         ex_icon[nb] = LV_SYMBOL_VOLUME_MID; ex_id[nb] = STR_TUNER;
         ex_cb[nb] = on_open_tuner; ex_out[nb] = NULL; nb++;
     }
+    if (hc && hc->ha.url[0] && hc->ha.entity_id[0]) {
+        ex_icon[nb] = LV_SYMBOL_POWER; ex_id[nb] = STR_LAMP;
+        ex_cb[nb] = on_open_lamp; ex_out[nb] = NULL; nb++;
+    }
     ex_icon[nb] = LV_SYMBOL_ENVELOPE; ex_id[nb] = STR_MEMOS;
     ex_cb[nb] = on_open_memos; ex_out[nb] = &mem; nb++;
 
@@ -4426,35 +4431,39 @@ static void build_home(lv_obj_t *scr)
         // Portrait: a 2x2 grid of vertical tiles plus banner rows below for
         // the extras, packed two per row in display order; a lone last extra
         // spans the full width. One banner row keeps the original 38 px
-        // game-banner geometry; two shrink to 34 px each.
-        const int rows = (nb + 1) / 2;  // nb is 1..4: one or two rows
-        const int banner_h = (rows == 2) ? 34 : 38;
-        const int w2 = (scr_w() - 2 * M - G) / 2;
-        const int h2 = (limit - Y0 - (1 + rows) * G - rows * banner_h) / 2;
+        // game-banner geometry; two shrink to 34 px each, three shrink further.
+        const int rows = (nb + 1) / 2;  // nb is 1..5: one, two, or three rows
+        const int Gp = (rows >= 3) ? 6 : G; // squeeze gutter if 3 banner rows
+        const int banner_h = (rows >= 3) ? 30 : (rows == 2) ? 34 : 38;
+        const int w2 = (scr_w() - 2 * M - Gp) / 2;
+        const int h2 = (limit - Y0 - (1 + rows) * Gp - rows * banner_h) / 2;
         wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, w2, h2, false, on_open_webradios);
-        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + w2 + G, Y0, w2, h2, false, on_open_podcasts);
-        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M, Y0 + h2 + G, w2, h2, false, on_open_library);
-        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + w2 + G, Y0 + h2 + G, w2, h2, false, on_open_sd);
-        const int by = Y0 + 2 * (h2 + G);
+        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + w2 + Gp, Y0, w2, h2, false, on_open_podcasts);
+        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M, Y0 + h2 + Gp, w2, h2, false, on_open_library);
+        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + w2 + Gp, Y0 + h2 + Gp, w2, h2, false, on_open_sd);
+        const int by = Y0 + 2 * (h2 + Gp);
         for (int i = 0; i < nb; i++) {
             const bool lone = (i == nb - 1) && (nb % 2 == 1);  // odd count: last row is full width
-            const int bx = M + (i % 2) * (w2 + G);
-            const int y = by + (i / 2) * (banner_h + G);
+            const int bx = M + (i % 2) * (w2 + Gp);
+            const int y = by + (i / 2) * (banner_h + Gp);
             lv_obj_t *b = make_tile(scr, ex_icon[i], ex_id[i], bx, y,
-                                    lone ? 2 * w2 + G : w2, banner_h, true, ex_cb[i]);
+                                    lone ? 2 * w2 + Gp : w2, banner_h, true, ex_cb[i]);
             if (ex_out[i]) *ex_out[i] = b;
         }
     } else {
         // Landscape: a 3-column top row of vertical mini-tiles; row 2 holds
         // the SD card plus the extras. With 1 extra the pair is centered;
         // 2 extras fill the 3 columns; 3 switch row 2 to 4 narrower cells;
-        // with all 4 the memos tile is promoted to the top row and the grid
-        // becomes a symmetric 4x2 (row 2 never shrinks below 4 cells).
-        const bool e4 = (nb == 4);
+        // with 4 or 5 the memos tile is promoted to the top row and the grid
+        // becomes 4x2 or 4 top / 5 bottom.
+        const bool e4 = (nb >= 4);
+        const bool e5 = (nb == 5);
         const int w3 = (scr_w() - 2 * M - 2 * G) / 3;
         const int w4 = (scr_w() - 2 * M - 3 * G) / 4;
+        const int w5 = (scr_w() - 2 * M - 4 * 6) / 5; // Use 6px gutter for 5 cells
         const int wt = e4 ? w4 : w3;               // top-row cell width
-        const int w2b = (nb >= 3) ? w4 : w3;       // row-2 cell width
+        const int w2b = e5 ? w5 : (nb >= 3) ? w4 : w3; // row-2 cell width
+        const int G2 = e5 ? 6 : G;                 // row-2 gutter
         const int h3 = (limit - Y0 - G) / 2;
         const int row2_off = (nb == 1) ? (w3 + G) / 2 : 0;  // centers a 2-tile row
         wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, wt, h3, false, on_open_webradios);
@@ -4467,12 +4476,12 @@ static void build_home(lv_obj_t *scr)
             if (ex_out[nb - 1]) *ex_out[nb - 1] = b;
         }
         sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + row2_off, Y0 + h3 + G, w2b, h3, false, on_open_sd);
-        int x5 = M + row2_off + w2b + G;
+        int x5 = M + row2_off + w2b + G2;
         for (int i = 0; i < n_row2; i++) {
             lv_obj_t *b = make_tile(scr, ex_icon[i], ex_id[i], x5, Y0 + h3 + G, w2b, h3,
                                     false, ex_cb[i]);
             if (ex_out[i]) *ex_out[i] = b;
-            x5 += w2b + G;
+            x5 += w2b + G2;
         }
     }
 
@@ -5284,6 +5293,79 @@ static void build_settings_alarm(lv_obj_t *scr)
 
 static void on_open_settings_alarm(lv_event_t *e) { (void)e; show(build_settings_alarm); }
 
+static uint16_t s_lamp_h = 0; // Hue (0-360)
+static uint8_t s_lamp_v = 100; // Brightness (0-100)
+
+static void send_lamp_color(void) {
+    float h = s_lamp_h;
+    float s = 1.0f;
+    float v = s_lamp_v / 100.0f;
+    float c = v * s;
+    float x = c * (1 - fabs(fmod(h / 60.0, 2) - 1));
+    float m = v - c;
+    float rs = 0, gs = 0, bs = 0;
+    if(h >= 0 && h < 60) { rs = c; gs = x; bs = 0; }
+    else if(h >= 60 && h < 120) { rs = x; gs = c; bs = 0; }
+    else if(h >= 120 && h < 180) { rs = 0; gs = c; bs = x; }
+    else if(h >= 180 && h < 240) { rs = 0; gs = x; bs = c; }
+    else if(h >= 240 && h < 300) { rs = x; gs = 0; bs = c; }
+    else if(h >= 300 && h < 360) { rs = c; gs = 0; bs = x; }
+    uint8_t r = (rs + m) * 255;
+    uint8_t g = (gs + m) * 255;
+    uint8_t b = (bs + m) * 255;
+    uint8_t brightness = s_lamp_v * 2.55f;
+    ha_client_set_light_color(r, g, b, brightness);
+}
+
+static void on_lamp_hue_changed(lv_event_t *e) {
+    lv_obj_t *arc = lv_event_get_target(e);
+    s_lamp_h = lv_arc_get_value(arc);
+    send_lamp_color();
+}
+
+static void on_lamp_bri_changed(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target(e);
+    s_lamp_v = lv_slider_get_value(slider);
+    send_lamp_color();
+}
+
+static void on_lamp_toggle(lv_event_t *e) {
+    (void)e;
+    ha_client_toggle_light();
+}
+
+static void build_lamp(lv_obj_t *scr);
+static void on_open_lamp(lv_event_t *e) { (void)e; show(build_lamp); }
+
+static void build_lamp(lv_obj_t *scr)
+{
+    add_back_button(scr);
+    add_title(scr, T(STR_LAMP));
+
+    // Hue Arc
+    lv_obj_t *arc = lv_arc_create(scr);
+    lv_obj_set_size(arc, 160, 160);
+    lv_arc_set_rotation(arc, 135);
+    lv_arc_set_bg_angles(arc, 0, 360);
+    lv_arc_set_range(arc, 0, 360);
+    lv_arc_set_value(arc, s_lamp_h);
+    lv_obj_align(arc, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_add_event_cb(arc, on_lamp_hue_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Toggle button in the center
+    lv_obj_t *btn_toggle = make_round_btn(scr, LV_SYMBOL_POWER, 64, true, on_lamp_toggle);
+    lv_obj_align(btn_toggle, LV_ALIGN_CENTER, 0, -10);
+
+    // Brightness Slider
+    lv_obj_t *slider = lv_slider_create(scr);
+    lv_obj_set_size(slider, 200, 15);
+    lv_slider_set_range(slider, 1, 100);
+    lv_slider_set_value(slider, s_lamp_v, LV_ANIM_OFF);
+    lv_obj_align(slider, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_add_event_cb(slider, on_lamp_bri_changed, LV_EVENT_VALUE_CHANGED, NULL);
+}
+
+
 static void build_settings(lv_obj_t *scr)
 {
     add_back_button(scr);
@@ -5695,6 +5777,7 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "now_playing",       build_now_playing },
     { "sendspin",          build_sendspin_playing },
     { "alarm_ringing",     build_alarm_ringing },
+    { "lamp",              build_lamp },
 };
 #define NAV_SCREEN_COUNT ((int)(sizeof(NAV_SCREENS) / sizeof(NAV_SCREENS[0])))
 

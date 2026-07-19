@@ -44,6 +44,8 @@ static void set_defaults(config_t *c)
     memset(c, 0, sizeof(*c));
     c->schema_version = CFG_SCHEMA_VERSION;
     c->device_name[0] = '\0';  // empty -> consumers fall back to "Bugne <id>"
+    c->ha.url[0] = '\0';
+    c->ha.entity_id[0] = '\0';
     c->webradio_count = 0;
     c->podcast_count = 0;
     c->ui.volume = 60;
@@ -132,6 +134,18 @@ static void load_from_json(const cJSON *root)
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(dev, "name");
         if (cJSON_IsString(name) && name->valuestring) {
             strlcpy(s_config.device_name, name->valuestring, sizeof(s_config.device_name));
+        }
+    }
+
+    const cJSON *ha = cJSON_GetObjectItemCaseSensitive(root, "ha");
+    if (cJSON_IsObject(ha)) {
+        const cJSON *url = cJSON_GetObjectItemCaseSensitive(ha, "url");
+        if (cJSON_IsString(url) && url->valuestring) {
+            strlcpy(s_config.ha.url, url->valuestring, sizeof(s_config.ha.url));
+        }
+        const cJSON *eid = cJSON_GetObjectItemCaseSensitive(ha, "entity_id");
+        if (cJSON_IsString(eid) && eid->valuestring) {
+            strlcpy(s_config.ha.entity_id, eid->valuestring, sizeof(s_config.ha.entity_id));
         }
     }
 
@@ -292,6 +306,10 @@ static esp_err_t save_to_disk(const config_t *c)
     cJSON_AddNumberToObject(root, "schema_version", c->schema_version);
     cJSON *dev = cJSON_AddObjectToObject(root, "device");
     cJSON_AddStringToObject(dev, "name", c->device_name);
+
+    cJSON *ha = cJSON_AddObjectToObject(root, "ha");
+    cJSON_AddStringToObject(ha, "url", c->ha.url);
+    cJSON_AddStringToObject(ha, "entity_id", c->ha.entity_id);
 
     cJSON *radios = cJSON_AddArrayToObject(root, "webradios");
     for (size_t i = 0; i < c->webradio_count; i++) {
@@ -573,6 +591,7 @@ esp_err_t config_store_favorite_remove(int index)
 #define NVS_KEY_PASS    "wifi_pass"
 #define NVS_KEY_PW_SALT "pw_salt"
 #define NVS_KEY_PW_HASH "pw_hash"
+#define NVS_KEY_HA_TOKN "ha_token"
 #define NVS_KEY_DLJOB   "dljob"
 #define NVS_KEY_RESUME  "resume"
 #define NVS_KEY_HISCORE "highscore"
@@ -747,6 +766,34 @@ esp_err_t config_store_check_password(const char *plain)
         diff |= calc[i] ^ stored[i];
     }
     return diff == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_store_get_ha_token(char *token, size_t max_len)
+{
+    if (!token || max_len == 0) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    size_t len = max_len;
+    err = nvs_get_str(h, NVS_KEY_HA_TOKN, token, &len);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t config_store_set_ha_token(const char *token)
+{
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
+    esp_err_t err;
+    if (token && token[0]) {
+        err = nvs_set_str(h, NVS_KEY_HA_TOKN, token);
+    } else {
+        err = nvs_erase_key(h, NVS_KEY_HA_TOKN);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    }
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
 }
 
 esp_err_t config_store_get_dljob(config_dljob_t *job)

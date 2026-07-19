@@ -134,6 +134,8 @@ static const lang_def_t LANGS[] = {
             [STR_TALKIE_HOLD]        = "Hold to talk",
             [STR_TALKIE_HOLD_HINT]   = "Hold the button to talk",
             [STR_TALKIE_LEFT_MEMO]   = "Left as a memo",
+            [STR_LAMP]               = "Lamp",
+            [STR_HA_TITLE]           = "Home Assistant",
         },
     },
     {
@@ -259,6 +261,8 @@ static const lang_def_t LANGS[] = {
             [STR_TALKIE_HOLD]        = "Maintenir pour parler",
             [STR_TALKIE_HOLD_HINT]   = "Maintenez le bouton pour parler",
             [STR_TALKIE_LEFT_MEMO]   = "Laissé en mémo",
+            [STR_LAMP]               = "Lampe",
+            [STR_HA_TITLE]           = "Home Assistant",
         },
     },
 };

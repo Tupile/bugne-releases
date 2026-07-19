@@ -133,6 +133,8 @@ typedef enum {
     STR_TALKIE_HOLD,        // talkie status line: idle, hold the button to talk
     STR_TALKIE_HOLD_HINT,   // toast: tap too short to capture anything
     STR_TALKIE_LEFT_MEMO,   // toast: peer not in talkie mode, stored as a memo
+    STR_LAMP,               // home tile + lamp screen title
+    STR_HA_TITLE,           // home assistant section title
     STR__COUNT
 } str_id_t;
 
