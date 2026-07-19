@@ -126,7 +126,8 @@ generate them (edit a script and rerun it to customize):
 The radio and seventies cabinets print face down (front on the bed) with no
 supports. Their `*_corps+grille.step` files combine body and grille so a
 multi-color printer can put the grille plate in a second color; a single
-color works too. Assembly needs a few small self-tapping screws.
+color works too. Assembly needs 4x M3 6mm screws to mount the board to the
+case, and 4x M3 10mm screws to close the case cover.
 
 <img src="case/preview_seventies_face.png" alt="Seventies cabinet" height="220">
 

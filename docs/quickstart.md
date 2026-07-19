@@ -15,7 +15,8 @@ each step below links to the relevant part.
   The small speaker comes with the board. Nothing to solder.
 - A USB data cable and a computer with Python installed (for the first
   flash only).
-- A few small self-tapping screws to hold the board and close the case.
+- 4x M3 6mm screws to mount the board to the case, and 4x M3 10mm screws
+  to close the case cover.
 - Optional: a microSD card (FAT32) for your own music and offline podcast
   episodes.
 - The board has a battery port and charger (single-cell 3.7 V LiPo), but

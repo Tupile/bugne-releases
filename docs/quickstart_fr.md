@@ -17,8 +17,8 @@ concernée.
   Rien à souder.
 - Un câble USB de données et un ordinateur avec Python installé (pour le
   premier flash uniquement).
-- Quelques petites vis autotaraudeuses pour fixer la carte et fermer le
-  boîtier.
+- 4 vis M3 de 6 mm pour fixer la carte dans le boîtier, et 4 vis M3 de
+  10 mm pour fixer le capot du boîtier.
 - Facultatif : une carte microSD (FAT32) pour votre musique et les
   épisodes de podcast hors ligne.
 - La carte a un port batterie et un chargeur (LiPo 3,7 V à une cellule),
