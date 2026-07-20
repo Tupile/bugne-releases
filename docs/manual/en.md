@@ -19,6 +19,9 @@ parents' corner (the web page, alarms, quiet hours, updates).
 - A USB port on the side: it powers the device and charges the internal
   battery.
 - A microSD card slot for your own music and for storing podcast episodes.
+  If you need one, you can find them [here](https://s.click.aliexpress.com/e/_c2yej75h)
+  or [here](https://s.click.aliexpress.com/e/_c3ywvSmJ) (for users in France,
+  you can also use this [Amazon affiliate link](https://amzn.to/3Ta5I6J)).
 - A BOOT button: you normally never need it.
 
 Turn it on: plug it in or use the power switch. The home screen appears in
@@ -32,7 +35,12 @@ for it.
 - The board is an **LCDWIKI ES3C28P** (use that exact reference): an
   ESP32-S3 with 16 MB flash and 8 MB PSRAM, a 2.8 inch capacitive touch
   screen, an audio codec, a microphone, a microSD slot and a USB port.
-  The small speaker comes with the board.
+  The small speaker comes with the board. If you wish to support the
+  project at no extra cost, you can order the board via this
+  [Aliexpress affiliate link](https://s.click.aliexpress.com/e/_c4OZeS8F)
+  (or this [alternative link](https://s.click.aliexpress.com/e/_c3MmlBCJ)
+  if unavailable). Make sure to select the touch model "ES3C28P". For users
+  in France, you can also use this [Amazon affiliate link](https://amzn.to/3RrzKT1).
 - The board also has a battery port and charger (single-cell 3.7 V LiPo,
   JST 1.25 mm plug). This is untested by the project so far, so it is
   not recommended yet: power the device over USB.
@@ -42,7 +50,8 @@ for it.
   landscape, printed face down with no supports; their speaker grille
   can be printed in a second color). The seventies cabinet is the
   recommended one. A few small self-tapping screws hold the board and
-  close the back.
+  close the back (4x M3 6mm for the board, 4x M3 10mm for the cover;
+  available [here](https://s.click.aliexpress.com/e/_c34zawnh)).
 
 <img src="../../case/preview_seventies_face.png" alt="Seventies cabinet" height="200">
 
@@ -52,18 +61,13 @@ Skip this section if your Bugne already shows something on screen: it only
 concerns a freshly assembled board (or a full recovery). Normal updates
 are done from the web page (see "Firmware updates" in section 7).
 
-You need a computer with Python installed and a USB data cable.
+You need a computer and a USB data cable.
 
-1. Install esptool (the standard Espressif flashing tool):
-   `pip install esptool`.
-2. Download `bugne-flash.zip` from the latest release at
-   <https://github.com/Tupile/bugne-releases/releases/latest> and unzip
-   it.
-3. Connect the board to the computer over USB.
-4. In the unzipped folder, run `./flash.sh --erase` (Linux/macOS). On
-   Windows, run the `esptool` command written inside `flash.sh`.
-5. If no serial port is found, hold the BOOT button while plugging in the
-   USB cable, then run the script again.
+1. Connect the board to your computer over USB.
+2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page using Chrome, Edge, or Opera.
+3. Click "Installer", select your board's COM port, and wait for the installation to finish.
+
+*(Advanced users or offline use: you can still flash manually by downloading `bugne-flash.zip` from the latest release, installing `esptool`, and running the included `flash.sh` script).*
 
 When the script finishes, the device restarts into Bugne and opens its
 `Bugne-Setup-XXXX` hotspot: continue with the next section.

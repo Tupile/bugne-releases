@@ -18,8 +18,7 @@ each step below links to the relevant part.
   (or this [alternative link](https://s.click.aliexpress.com/e/_c3MmlBCJ)
   if unavailable). Make sure to select the touch model "ES3C28P". For users
   in France, you can also use this [Amazon affiliate link](https://amzn.to/3RrzKT1).
-- A USB data cable and a computer with Python installed (for the first
-  flash only).
+- A USB data cable and a computer (for the first flash only).
 - 4x M3 6mm screws to mount the board to the case, and 4x M3 10mm screws
   to close the case cover. If you don't have them, you can find them
   [here](https://s.click.aliexpress.com/e/_c34zawnh).
@@ -60,16 +59,13 @@ CadQuery scripts that generate all of them.
 A brand-new board needs one full flash over USB. All later updates install
 over Wi-Fi from the web page, no cable needed.
 
-1. Install esptool: `pip install esptool`.
-2. Download `bugne-flash.zip` from the latest release at
-   <https://github.com/Tupile/bugne-releases/releases/latest> and unzip it.
-3. Connect the board to the computer over USB.
-4. In the unzipped folder, run `./flash.sh --erase` (Linux/macOS). On
-   Windows, run the `esptool` command written inside `flash.sh`.
-5. If no serial port is found, hold the BOOT button while plugging in the
-   USB cable, then run the script again.
+1. Connect the board to your computer over USB.
+2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page using Chrome, Edge, or Opera.
+3. Click "Installer", select your board's COM port, and wait for the installation to finish.
 
-When the script finishes, the device restarts into Bugne.
+*(Note: Advanced users can still flash offline using `bugne-flash.zip` and `esptool`. See the full manual for details).*
+
+When the installation finishes, the device restarts into Bugne.
 
 ## 4. Connect it to Wi-Fi (follow the QR code)
 

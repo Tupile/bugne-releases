@@ -21,8 +21,8 @@ concernée.
   cas d'indisponibilité) en vous assurant de sélectionner le modèle touch
   "ES3C28P". Pour les utilisateurs basés en France, vous pouvez également
   utiliser ce [lien affilié Amazon](https://amzn.to/3RrzKT1).
-- Un câble USB de données et un ordinateur avec Python installé (pour le
-  premier flash uniquement).
+- Un câble USB de données et un ordinateur (pour le premier flash
+  uniquement).
 - 4 vis M3 de 6 mm pour fixer la carte dans le boîtier, et 4 vis M3 de
   10 mm pour fixer le capot du boîtier. Si vous ne les avez pas, vous
   pouvez les trouver [ici](https://s.click.aliexpress.com/e/_c34zawnh).
@@ -66,18 +66,13 @@ avec les scripts CadQuery qui génèrent tous les modèles.
 Une carte neuve a besoin d'un flash complet par USB. Toutes les mises à
 jour suivantes s'installent par Wi-Fi depuis la page web, sans câble.
 
-1. Installez esptool : `pip install esptool`.
-2. Téléchargez `bugne-flash.zip` depuis la dernière version publiée sur
-   <https://github.com/Tupile/bugne-releases/releases/latest> et
-   décompressez-le.
-3. Branchez la carte à l'ordinateur en USB.
-4. Dans le dossier décompressé, lancez `./flash.sh --erase`
-   (Linux/macOS). Sous Windows, lancez la commande `esptool` écrite dans
-   `flash.sh`.
-5. Si aucun port série n'est trouvé, maintenez le bouton BOOT en
-   branchant le câble USB, puis relancez le script.
+1. Branchez la carte à votre ordinateur en USB.
+2. Ouvrez la page de l'[Installateur Web](https://tupile.github.io/bugne-releases/tools/web-flasher/) avec Chrome, Edge ou Opera.
+3. Cliquez sur "Installer", choisissez le port COM de votre carte, et patientez pendant l'installation.
 
-À la fin du script, l'appareil redémarre sous Bugne.
+*(Note : Les utilisateurs avancés peuvent toujours flasher hors-ligne avec `bugne-flash.zip` et `esptool`. Voir le manuel complet).*
+
+À la fin, l'appareil redémarre sous Bugne.
 
 ## 4. Connexion au Wi-Fi (suivez le QR code)
 

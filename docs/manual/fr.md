@@ -20,7 +20,9 @@ parents (la page web, les alarmes, les heures calmes, les mises à jour).
 - Un port USB sur le côté : il alimente l'appareil et charge la batterie
   interne.
 - Un lecteur de carte microSD pour votre musique et les épisodes de
-  podcasts enregistrés.
+  podcasts enregistrés. Si vous en avez besoin, vous pouvez en trouver [ici](https://s.click.aliexpress.com/e/_c2yej75h)
+  ou [ici](https://s.click.aliexpress.com/e/_c3ywvSmJ) (pour les utilisateurs en France,
+  vous pouvez aussi utiliser ce [lien affilié Amazon](https://amzn.to/3Ta5I6J)).
 - Un bouton BOOT : vous n'en avez normalement jamais besoin.
 
 Pour l'allumer : branchez-la ou utilisez l'interrupteur. L'écran d'accueil
@@ -34,7 +36,13 @@ imprimé en 3D.
 - La carte est une **LCDWIKI ES3C28P** (référence exacte à respecter) :
   un ESP32-S3 avec 16 Mo de flash et 8 Mo de PSRAM, un écran tactile
   capacitif de 2,8 pouces, un codec audio, un micro, un lecteur microSD
-  et un port USB. Le petit haut-parleur est livré avec la carte.
+  et un port USB. Le petit haut-parleur est livré avec la carte. Si vous
+  souhaitez m'aider sans coût supplémentaire, vous pouvez la commander via ce
+  [lien affilié Aliexpress](https://s.click.aliexpress.com/e/_c4OZeS8F)
+  (ou ce [lien alternatif](https://s.click.aliexpress.com/e/_c3MmlBCJ) en
+  cas d'indisponibilité) en vous assurant de sélectionner le modèle touch
+  "ES3C28P". Pour les utilisateurs basés en France, vous pouvez également
+  utiliser ce [lien affilié Amazon](https://amzn.to/3RrzKT1).
 - La carte a aussi un port batterie avec chargeur (LiPo 3,7 V à une
   cellule, prise JST 1.25 mm). Le projet ne l'a pas encore testé, donc
   ce n'est pas conseillé pour l'instant : alimentez l'appareil par USB.
@@ -44,7 +52,8 @@ imprimé en 3D.
   (tous deux en paysage, imprimés face contre le plateau sans supports ;
   leur grille de haut-parleur peut s'imprimer dans une seconde couleur).
   Le coffret seventies est le modèle conseillé. Quelques petites vis
-  autotaraudeuses fixent la carte et ferment le dos.
+  autotaraudeuses fixent la carte et ferment le dos (4 vis M3 de 6 mm pour
+  la carte, 4 vis M3 de 10 mm pour le capot ; disponibles [ici](https://s.click.aliexpress.com/e/_c34zawnh)).
 
 <img src="../../case/preview_seventies_face.png" alt="Coffret seventies" height="200">
 
@@ -55,20 +64,13 @@ elle ne concerne qu'une carte fraîchement assemblée (ou une récupération
 complète). Les mises à jour normales se font depuis la page web (voir
 « Mises à jour du firmware » en section 7).
 
-Il vous faut : un ordinateur avec Python installé et un câble USB de
-données.
+Il vous faut : un ordinateur et un câble USB de données.
 
-1. Installez esptool (l'outil de flash officiel d'Espressif) :
-   `pip install esptool`.
-2. Téléchargez `bugne-flash.zip` depuis la dernière version publiée sur
-   <https://github.com/Tupile/bugne-releases/releases/latest> et
-   décompressez-le.
-3. Branchez la carte à l'ordinateur en USB.
-4. Dans le dossier décompressé, lancez `./flash.sh --erase`
-   (Linux/macOS). Sous Windows, lancez la commande `esptool` écrite dans
-   `flash.sh`.
-5. Si aucun port série n'est trouvé, maintenez le bouton BOOT en
-   branchant le câble USB, puis relancez le script.
+1. Branchez la carte à votre ordinateur en USB.
+2. Ouvrez la page de l'[Installateur Web](https://tupile.github.io/bugne-releases/tools/web-flasher/) avec Chrome, Edge ou Opera.
+3. Cliquez sur "Installer", choisissez le port COM de votre carte, et patientez pendant l'installation.
+
+*(Utilisateurs avancés ou hors-ligne : vous pouvez toujours flasher manuellement en téléchargeant `bugne-flash.zip` depuis la dernière release, en installant `esptool`, et en lançant le script `flash.sh` fourni).*
 
 À la fin, l'appareil redémarre sous Bugne et ouvre son point d'accès
 `Bugne-Setup-XXXX` : enchaînez avec la section suivante.

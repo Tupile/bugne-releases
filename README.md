@@ -159,8 +159,12 @@ A brand-new board needs one full flash over USB: bootloader, partition
 table, OTA data and app. The `bugne.bin` release asset alone is an OTA app
 image; it updates a running Bugne but cannot bootstrap a blank chip.
 
-Without ESP-IDF, using the release bundle:
+The easiest way to flash a new board is via the browser (Chrome, Edge, Opera):
+1. Connect the board to your computer over USB.
+2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page.
+3. Click "Installer", select your board's COM port, and wait for completion.
 
+For offline use or advanced troubleshooting, you can still flash via the CLI using the release bundle:
 1. Download `bugne-flash.zip` from the
    [latest release](https://github.com/Tupile/bugne-releases/releases/latest)
    and unzip it.
@@ -170,7 +174,7 @@ Without ESP-IDF, using the release bundle:
    install). If no serial port shows up, hold the BOOT button while
    plugging in the cable to enter download mode, then retry.
 
-On Windows, run the `esptool write_flash` command spelled out in `flash.sh`
+On Windows without the script, run the `esptool write_flash` command spelled out in `flash.sh`
 (same four binaries, offsets 0x0 / 0x8000 / 0xf000 / 0x20000).
 
 With ESP-IDF installed, `idf.py -p <PORT> flash` from a source build (see
