@@ -45,7 +45,9 @@ for it.
   JST 1.25 mm plug). This is untested by the project so far, so it is
   not recommended yet: power the device over USB.
 - The case is 3D printed: the `case/` folder of the project offers three
-  designs. A plain two-piece case (portrait, sound through a grid in the
+  designs (also available for BambuLab printers on
+  [MakerWorld](https://makerworld.com/en/models/3073793-bugne-open-source-internet-radio-podcast-player)).
+  A plain two-piece case (portrait, sound through a grid in the
   back), a "vintage radio" cabinet and a "seventies" cabinet (both
   landscape, printed face down with no supports; their speaker grille
   can be printed in a second color). The seventies cabinet is the

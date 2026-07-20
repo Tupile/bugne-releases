@@ -41,7 +41,9 @@ concernée.
 <img src="../case/preview_seventies_face.png" alt="Coffret seventies" height="200">
 
 Imprimez les trois pièces du coffret seventies depuis le dossier
-[`case/`](../case) :
+[`case/`](../case) ou téléchargez-les sur
+[MakerWorld](https://makerworld.com/en/models/3073793-bugne-open-source-internet-radio-podcast-player)
+si vous avez une imprimante BambuLab :
 
 - `es3c28p_seventies_corps.stl` (corps)
 - `es3c28p_seventies_capot.stl` (capot arrière)

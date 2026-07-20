@@ -35,7 +35,9 @@ each step below links to the relevant part.
 <img src="../case/preview_seventies_face.png" alt="Seventies cabinet" height="200">
 
 Print the three parts of the seventies cabinet from the [`case/`](../case)
-folder:
+folder, or download them from
+[MakerWorld](https://makerworld.com/en/models/3073793-bugne-open-source-internet-radio-podcast-player)
+if you have a BambuLab printer:
 
 - `es3c28p_seventies_corps.stl` (body)
 - `es3c28p_seventies_capot.stl` (rear cover)

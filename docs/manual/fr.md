@@ -47,7 +47,9 @@ imprimé en 3D.
   cellule, prise JST 1.25 mm). Le projet ne l'a pas encore testé, donc
   ce n'est pas conseillé pour l'instant : alimentez l'appareil par USB.
 - Le boîtier s'imprime en 3D : le dossier `case/` du projet propose
-  trois modèles. Un boîtier simple en deux pièces (portrait, son par une
+  trois modèles (également disponibles pour les imprimantes BambuLab sur
+  [MakerWorld](https://makerworld.com/en/models/3073793-bugne-open-source-internet-radio-podcast-player)).
+  Un boîtier simple en deux pièces (portrait, son par une
   grille au dos), un poste « vieille radio » et un coffret « seventies »
   (tous deux en paysage, imprimés face contre le plateau sans supports ;
   leur grille de haut-parleur peut s'imprimer dans une seconde couleur).

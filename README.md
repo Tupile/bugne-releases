@@ -119,7 +119,9 @@ in principle, not recommended yet. Power the device over USB.
 ## 3D-printed case
 
 [case/](case) holds ready-to-print designs plus the CadQuery scripts that
-generate them (edit a script and rerun it to customize):
+generate them (edit a script and rerun it to customize). You can also find
+them ready for BambuLab printers on
+[MakerWorld](https://makerworld.com/en/models/3073793-bugne-open-source-internet-radio-podcast-player):
 
 - Plain two-piece case (`es3c28p_boitier_facade.stl` +
   `es3c28p_boitier_fond.stl`): portrait, sound exits through a grid in the
