@@ -106,6 +106,12 @@ microphone, microSD slot and USB port. Buy it under that exact reference; the
 speaker ships with the board. The full pin map and board notes live in
 [docs/hardware.md](docs/hardware.md).
 
+If you wish to support this project at no extra cost, you can order the board via this
+[Aliexpress affiliate link](https://s.click.aliexpress.com/e/_c4OZeS8F)
+(or this [alternative link](https://s.click.aliexpress.com/e/_c3MmlBCJ) if
+unavailable). Make sure to select the touch model "ES3C28P". For users in France,
+you can also use this [Amazon affiliate link](https://amzn.to/3RrzKT1).
+
 The board also carries a TP4054 charger and a JST 1.25mm port for a 1S 3.7V
 LiPo battery. Battery operation is untested by this project so far: possible
 in principle, not recommended yet. Power the device over USB.
@@ -121,7 +127,7 @@ generate them (edit a script and rerun it to customize):
 - Vintage radio cabinet (`es3c28p_radio_*.stl`): landscape, vertical front,
   sloped back, screwed rear cover.
 - Seventies cabinet (`es3c28p_seventies_*.stl`, a 1970s-inspired look):
-  landscape, perforated speaker plate, separate stand.
+  landscape, perforated speaker plate.
   This is the recommended design.
 
 The radio and seventies cabinets print face down (front on the bed) with no
@@ -129,6 +135,11 @@ supports. Their `*_corps+grille.step` files combine body and grille so a
 multi-color printer can put the grille plate in a second color; a single
 color works too. Assembly needs 4x M3 6mm screws to mount the board to the
 case, and 4x M3 10mm screws to close the case cover.
+
+If you don't have a 3D printer, services like PCBWay or Craftcloud can print
+and deliver the case to you. For the seventies model, you should order
+`es3c28p_seventies_corps+grille.step` and `es3c28p_seventies_capot.stl`
+printed in PLA.
 
 <img src="case/preview_seventies_face.png" alt="Seventies cabinet" height="220">
 

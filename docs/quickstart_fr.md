@@ -14,13 +14,23 @@ concernée.
   C'est un ESP32-S3 avec 16 Mo de flash et 8 Mo de PSRAM, un écran tactile
   capacitif de 2,8 pouces, un codec audio, un microphone, un lecteur
   microSD et un port USB. Le petit haut-parleur est fourni avec la carte.
-  Rien à souder.
+  Rien à souder. Si vous souhaitez m'aider sans coût supplémentaire, vous
+  pouvez la commander via ce
+  [lien affilié Aliexpress](https://s.click.aliexpress.com/e/_c4OZeS8F)
+  (ou ce [lien alternatif](https://s.click.aliexpress.com/e/_c3MmlBCJ) en
+  cas d'indisponibilité) en vous assurant de sélectionner le modèle touch
+  "ES3C28P". Pour les utilisateurs basés en France, vous pouvez également
+  utiliser ce [lien affilié Amazon](https://amzn.to/3RrzKT1).
 - Un câble USB de données et un ordinateur avec Python installé (pour le
   premier flash uniquement).
 - 4 vis M3 de 6 mm pour fixer la carte dans le boîtier, et 4 vis M3 de
-  10 mm pour fixer le capot du boîtier.
+  10 mm pour fixer le capot du boîtier. Si vous ne les avez pas, vous
+  pouvez les trouver [ici](https://s.click.aliexpress.com/e/_c34zawnh).
 - Facultatif : une carte microSD (FAT32) pour votre musique et les
-  épisodes de podcast hors ligne.
+  épisodes de podcast hors ligne (comme [celle-ci](https://s.click.aliexpress.com/e/_c2yej75h)
+  ou [celle-là](https://s.click.aliexpress.com/e/_c3ywvSmJ) ; pour les
+  utilisateurs basés en France, vous pouvez également utiliser ce
+  [lien affilié Amazon](https://amzn.to/3Ta5I6J)).
 - La carte a un port batterie et un chargeur (LiPo 3,7 V à une cellule),
   mais le fonctionnement sur batterie n'a pas encore été testé par le
   projet et n'est pas conseillé pour l'instant : alimentez l'appareil par
@@ -30,18 +40,22 @@ concernée.
 
 <img src="../case/preview_seventies_face.png" alt="Coffret seventies" height="200">
 
-Imprimez les quatre pièces du coffret seventies depuis le dossier
+Imprimez les trois pièces du coffret seventies depuis le dossier
 [`case/`](../case) :
 
 - `es3c28p_seventies_corps.stl` (corps)
 - `es3c28p_seventies_capot.stl` (capot arrière)
 - `es3c28p_seventies_grille.stl` (grille de haut-parleur)
-- `es3c28p_seventies_pied.stl` (pied)
 
 Il s'imprime face contre le plateau, sans supports. Sur une imprimante
 multi-couleurs, utilisez `es3c28p_seventies_corps+grille.step` pour
 imprimer la grille dans une seconde couleur ; une seule couleur convient
 aussi.
+
+Si vous n'avez pas d'imprimante 3D, des services comme PCBWay ou Craftcloud
+permettent de faire imprimer et livrer le boîtier. Pour le modèle seventies,
+il faut faire imprimer `es3c28p_seventies_corps+grille.step` et
+`es3c28p_seventies_capot.stl` en PLA.
 
 Deux modèles alternatifs (un boîtier simple en deux pièces et un poste
 « vieille radio ») se trouvent dans le même dossier [`case/`](../case),

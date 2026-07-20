@@ -79,15 +79,6 @@ CAP_HEAD_D = 1.6
 LID_GAP = 0.2                  # retrait du capot par cote
 LIP_T, LIP_H, LIP_LEN, LIP_CLR = 1.6, 1.8, 36.0, 0.25
 
-# ---- Pieds optionnels (presse-inseres : sans pieds, ne rien inserer) ----
-FOOT_XS = (CAB_CX - 32.0, CAB_CX + 32.0)
-FOOT_YS = (9.0, 23.0)
-FOOT_BOSS_R, FOOT_BOSS_H = 5.5, 5.0
-FOOT_HOLE_RX, FOOT_HOLE_RZ = 4.0, 4.15   # trou horizontal a l'impression : +0.3 vertical
-FOOT_HOLE_DEPTH = 4.0
-FOOT_PEG_D, FOOT_PEG_L = 7.7, 3.8
-FOOT_HEAD_D, FOOT_HEAD_H = 10.0, 2.75
-
 
 def ycyl(r, y0, y1, x, z):
     c = cq.Workplane("XY").circle(r).extrude(y1 - y0).rotate((0, 0, 0), (1, 0, 0), -90)
@@ -219,16 +210,6 @@ for (x, z) in CAP_PTS:
     body = body.union(ycyl(CAP_BOSS_R, BOSS_BACK - CAP_BOSS_LEN, BOSS_BACK, x, z))
     body = body.cut(ycyl(CAP_PILOT, BOSS_BACK - CAP_BOSS_LEN, BOSS_BACK + 0.1, x, z))
 
-# Bossages + trous borgnes des pieds presse-inseres (mur du bas ; trou imprime a
-# l'horizontale, surdimensionne verticalement pour l'affaissement du sommet)
-for fx in FOOT_XS:
-    for fy in FOOT_YS:
-        body = body.union(cq.Workplane("XY").circle(FOOT_BOSS_R).extrude(FOOT_BOSS_H)
-                          .translate((fx, fy, WALL)))
-        hole = (cq.Workplane("XY").ellipse(FOOT_HOLE_RX, FOOT_HOLE_RZ)
-                .extrude(FOOT_HOLE_DEPTH + 1).translate((fx, fy, -1)))
-        body = body.cut(hole)
-
 # ============================================================================
 # 2. Grille : la plaque, percee (borgne partout, traversant au droit du HP)
 # ============================================================================
@@ -271,22 +252,12 @@ capot = capot.cut(cq.Workplane("XY")
                   .translate((CAB_CX, STOP_Y0 - 1, HP_Z - HP_WIRE_H / 2)))
 
 # ============================================================================
-# 4. Pied presse-insere (imprimer 4, ou aucun : version sans pieds)
-# ============================================================================
-pied = (cq.Workplane("XY").circle(FOOT_HEAD_D / 2).extrude(FOOT_HEAD_H)
-        .faces("<Z").edges().chamfer(0.5)
-        .union(cq.Workplane("XY", origin=(0, 0, FOOT_HEAD_H))
-               .circle(FOOT_PEG_D / 2).extrude(FOOT_PEG_L)
-               .faces(">Z").edges().chamfer(0.5)))
-
-# ============================================================================
 # Controles geometriques
 # ============================================================================
 assert PCB_BACK < BOSS_BACK - CAP_BOSS_LEN, "bossages capot vs PCB"
 assert FRONT_T + SPK_T < BOSS_BACK, "profondeur HP"
 assert PLATE_Z0 > Z_BOARD + WIN_H / 2 + WIN_CH, "plaque vs chanfrein ecran"
 assert HP_Z + SND_AZ < z_top, "ouverture son vs nervure haute"
-assert WALL + FOOT_BOSS_H > FOOT_HOLE_DEPTH + 2.5, "fond des trous de pieds"
 assert HP_STOP_W / 2 + 1 < xr, "plot capot vs nervures laterales"
 assert HP_Z + HP_STOP_H / 2 < z_top, "plot capot vs nervure haute"
 assert SHELF_Z + SHELF_T < HP_Z - HP_STOP_H / 2, "plot capot vs tablette"
@@ -299,7 +270,6 @@ parts = {
     "es3c28p_seventies_corps.stl": body,
     "es3c28p_seventies_capot.stl": capot,
     "es3c28p_seventies_grille.stl": grille,
-    "es3c28p_seventies_pied.stl": pied,
 }
 for name, part in parts.items():
     cq.exporters.export(part, "./" + name)

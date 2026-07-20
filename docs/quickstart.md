@@ -12,13 +12,21 @@ each step below links to the relevant part.
 - The board: an **LCDWIKI ES3C28P** (use that exact reference). It is an
   ESP32-S3 with 16 MB flash and 8 MB PSRAM, a 2.8 inch capacitive touch
   screen, an audio codec, a microphone, a microSD slot and a USB port.
-  The small speaker comes with the board. Nothing to solder.
+  The small speaker comes with the board. Nothing to solder. If you wish to
+  support the project at no extra cost, you can order the board via this
+  [Aliexpress affiliate link](https://s.click.aliexpress.com/e/_c4OZeS8F)
+  (or this [alternative link](https://s.click.aliexpress.com/e/_c3MmlBCJ)
+  if unavailable). Make sure to select the touch model "ES3C28P". For users
+  in France, you can also use this [Amazon affiliate link](https://amzn.to/3RrzKT1).
 - A USB data cable and a computer with Python installed (for the first
   flash only).
 - 4x M3 6mm screws to mount the board to the case, and 4x M3 10mm screws
-  to close the case cover.
+  to close the case cover. If you don't have them, you can find them
+  [here](https://s.click.aliexpress.com/e/_c34zawnh).
 - Optional: a microSD card (FAT32) for your own music and offline podcast
-  episodes.
+  episodes (like [this one](https://s.click.aliexpress.com/e/_c2yej75h) or
+  [this one](https://s.click.aliexpress.com/e/_c3ywvSmJ); for users in France,
+  you can also use this [Amazon affiliate link](https://amzn.to/3Ta5I6J)).
 - The board has a battery port and charger (single-cell 3.7 V LiPo), but
   battery operation is untested by the project so far and not recommended
   yet: power the device over USB.
@@ -27,17 +35,21 @@ each step below links to the relevant part.
 
 <img src="../case/preview_seventies_face.png" alt="Seventies cabinet" height="200">
 
-Print the four parts of the seventies cabinet from the [`case/`](../case)
+Print the three parts of the seventies cabinet from the [`case/`](../case)
 folder:
 
 - `es3c28p_seventies_corps.stl` (body)
 - `es3c28p_seventies_capot.stl` (rear cover)
 - `es3c28p_seventies_grille.stl` (speaker grille)
-- `es3c28p_seventies_pied.stl` (stand)
 
 It prints face down (front on the bed) with no supports. On a multi-color
 printer, use `es3c28p_seventies_corps+grille.step` to print the grille
 plate in a second color; a single color works too.
+
+If you don't have a 3D printer, services like PCBWay or Craftcloud can print
+and deliver the case to you. For the seventies model, you should order
+`es3c28p_seventies_corps+grille.step` and `es3c28p_seventies_capot.stl`
+printed in PLA.
 
 Two alternative designs (a plain two-piece case and a vintage radio
 cabinet) live in the same [`case/`](../case) folder, along with the
