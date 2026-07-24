@@ -43,7 +43,8 @@ implemented feature set:
   stream sources.
 - SD music library: browse by artist and album, tags, auto-advance playlists.
 - On-device podcast RSS parsing (yxml) to a fixed-schema manifest, unlimited
-  episodes, per-podcast intro skip.
+  episodes, per-podcast intro skip. You can find podcast RSS feeds by searching
+  on [podcastindex.org](https://podcastindex.org) and clicking "Copy RSS".
 - Episode download to SD: background engine that runs only when idle, survives
   reboots, plus idle auto-maintenance (refresh feeds, download new, rescan).
 - Podcast playback resume: the last interrupted episode's position is saved to
@@ -58,6 +59,7 @@ implemented feature set:
   GitHub release (check + one-click install in Settings).
 - Times-tables practice game (1 to 10): on-screen keypad, 10/5 points per
   first/second try, endless play, persistent high score.
+- Instrument tuner (experimental): microphone-based pitch detection on device.
 - Voice memos: record a message with the onboard mic (up to 60 s,
   level-normalized), keep it on the SD card or send it to another Bugne
   discovered on the same network; the receiver shows a discreet red-dot
@@ -96,7 +98,7 @@ implemented feature set:
   (version, uptime, RSSI, free RAM, SD usage) and POST /api/reboot, and the
   whole API accepts stateless HTTP Basic auth. The device can also act as a
   client to toggle a Home Assistant light directly from a home screen tile
-  (configured with a Long-Lived Access Token).
+  (experimental, configured with a Long-Lived Access Token).
 
 ## Hardware
 
@@ -125,7 +127,8 @@ them ready for BambuLab printers on
 
 - Plain two-piece case (`es3c28p_boitier_facade.stl` +
   `es3c28p_boitier_fond.stl`): portrait, sound exits through a grid in the
-  back.
+  back. Closes with 4x M3 20mm screws entering from the back (heads recessed
+  in the back panel, no visible screws on the front).
 - Vintage radio cabinet (`es3c28p_radio_*.stl`): landscape, vertical front,
   sloped back, screwed rear cover.
 - Seventies cabinet (`es3c28p_seventies_*.stl`, a 1970s-inspired look):
@@ -162,7 +165,7 @@ table, OTA data and app. The `bugne.bin` release asset alone is an OTA app
 image; it updates a running Bugne but cannot bootstrap a blank chip.
 
 The easiest way to flash a new board is via the browser (Chrome, Edge, Opera):
-1. Connect the board to your computer over USB.
+1. Connect the board to your computer over USB (press and hold the BOOT button while plugging in the cable to enter bootloader mode).
 2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page.
 3. Click "Installer", select your board's COM port, and wait for completion.
 

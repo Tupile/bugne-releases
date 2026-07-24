@@ -1,6 +1,9 @@
 """
 Maquette ES3C28P (LCDWIKI ESP32-S3 2.8" tactile) + boitier 2 pieces,
 speaker au dos de la carte, son vers l'arriere par grille dans le fond.
+Assemblage par 4 vis M3 10 mm entrant par l'ARRIERE, tetes au fond de
+tunnels creuses dans les entretoises (pilote borgne dans la facade : face
+avant sans trou de vis).
 Cotes carte issues du plan mecanique du datasheet (page 11).
 Origine XY = centre du PCB. Z=0 = dessous du boitier pour le fond.
 """
@@ -39,6 +42,12 @@ WIN_Y = 2.25                     # centre ecran reel (vers le haut), repris du s
 WIN_CH = 3.0                     # chanfrein en pente autour de l'ecran
 COVER_T = 2.0
 SCREW_D = 3.4
+HEAD_R = 3.3                     # rayon du tunnel de tete (meme lamage M3 qu'avant)
+SCREW_L = 10.0                   # vis M3 sous tete
+ENGAGE = 4.0                     # prise visee dans le pilote de la facade
+TUNNEL_BOSS_D = 10.0             # entretoise elargie autour du tunnel
+SKIN_T = 0.8                     # peau pleine devant le pilote borgne de la facade
+TUNNEL_DEPTH = FLOOR + STANDOFF_H + PCB_T + ENGAGE - SCREW_L   # 11.95
 
 IN_W, IN_H = PCB_W + 2 * CLR, PCB_H + 2 * CLR
 OUT_W, OUT_H = IN_W + 2 * WALL, IN_H + 2 * WALL
@@ -96,14 +105,21 @@ for gx, gy in grid:
     shell = shell.cut(cq.Workplane("XY", origin=(gx, SPK_YC + gy, 0))
                       .circle(1.1).extrude(FLOOR))
 
-# Entretoises carte
+# Entretoises carte : la vis entre par l'arriere, sa tete descend au fond
+# d'un tunnel creuse dans l'entretoise (vis courte), et se visse dans le
+# bossage de la facade. Entretoise bi-diametre : large autour du tunnel,
+# diametre d'origine au-dessus (degagement des composants SMD).
 for x in (-HOLE_X, HOLE_X):
     for y in (-HOLE_Y, HOLE_Y):
-        post = (cq.Workplane("XY", origin=(x, y, FLOOR))
-                .circle(STANDOFF_D / 2).extrude(STANDOFF_H)
-                .cut(cq.Workplane("XY", origin=(x, y, FLOOR))
-                     .circle(PILOT_D / 2).extrude(STANDOFF_H)))
-        shell = shell.union(post)
+        shell = shell.union(cq.Workplane("XY", origin=(x, y, FLOOR))
+                            .circle(TUNNEL_BOSS_D / 2)
+                            .extrude(TUNNEL_DEPTH - FLOOR))
+        shell = shell.union(cq.Workplane("XY", origin=(x, y, FLOOR))
+                            .circle(STANDOFF_D / 2).extrude(STANDOFF_H))
+        shell = shell.cut(cq.Workplane("XY", origin=(x, y, 0))
+                          .circle(SCREW_D / 2).extrude(FLOOR + STANDOFF_H))
+        shell = shell.cut(cq.Workplane("XY", origin=(x, y, 0))
+                          .circle(HEAD_R).extrude(TUNNEL_DEPTH))
 
 # Decoupe passage cable USB-C, paroi basse
 usb_z = FLOOR + STANDOFF_H - USB_T
@@ -131,7 +147,8 @@ for x in (-HOLE_X, HOLE_X):
         cover = cover.union(cq.Workplane("XY", origin=(x, y, -STACK_T))
                             .circle(STANDOFF_D / 2).extrude(STACK_T))
         cover = cover.cut(cq.Workplane("XY", origin=(x, y, -STACK_T))
-                          .circle(SCREW_D / 2).extrude(STACK_T + COVER_T))
+                          .circle(PILOT_D / 2)
+                          .extrude(STACK_T + COVER_T - SKIN_T))
 # Trou micro, position approximative (a verifier sur la carte) ; decale de
 # 2.5 vers le haut du micro pour eviter le chanfrein fenetre (le son atteint
 # le micro par le jeu facade/carte), comme le seventies
@@ -142,8 +159,11 @@ cover = cover.cut(cq.Workplane("XY", origin=(MIC_X, MIC_Y, -STACK_T))
 # =================== Controles geometriques ===================
 CHAM_Y_TOP = WIN_Y + WIN_OPEN_H / 2 + WIN_CH        # emprise haute du chanfrein
 assert MIC_Y - MIC_R > CHAM_Y_TOP, "trou micro vs chanfrein fenetre"
-assert HOLE_Y - SCREW_D / 2 > CHAM_Y_TOP, "trous de vis vs chanfrein fenetre"
+assert HOLE_Y - PILOT_D / 2 > CHAM_Y_TOP, "pilotes de vis vs chanfrein fenetre"
 assert WIN_Y + WIN_OPEN_H / 2 < GLASS_Y_OFF + GLASS_H / 2, "ouverture vs dalle"
+assert ENGAGE <= STACK_T + COVER_T - SKIN_T - 1.0, "prise vis vs peau facade"
+assert TUNNEL_DEPTH < FLOOR + STANDOFF_H - 2.0, "siege de tete vs entretoise"
+assert TUNNEL_DEPTH > 2.0, "tunnel trop court pour la tete de vis"
 
 # =================== Export ===================
 cq.exporters.export(board, "./es3c28p_carte.stl")

@@ -11,8 +11,11 @@
 static const char *TAG = "played";
 
 #define PLAYED_CAP  256
-#define PLAYED_FILE "/littlefs/podcasts/played.bin"
-#define PLAYED_TMP  "/littlefs/podcasts/played.bin.tmp"
+#ifndef PLAYED_DIR                    // host tests redirect this to /tmp
+#define PLAYED_DIR  "/littlefs/podcasts"
+#endif
+#define PLAYED_FILE PLAYED_DIR "/played.bin"
+#define PLAYED_TMP  PLAYED_DIR "/played.bin.tmp"
 
 static uint64_t s_hashes[PLAYED_CAP];
 static int  s_count;   // number of valid entries in s_hashes
@@ -65,7 +68,7 @@ static void save(void)
 
 void played_init(void)
 {
-    mkdir("/littlefs/podcasts", 0775);  // may already exist (podcast manifests)
+    mkdir(PLAYED_DIR, 0775);  // may already exist (podcast manifests)
     FILE *f = fopen(PLAYED_FILE, "rb");
     if (f) {
         int count = 0, next = 0;

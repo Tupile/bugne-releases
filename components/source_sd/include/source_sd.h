@@ -61,6 +61,10 @@ esp_err_t source_sd_browse(const char *rel_dir, source_sd_entry_t *out, size_t m
 // directories. Returns NULL on a bad path, no card, or error. Caller fcloses.
 FILE *source_sd_create(const char *rel_path);
 
+// Open rel_path for reading. Returns NULL on a bad path, no card, directory, or
+// error. Caller fcloses.
+FILE *source_sd_open(const char *rel_path);
+
 // Create directory rel_path (and parents). ESP_OK if it now exists.
 esp_err_t source_sd_mkdir(const char *rel_path);
 

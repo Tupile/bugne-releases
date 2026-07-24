@@ -518,6 +518,18 @@ static int mp4_read_cb(int64_t offset, void *buffer, size_t size, void *token)
 
 #define AAC_PCM_CAP_INIT 16384  // one AAC frame: 1024 (LC) or 2048 (HE) samples * 2ch * 2B
 
+// First sample of the MP4 track at or after target_ms; not_found when none is.
+static unsigned mp4_find_sample(const MP4D_demux_t *mp4, unsigned trk, uint32_t target_ms,
+                                uint32_t ts, unsigned not_found)
+{
+    for (unsigned k = 0; k < mp4->track[trk].sample_count; k++) {
+        unsigned fb, t, d;
+        MP4D_frame_offset(mp4, trk, k, &fb, &t, &d);
+        if ((uint64_t)t * 1000 / ts >= target_ms) return k;
+    }
+    return not_found;
+}
+
 // MP4 path: demux the container, decode each AAC frame. Requires a seekable
 // source (the moov sample table needs random access). Honors skip_ms and seek.
 static esp_err_t run_aac_mp4(const decode_source_t *src, uint32_t skip_ms)
@@ -575,23 +587,13 @@ static esp_err_t run_aac_mp4(const decode_source_t *src, uint32_t skip_ms)
     // (AAC-LC frames are independently decodable).
     unsigned ns = 0;
     if (skip_ms > 0) {
-        for (; ns < tr->sample_count; ns++) {
-            unsigned fb, t, d;
-            MP4D_frame_offset(&mp4, trk, ns, &fb, &t, &d);
-            if ((uint64_t)t * 1000 / ts >= skip_ms) break;
-        }
+        ns = mp4_find_sample(&mp4, trk, skip_ms, ts, tr->sample_count);
     }
     for (; ns < tr->sample_count; ns++) {
         int32_t seek = s_seek_ms;
         s_seek_ms = -1;
         if (seek >= 0) {  // drag-to-seek: jump to the frame at that time
-            unsigned k = 0;
-            for (; k < tr->sample_count; k++) {
-                unsigned fb, t, d;
-                MP4D_frame_offset(&mp4, trk, k, &fb, &t, &d);
-                if ((uint64_t)t * 1000 / ts >= (uint32_t)seek) break;
-            }
-            ns = (k < tr->sample_count) ? k : ns;
+            ns = mp4_find_sample(&mp4, trk, (uint32_t)seek, ts, ns);
             esp_aac_dec_reset(dec);
         }
         unsigned fbytes = 0, tstamp = 0, dur = 0;

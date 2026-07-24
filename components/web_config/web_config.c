@@ -773,6 +773,9 @@ static void query_param(httpd_req_t *req, const char *key, char *out, size_t siz
 static void sd_query_path(httpd_req_t *req, char *out, size_t size)
 {
     query_param(req, "path", out, size);
+    while (out[0] == '/') {
+        memmove(out, out + 1, strlen(out)); // strlen(out) includes up to \0 so strlen(out) + 0... wait, strlen(out) + 1 - 1 = strlen(out)
+    }
 }
 
 // GET /api/sd/list?path=<dir>: JSON {present,path,entries:[{name,dir,size}]}.
@@ -908,6 +911,50 @@ static esp_err_t sd_delete_post(httpd_req_t *req)
         return ESP_OK;
     }
     return httpd_resp_sendstr(req, "ok");
+}
+
+// GET /api/sd/download?path=<rel/path.ext>: download a file from the SD card.
+static esp_err_t sd_download_get(httpd_req_t *req)
+{
+    if (!is_authed(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
+        return ESP_OK;
+    }
+    char path[WEB_SD_PATH_MAX];
+    sd_query_path(req, path, sizeof(path));
+    if (!path[0]) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing path");
+        return ESP_OK;
+    }
+    FILE *f = source_sd_open(path);
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "file not found");
+        return ESP_OK;
+    }
+    const char *fn = strrchr(path, '/');
+    fn = fn ? fn + 1 : path;
+
+    char cd[WEB_SD_PATH_MAX + 32];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fn);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", cd);
+
+    char *buf = malloc(4096);
+    if (!buf) {
+        fclose(f);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    size_t r;
+    while ((r = fread(buf, 1, 4096, f)) > 0) {
+        if (httpd_resp_send_chunk(req, buf, r) != ESP_OK) {
+            break;
+        }
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
+    free(buf);
+    fclose(f);
+    return ESP_OK;
 }
 
 // POST /api/memo?from=<name>: receive a voice memo from another Bugne on the
@@ -1496,6 +1543,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/playback", .method = HTTP_GET,  .handler = playback_get},
         {.uri = "/api/playback", .method = HTTP_POST, .handler = playback_post},
         {.uri = "/api/sd/list",   .method = HTTP_GET,  .handler = sd_list_get},
+        {.uri = "/api/sd/download", .method = HTTP_GET, .handler = sd_download_get},
         {.uri = "/api/sd/upload", .method = HTTP_POST, .handler = sd_upload_post},
         {.uri = "/api/sd/mkdir",  .method = HTTP_POST, .handler = sd_mkdir_post},
         {.uri = "/api/sd/delete", .method = HTTP_POST, .handler = sd_delete_post},

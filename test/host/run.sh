@@ -105,3 +105,49 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_memo_wav"
 "$OUT/test_memo_name"
+
+echo "=== building memo_store host tests ==="
+# memo_store.c scans a real directory: MEMO_ABS_DIR is redirected to /tmp
+# through the #ifndef seam in memo.h. _DEFAULT_SOURCE exposes glibc strlcpy.
+gcc -std=c11 -Wall -Wextra -g -D_DEFAULT_SOURCE \
+    -DMEMO_ABS_DIR='"/tmp/bugne-memo-test"' \
+    -I stubs \
+    -I ../../components/memo/include \
+    -o "$OUT/test_memo_store" \
+    test_memo_store.c ../../components/memo/memo_store.c ../../components/memo/memo_name.c
+
+echo "=== building memo_send host tests ==="
+# Single-TU build: the test includes memo_send.c to share the scripted
+# esp_http_client stub state.
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/memo/include \
+    -o "$OUT/test_memo_send" \
+    test_memo_send.c
+
+echo "=== running ==="
+"$OUT/test_memo_store"
+"$OUT/test_memo_send"
+
+echo "=== building played host tests ==="
+# The storage paths are redirected to /tmp through the #ifndef seam.
+gcc -std=c11 -Wall -Wextra -g \
+    -DPLAYED_DIR='"/tmp/bugne-played-test"' \
+    -I stubs \
+    -I ../../components/podcast/include \
+    -o "$OUT/test_played" \
+    test_played.c ../../components/podcast/played.c
+
+echo "=== running ==="
+"$OUT/test_played"
+
+echo "=== building logstore host tests ==="
+# Single-TU build: the test includes logstore.c to drive its vprintf hook.
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/logstore/include \
+    -o "$OUT/test_logstore" \
+    test_logstore.c
+
+echo "=== running ==="
+"$OUT/test_logstore"

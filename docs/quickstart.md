@@ -61,7 +61,7 @@ CadQuery scripts that generate all of them.
 A brand-new board needs one full flash over USB. All later updates install
 over Wi-Fi from the web page, no cable needed.
 
-1. Connect the board to your computer over USB.
+1. Connect the board to your computer over USB (press and hold the BOOT button while plugging in the cable to enter bootloader mode).
 2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page using Chrome, Edge, or Opera.
 3. Click "Installer", select your board's COM port, and wait for the installation to finish.
 
@@ -95,7 +95,7 @@ URL. The stations appear immediately on the device's Web radios tile.
 
 <img src="manual/img/en/web-radios.png" width="300">
 
-**Podcasts tab**: add a podcast with its RSS feed URL. "Download new"
+**Podcasts tab**: add a podcast with its RSS feed URL. You can find these URLs by searching on [podcastindex.org](https://podcastindex.org) and clicking "Copy RSS". Paste the link into the field. "Download new"
 saves fresh episodes to the microSD card for offline listening.
 
 <img src="manual/img/en/web-podcasts.png" width="300">
@@ -106,6 +106,6 @@ the parent settings from their own devices.
 ## Going further
 
 - [User manual](manual/en.md): everyday use, alarms, quiet hours, the
-  times-tables game, the tuner, updates, troubleshooting.
+  times-tables game, the tuner (experimental), updates, troubleshooting.
 - [Hardware notes](hardware.md): GPIO map and board details.
 - [README](../README.md): feature list and build instructions from source.

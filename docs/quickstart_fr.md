@@ -68,7 +68,7 @@ avec les scripts CadQuery qui génèrent tous les modèles.
 Une carte neuve a besoin d'un flash complet par USB. Toutes les mises à
 jour suivantes s'installent par Wi-Fi depuis la page web, sans câble.
 
-1. Branchez la carte à votre ordinateur en USB.
+1. Branchez la carte à votre ordinateur en USB (maintenez le bouton BOOT appuyé en branchant le câble pour passer en mode bootloader).
 2. Ouvrez la page de l'[Installateur Web](https://tupile.github.io/bugne-releases/tools/web-flasher/) avec Chrome, Edge ou Opera.
 3. Cliquez sur "Installer", choisissez le port COM de votre carte, et patientez pendant l'installation.
 
@@ -105,6 +105,7 @@ tuile Webradios de l'appareil.
 <img src="manual/img/fr/web-radios.png" width="300">
 
 **Onglet Podcasts** : ajoutez un podcast avec l'URL de son flux RSS.
+Vous pouvez trouver ces URL en cherchant sur [podcastindex.org](https://podcastindex.org) et en cliquant sur « Copy RSS ». Collez le lien dans le champ.
 « Télécharger nouveaux » enregistre les épisodes récents sur la carte
 microSD pour l'écoute hors ligne.
 
@@ -117,7 +118,7 @@ leurs propres appareils.
 ## Pour aller plus loin
 
 - [Mode d'emploi](manual/fr.md) : usage quotidien, réveils, heures
-  calmes, jeu des tables, accordeur, mises à jour, dépannage.
+  calmes, jeu des tables, accordeur (expérimental), mises à jour, dépannage.
 - [Notes matérielles](hardware.md) : brochage et détails de la carte
   (en anglais).
 - [README](../README.md) : liste des fonctions et compilation depuis les

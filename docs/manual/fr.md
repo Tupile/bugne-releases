@@ -4,7 +4,7 @@
 
 La Bugne est une petite boîte à musique tactile pour les enfants : radios
 web, podcasts (aussi hors ligne), musique sur carte SD, réveil, jeu de
-tables de multiplication et accordeur d'instrument. Les parents gèrent tout
+tables de multiplication et accordeur d'instrument (expérimental). Les parents gèrent tout
 depuis une page web sur leur téléphone ou ordinateur.
 
 Ce mode d'emploi a cinq parties : la fabrication (la carte et son boîtier
@@ -68,7 +68,7 @@ complète). Les mises à jour normales se font depuis la page web (voir
 
 Il vous faut : un ordinateur et un câble USB de données.
 
-1. Branchez la carte à votre ordinateur en USB.
+1. Branchez la carte à votre ordinateur en USB (maintenez le bouton BOOT appuyé en branchant le câble pour passer en mode bootloader).
 2. Ouvrez la page de l'[Installateur Web](https://tupile.github.io/bugne-releases/tools/web-flasher/) avec Chrome, Edge ou Opera.
 3. Cliquez sur "Installer", choisissez le port COM de votre carte, et patientez pendant l'installation.
 
@@ -115,7 +115,7 @@ point d'accès d'installation revient pour corriger la configuration.
 
 De grandes tuiles colorées : Radios web, Podcasts, Bibliothèque, Carte SD,
 Mémos, et selon ce que les parents ont activé : Multiplications (le jeu),
-Favoris, Accordeur, et Lampe. La roue dentée en haut à droite ouvre les
+Favoris, Accordeur (expérimental), et Lampe (expérimentale). La roue dentée en haut à droite ouvre les
 réglages. Quand rien ne joue et que l'heure est réglée, elle s'affiche en bas.
 
 ### Écouter la radio
@@ -188,18 +188,18 @@ Touchez la tuile du jeu, choisissez les tables à réviser (ou Tout), puis
 touchez le bouton coche. Répondez avec le clavier. Le score, le record et
 la série sont en haut ; le record est mémorisé.
 
-### L'accordeur
+### L'accordeur (expérimental)
 
 ![Accordeur](img/fr/tuner.png)
 
 Ouvrez la tuile Accordeur et jouez une note près de l'appareil. L'écran
 affiche le nom de la note, sa fréquence, et une barre qui indique si vous
 êtes trop bas (à gauche) ou trop haut (à droite). Accordez jusqu'à centrer
-la barre.
+la barre. *(Note : l'accordeur est une fonctionnalité expérimentale).*
 
-### La Lampe
+### La Lampe (expérimentale)
 
-Si vos parents l'ont configurée, une tuile Lampe apparaît sur l'écran d'accueil.
+Si vos parents l'ont configurée, une tuile Lampe apparaît sur l'écran d'accueil pour contrôler un éclairage via Home Assistant (fonctionnalité expérimentale).
 Touchez-la pour allumer ou éteindre la lumière de la chambre.
 
 ### Les mémos vocaux
@@ -269,7 +269,7 @@ n'importe quelle radio ou morceau de la bibliothèque.
 
 <img src="img/fr/web-podcasts.png" width="300">
 
-Ajoutez un podcast avec l'URL de son flux RSS. Le champ des secondes
+Ajoutez un podcast avec l'URL de son flux RSS. Vous pouvez trouver ces URL en cherchant sur [podcastindex.org](https://podcastindex.org) et en cliquant sur « Copy RSS ». Collez le lien dans le champ. Le champ des secondes
 d'intro coupe les N premières secondes de chaque épisode (jingles,
 sponsors). "Télécharger nouveaux" enregistre les nouveaux épisodes sur la
 carte SD pour l'écoute hors ligne ; les téléchargements tournent quand
@@ -304,7 +304,7 @@ Tout le reste est ici :
 - Thème, couleur et orientation de l'écran de l'appareil.
 - Volume maximum : un plafond absolu pour les petites oreilles. Quoi que
   demande un enfant (ou autre chose), l'appareil ne joue jamais plus fort.
-- Afficher ou masquer les tuiles du jeu et de l'accordeur.
+- Afficher ou masquer les tuiles du jeu et de l'accordeur (expérimental).
 - Alarmes : les trois mêmes alarmes que sur l'appareil.
 - Heures calmes : jusqu'à deux plages horaires (par exemple 20h30 à 7h00)
   pendant lesquelles rien ne peut être lancé et le jeu ne s'ouvre pas. Le
@@ -314,7 +314,7 @@ Tout le reste est ici :
   quittent jamais l'appareil et peuvent être remises à zéro à tout moment.
 - Home Assistant : configurez une connexion à votre serveur Home Assistant
   (URL, Entité, et un Jeton d'accès longue durée) pour ajouter une tuile
-  Lampe sur l'écran d'accueil de l'appareil.
+  Lampe sur l'écran d'accueil de l'appareil (fonctionnalité expérimentale).
 - Réseaux Wi-Fi : ajouter, modifier ou supprimer les réseaux enregistrés.
 - Mot de passe de la page, sauvegarde et restauration de la configuration,
   journaux de l'appareil, et mises à jour du firmware (voir plus bas).

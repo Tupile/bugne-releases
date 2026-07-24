@@ -1,5 +1,8 @@
-// Host-test stub: config_store.h includes esp_err.h just for the esp_err_t
-// typedef used by function declarations that alarm_next.h never calls. Not
-// the real ESP-IDF header.
+// Host-test stub: the esp_err_t typedef plus the few result codes the
+// host-tested modules return. Not the real ESP-IDF header.
 #pragma once
 typedef int esp_err_t;
+#define ESP_OK              0
+#define ESP_FAIL            (-1)
+#define ESP_ERR_NO_MEM      0x101
+#define ESP_ERR_INVALID_ARG 0x102

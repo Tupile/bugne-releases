@@ -320,6 +320,22 @@ FILE *source_sd_create(const char *rel_path)
     return fopen(full, "wb");
 }
 
+FILE *source_sd_open(const char *rel_path)
+{
+    if (!s_present) {
+        return NULL;
+    }
+    char full[SD_PATH_MAX];
+    if (!sd_safe_path(rel_path, full, sizeof(full))) {
+        return NULL;
+    }
+    struct stat st;
+    if (stat(full, &st) != 0 || S_ISDIR(st.st_mode)) {
+        return NULL;
+    }
+    return fopen(full, "rb");
+}
+
 esp_err_t source_sd_mkdir(const char *rel_path)
 {
     if (!s_present) {

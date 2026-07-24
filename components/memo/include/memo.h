@@ -31,7 +31,9 @@ extern "C" {
 #define MEMO_MAX_COUNT       20                   // stored memos cap (own + received)
 #define MEMO_RX_MAX_BYTES    (2 * 1024 * 1024)    // 60 s @ 32 kB/s + headers
 #define MEMO_DIR             "memos"              // relative to the SD root
+#ifndef MEMO_ABS_DIR                              // host tests redirect to /tmp
 #define MEMO_ABS_DIR         "/sdcard/" MEMO_DIR
+#endif
 #define MEMO_REC_NAME        ".rec.wav"           // finalized capture awaiting Keep/Send
 #define MEMO_TK_PREFIX       "tk-"                // ephemeral walkie-talkie files
 #define MEMO_SENDER_MAX      24

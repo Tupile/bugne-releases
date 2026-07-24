@@ -4,7 +4,7 @@
 
 Bugne is a small touch-screen music box for kids: web radios, podcasts
 (also offline), music from an SD card, an alarm clock, a times-tables game
-and an instrument tuner. Parents manage everything from a web page on their
+and an instrument tuner (experimental). Parents manage everything from a web page on their
 phone or computer.
 
 This manual has five parts: building the device (the board and its
@@ -65,7 +65,7 @@ are done from the web page (see "Firmware updates" in section 7).
 
 You need a computer and a USB data cable.
 
-1. Connect the board to your computer over USB.
+1. Connect the board to your computer over USB (press and hold the BOOT button while plugging in the cable to enter bootloader mode).
 2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page using Chrome, Edge, or Opera.
 3. Click "Installer", select your board's COM port, and wait for the installation to finish.
 
@@ -112,7 +112,7 @@ comes back so you can fix the configuration.
 
 Big colored tiles: Web radios, Podcasts, Library, SD card, Memos, and
 depending on what the parents enabled: Times tables (the game), Favorites,
-Tuner, and Lamp. The gear at the top right opens the settings. When nothing
+Tuner (experimental), and Lamp (experimental). The gear at the top right opens the settings. When nothing
 is playing and the clock is set, the time shows at the bottom.
 
 ### Listening to web radio
@@ -183,18 +183,18 @@ Tap the game tile, pick which tables you want to practice (or All), then
 tap the check button. Answer with the keypad. Score, best score and streak
 are at the top; the best score is remembered.
 
-### The tuner
+### The tuner (experimental)
 
 ![Tuner](img/en/tuner.png)
 
 Open the Tuner tile and play a note on your instrument close to the
 device. The screen shows the note name, its frequency, and a bar that tells
 you if you are flat (left) or sharp (right). Tune until the bar is
-centered.
+centered. *(Note: the tuner is an experimental feature).*
 
-### The Lamp
+### The Lamp (experimental)
 
-If your parents configured it, a Lamp tile appears on the home screen.
+If your parents configured it, a Lamp tile appears on the home screen to control a light via Home Assistant (experimental feature).
 Tap it to turn the room's light on or off.
 
 ### Voice memos
@@ -262,7 +262,7 @@ library.
 
 <img src="img/en/web-podcasts.png" width="300">
 
-Add a podcast with its RSS feed URL. The intro-skip field cuts the first N
+Add a podcast with its RSS feed URL. You can find these URLs by searching on [podcastindex.org](https://podcastindex.org) and clicking "Copy RSS". Paste the link into the field. The intro-skip field cuts the first N
 seconds of every episode (sponsor jingles). "Download new" saves fresh
 episodes to the SD card for offline listening; downloads run when the
 device is idle and pause when a child plays something. The device also
@@ -294,7 +294,7 @@ Everything else lives here:
 - Theme, color and screen orientation of the device.
 - Max volume: a hard ceiling for little ears. Whatever a child (or anything
   else) asks for, the device never plays louder.
-- Show or hide the game and tuner tiles.
+- Show or hide the game and tuner (experimental) tiles.
 - Alarms: same three alarms as on the device.
 - Quiet hours: up to two time windows (for example 20:30 to 07:00) during
   which nothing can be played and the game will not open. The alarm still
@@ -303,7 +303,7 @@ Everything else lives here:
   last week, and the most-listened titles. The data never leaves the
   device and can be reset at any time.
 - Home Assistant: configure a connection to your Home Assistant server
-  (URL, Entity ID, and a Long-Lived Access Token) to add a Lamp tile to
+  (URL, Entity ID, and a Long-Lived Access Token) to add a Lamp tile (experimental feature) to
   the device's home screen.
 - Wi-Fi networks: add, edit or remove saved networks.
 - Page password, backup and restore of the configuration, device logs, and
