@@ -151,3 +151,18 @@ gcc -std=c11 -Wall -Wextra -g \
 
 echo "=== running ==="
 "$OUT/test_logstore"
+
+echo "=== building tags host tests ==="
+# tags.c is pure (no ESP dependency), so it compiles straight into the test.
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/decode/include \
+    -o "$OUT/test_tags" \
+    test_tags.c ../../components/decode/tags.c
+
+echo "=== running ==="
+"$OUT/test_tags"
+
+echo "=== checking config field parity ==="
+# Not a C test: compares the fields config_store parses against the fields it
+# writes back, which is the exact class that dropped the `quiet` array once.
+python3 check_config_parity.py

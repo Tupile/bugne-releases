@@ -5761,13 +5761,18 @@ bool ui_remote_nav(const char *screen)
     return false;
 }
 
-static void sleep_timer_cb(lv_timer_t *t)
-{
-    (void)t;
+// ---- UI tick engines ----
+// The 50 ms UI timer multiplexes these independent engines. Each one is its own
+// function and sleep_timer_cb calls them in a FIXED order: several pairs depend
+// on it, and every such constraint is noted at the call site or in the engine's
+// own comment. Split out of a single 1030-line callback on 2026-07-24; the code
+// inside each function is unchanged.
 
-    // Serve a pending screenshot request (from the web server). Rendering must
-    // stay on this task. Works while the screen sleeps: the snapshot renders the
-    // widget tree off-screen, so do not wake the display or touch activity here.
+// Serve a pending screenshot request (from the web server). Rendering must
+// stay on this task. Works while the screen sleeps: the snapshot renders the
+// widget tree off-screen, so do not wake the display or touch activity here.
+static void tick_screenshot(void)
+{
     if (s_shot_req) {
         s_shot_ok = false;
         lv_draw_buf_t *db = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
@@ -5832,15 +5837,21 @@ static void sleep_timer_cb(lv_timer_t *t)
         s_shot_req = false;
         xSemaphoreGive(s_shot_done);
     }
+}
 
-    // Apply a pending listening-stats reset (POST /api/stats/reset). Runs on the
-    // LVGL task, sole owner of the stats RAM and file.
+// Apply a pending listening-stats reset (POST /api/stats/reset). Runs on the
+// LVGL task, sole owner of the stats RAM and file.
+static void tick_stats_reset(void)
+{
     if (s_stats_reset_req) {
         s_stats_reset_req = false;
         stats_reset();
     }
+}
 
-    // Apply a pending remote navigation request (POST /api/debug/nav).
+// Apply a pending remote navigation request (POST /api/debug/nav).
+static void tick_nav_request(void)
+{
     if (s_nav_req[0]) {
         char name[sizeof(s_nav_req)];
         strlcpy(name, s_nav_req, sizeof(name));
@@ -5903,10 +5914,14 @@ static void sleep_timer_cb(lv_timer_t *t)
             if (strcmp(name, NAV_SCREENS[i].name) == 0) { show(NAV_SCREENS[i].fn); break; }
         }
     }
-    // Background download scheduler. Run the persisted job only when audio has been
-    // idle for >5 min and Wi-Fi is up; pause it the instant audio plays. This also
-    // drives resume-after-reboot: the job is loaded at boot with the idle clock set
-    // far in the past, so it fires as soon as Wi-Fi is back.
+}
+
+// Background download scheduler. Run the persisted job only when audio has been
+// idle for >5 min and Wi-Fi is up; pause it the instant audio plays. This also
+// drives resume-after-reboot: the job is loaded at boot with the idle clock set
+// far in the past, so it fires as soon as Wi-Fi is back.
+static void tick_download_scheduler(void)
+{
     {
         int64_t now = esp_timer_get_time();
         if (audio_is_active()) { s_audio_idle_since_us = now; s_played_since_maint = true; }
@@ -5940,9 +5955,12 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         }
     }
+}
 
-    // Apply a UI language change live (e.g. set from the web config). Fires once per
-    // change: after lang_set_code the codes match again.
+// Apply a UI language change live (e.g. set from the web config). Fires once per
+// change: after lang_set_code the codes match again.
+static void tick_apply_config(void)
+{
     if (strcmp(config_store_get()->ui.lang, lang_code()) != 0) {
         lang_set_code(config_store_get()->ui.lang);
         if (s_active_builder) show(s_active_builder);
@@ -5998,10 +6016,13 @@ static void sleep_timer_cb(lv_timer_t *t)
         s_tuner_flag_applied = config_store_get()->ui.tuner;
         if (!first && s_active_builder == build_home) show(build_home);
     }
+}
 
-    // The tuner runs only while its screen is shown: navigating away by any
-    // path (remote nav, alarm ringing screen, ...) ends the capture. The
-    // async flag is enough here; playback takeovers use tuner_stop_sync().
+// The tuner runs only while its screen is shown: navigating away by any
+// path (remote nav, alarm ringing screen, ...) ends the capture. The
+// async flag is enough here; playback takeovers use tuner_stop_sync().
+static void tick_tuner(void)
+{
     if (s_tuner_active && s_active_builder != build_tuner) {
         s_tuner_run = false;
     }
@@ -6053,13 +6074,16 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         }
     }
+}
 
-    // ---- Voice memo UI glue ----
-    // Rebuild the record screen on worker-driven state changes (capture
-    // finalized to preview, peer browse finished), refresh the live capture
-    // readout, stop a capture when the user navigates away, mirror the
-    // play/stop icon, surface one-shot results, and consume the receive flag
-    // set by the httpd task (toast + home badge / open list refresh).
+// ---- Voice memo UI glue ----
+// Rebuild the record screen on worker-driven state changes (capture
+// finalized to preview, peer browse finished), refresh the live capture
+// readout, stop a capture when the user navigates away, mirror the
+// play/stop icon, surface one-shot results, and consume the receive flag
+// set by the httpd task (toast + home badge / open list refresh).
+static void tick_memo_talkie(void)
+{
     {
         if (s_active_builder == build_memo_record) {
             if (s_memo_state != s_memo_state_shown ||
@@ -6184,20 +6208,26 @@ static void sleep_timer_cb(lv_timer_t *t)
             s_talkie_rx_pending = false;
         }
     }
+}
 
-    // Rebuild home when the SD card comes or goes: the memos tile (grey state
-    // and unread badge) keys off it. The SD browser handles its own message.
+// Rebuild home when the SD card comes or goes: the memos tile (grey state
+// and unread badge) keys off it. The SD browser handles its own message.
+static void tick_sd_presence(void)
+{
     static int s_sd_present_applied = -1;
     if ((int)source_sd_present() != s_sd_present_applied) {
         bool first = (s_sd_present_applied == -1);
         s_sd_present_applied = (int)source_sd_present();
         if (!first && s_active_builder == build_home) show(build_home);
     }
+}
 
-    // Rebuild home (the Favorites tile appears/disappears) and an open
-    // favorites screen when the list changes from the web page, same
-    // edge-triggered pattern. Device star taps pass through here harmlessly
-    // (now-playing is neither screen; home rebuilds on its own next show).
+// Rebuild home (the Favorites tile appears/disappears) and an open
+// favorites screen when the list changes from the web page, same
+// edge-triggered pattern. Device star taps pass through here harmlessly
+// (now-playing is neither screen; home rebuilds on its own next show).
+static void tick_favorites(void)
+{
     static int s_fav_count_applied = -1;
     if ((int)config_store_get()->favorite_count != s_fav_count_applied) {
         bool first = (s_fav_count_applied == -1);
@@ -6207,10 +6237,13 @@ static void sleep_timer_cb(lv_timer_t *t)
             else if (s_active_builder == build_favorites) show(build_favorites);
         }
     }
+}
 
-    // Apply a volume-ceiling change live (set from the web config). The limit
-    // clamps inside audio_set_volume; rebuild an open now-playing screen so
-    // its volume slider range matches the new ceiling.
+// Apply a volume-ceiling change live (set from the web config). The limit
+// clamps inside audio_set_volume; rebuild an open now-playing screen so
+// its volume slider range matches the new ceiling.
+static void tick_volume_limit(void)
+{
     if (config_store_get()->ui.volume_max != audio_get_volume_limit()) {
         audio_set_volume_limit(config_store_get()->ui.volume_max);
         // NOT build_talkie: a rebuild while the child holds the PTT button
@@ -6222,11 +6255,14 @@ static void sleep_timer_cb(lv_timer_t *t)
             show(s_active_builder);
         }
     }
+}
 
-    // Follow the Sendspin stream, edge-triggered: open the now-playing screen when
-    // Music Assistant STARTS a stream, but let the user navigate away afterwards
-    // (the mini bar keeps it reachable). Return home when the stream ends only if
-    // still on that screen. Refresh the title/progress while it is shown.
+// Follow the Sendspin stream, edge-triggered: open the now-playing screen when
+// Music Assistant STARTS a stream, but let the user navigate away afterwards
+// (the mini bar keeps it reachable). Return home when the stream ends only if
+// still on that screen. Refresh the title/progress while it is shown.
+static void tick_sendspin(void)
+{
     bool ss = source_sendspin_session_active();
     if (ss && !s_ss_prev) {
         if (play_denied()) {  // parental block: refuse the Music Assistant stream
@@ -6245,13 +6281,16 @@ static void sleep_timer_cb(lv_timer_t *t)
         ss_refresh();
     }
     s_ss_prev = ss;
+}
 
-    // Playback died on its own (unreachable stream, lost connection, decode
-    // error): tell the user on the now-playing screen instead of leaving a
-    // normal-looking screen with permanent silence. Reuses the ICY line (radio)
-    // or the time line (podcast/SD); cleared by the next play (ui_play). A
-    // local-file failure gets its own wording: "check the connection" would
-    // point the user at Wi-Fi for a corrupt SD file.
+// Playback died on its own (unreachable stream, lost connection, decode
+// error): tell the user on the now-playing screen instead of leaving a
+// normal-looking screen with permanent silence. Reuses the ICY line (radio)
+// or the time line (podcast/SD); cleared by the next play (ui_play). A
+// local-file failure gets its own wording: "check the connection" would
+// point the user at Wi-Fi for a corrupt SD file.
+static void tick_now_playing(void)
+{
     if (s_play_failed && s_active_builder == build_now_playing) {
         lv_obj_t *lbl = s_np_icy_lbl ? s_np_icy_lbl : s_np_prog_time;
         const char *txt = T(s_play_failed_local ? STR_PLAYBACK_FAILED : STR_STREAM_FAILED);
@@ -6348,17 +6387,23 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         }
     }
+}
 
-    // Apply a pending web remote command on the UI task (LVGL-safe).
+// Apply a pending web remote command on the UI task (LVGL-safe).
+static void tick_remote(void)
+{
     if (s_remote_cmd >= 0) {
         int cmd = s_remote_cmd;
         s_remote_cmd = -1;
         ui_remote_apply((ui_remote_t)cmd, s_remote_arg);
     }
+}
 
-    // A track finished on its own: play the next item in the same list (SD folder
-    // or podcast episodes), or stop at the end of the list. Runs on the UI task so
-    // play_ctx_at (LVGL) is safe.
+// A track finished on its own: play the next item in the same list (SD folder
+// or podcast episodes), or stop at the end of the list. Runs on the UI task so
+// play_ctx_at (LVGL) is safe.
+static void tick_advance(void)
+{
     if (s_advance) {
         s_advance = false;
         // A3: the episode that just ended reached a real natural end (s_advance
@@ -6399,348 +6444,392 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         }
     }
+}
 
-    mini_bar_update();  // persistent now-playing bar across screens
+// Per-second context, built once by tick_1hz so every engine below sees the
+// same instant and the SNTP step guard is evaluated in one place. cfg may be
+// NULL, in which case the sunrise and alarm engines are skipped entirely.
+typedef struct {
+    const config_t *cfg;
+    time_t          wall;     // epoch seconds
+    struct tm       local;    // localtime_r of wall
+    bool            step_ok;  // false on the tick that carries an SNTP jump
+} tick_sec_t;
 
-    // 1 Hz wall-clock tick: home clock refresh, then the alarm engine.
-    // Throttled so the labels and the alarm check only touch state once a
-    // second, not every 50 ms tick.
-    {
-        static int64_t s_clock_last_us;
-        int64_t now = esp_timer_get_time();
-        if (now - s_clock_last_us >= 1000000) {
-            s_clock_last_us = now;
+// ---- Listening stats (C3) ----
+// Count one second of real listening (not paused, not the alarm
+// beep) into today's bucket when the clock is valid. Persist on the
+// periodic/rollover signal from stats_tick and on the play->idle
+// edge, so a stopped session lands on flash promptly.
+static void tick_stats_and_usage(void)
+{
+        static bool s_stats_session_prev;
+        stats_source_t ssrc = STATS_SRC_RADIO;
+        const char *stitle = "";
+        bool listening = stats_classify(&ssrc, &stitle);
+        if (listening && time_valid()) {
+            time_t st = time(NULL);
+            struct tm stm;
+            localtime_r(&st, &stm);
+            int date = (stm.tm_year + 1900) * 10000 + (stm.tm_mon + 1) * 100 + stm.tm_mday;
+            if (stats_tick(date, ssrc, stitle)) stats_flush();
+        }
+        audio_source_t sa = audio_arbiter_active();
+        bool session = (sa != AUDIO_SOURCE_NONE && sa != AUDIO_SOURCE_BEEP &&
+                        sa != AUDIO_SOURCE_TUNER && sa != AUDIO_SOURCE_MEMO) ||
+                       source_sendspin_session_active();
+        if (s_stats_session_prev && !session) stats_flush();  // play -> idle edge
+        s_stats_session_prev = session;
 
-            // ---- Listening stats (C3) ----
-            // Count one second of real listening (not paused, not the alarm
-            // beep) into today's bucket when the clock is valid. Persist on the
-            // periodic/rollover signal from stats_tick and on the play->idle
-            // edge, so a stopped session lands on flash promptly.
-            {
-                static bool s_stats_session_prev;
-                stats_source_t ssrc = STATS_SRC_RADIO;
-                const char *stitle = "";
-                bool listening = stats_classify(&ssrc, &stitle);
-                if (listening && time_valid()) {
-                    time_t st = time(NULL);
-                    struct tm stm;
-                    localtime_r(&st, &stm);
-                    int date = (stm.tm_year + 1900) * 10000 + (stm.tm_mon + 1) * 100 + stm.tm_mday;
-                    if (stats_tick(date, ssrc, stitle)) stats_flush();
-                }
-                audio_source_t sa = audio_arbiter_active();
-                bool session = (sa != AUDIO_SOURCE_NONE && sa != AUDIO_SOURCE_BEEP &&
-                                sa != AUDIO_SOURCE_TUNER && sa != AUDIO_SOURCE_MEMO) ||
-                               source_sendspin_session_active();
-                if (s_stats_session_prev && !session) stats_flush();  // play -> idle edge
-                s_stats_session_prev = session;
-
-                // ---- Parental daily usage limit accumulation ----
-                // One second of usage = audible listening (same classification
-                // as the stats: beep and tuner never count) or time with the
-                // display awake. The alarm is exempt: its ring must never burn
-                // the child's quota. Persisted to NVS on usage_tick's ~1/min
-                // signal and on the play -> idle edge, so a power cycle loses
-                // at most the last unsaved minute.
-                static bool s_usage_counting_prev;
-                bool counting = (listening || !s_asleep) &&
-                                s_alarm_state != ALARM_RINGING && !s_alarm_beeping;
-                int today = date_today();
-                if (counting && today > 0) {
-                    if (usage_tick(today))
-                        config_store_set_usage(usage_date(), usage_seconds());
-                    // One-shot warning per day when 5 minutes of quota remain.
-                    const config_t *lc = config_store_get();
-                    if (lc && lc->daily_limit.enabled && s_limit_warn_date != today) {
-                        int rem = lc->daily_limit.minutes * 60 - usage_today(today);
-                        if (rem > 0 && rem <= 300) {
-                            s_limit_warn_date = today;
-                            toast(T(STR_LIMIT_5MIN));
-                        }
-                    }
-                }
-                if (s_usage_counting_prev && !counting && usage_date() > 0)
-                    config_store_set_usage(usage_date(), usage_seconds());
-                s_usage_counting_prev = counting;
-            }
-
-            if (s_home_clock && s_active_builder == build_home) {
-                bool visible = (np_current() == NP_NONE) && time_valid() && !s_asleep;
-                if (visible) {
-                    time_t nowt = time(NULL);
-                    struct tm tmv;
-                    localtime_r(&nowt, &tmv);
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
-                    if (strcmp(lv_label_get_text(s_home_clock), buf) != 0) {
-                        lv_label_set_text(s_home_clock, buf);
-                    }
-                    lv_obj_remove_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
-                } else {
-                    lv_obj_add_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
+        // ---- Parental daily usage limit accumulation ----
+        // One second of usage = audible listening (same classification
+        // as the stats: beep and tuner never count) or time with the
+        // display awake. The alarm is exempt: its ring must never burn
+        // the child's quota. Persisted to NVS on usage_tick's ~1/min
+        // signal and on the play -> idle edge, so a power cycle loses
+        // at most the last unsaved minute.
+        static bool s_usage_counting_prev;
+        bool counting = (listening || !s_asleep) &&
+                        s_alarm_state != ALARM_RINGING && !s_alarm_beeping;
+        int today = date_today();
+        if (counting && today > 0) {
+            if (usage_tick(today))
+                config_store_set_usage(usage_date(), usage_seconds());
+            // One-shot warning per day when 5 minutes of quota remain.
+            const config_t *lc = config_store_get();
+            if (lc && lc->daily_limit.enabled && s_limit_warn_date != today) {
+                int rem = lc->daily_limit.minutes * 60 - usage_today(today);
+                if (rem > 0 && rem <= 300) {
+                    s_limit_warn_date = today;
+                    toast(T(STR_LIMIT_5MIN));
                 }
             }
-            if (s_alarm_time_lbl) {
+        }
+        if (s_usage_counting_prev && !counting && usage_date() > 0)
+            config_store_set_usage(usage_date(), usage_seconds());
+        s_usage_counting_prev = counting;
+}
+
+// Refresh the HH:MM labels that show a wall clock: the home screen clock and
+// the alarm screens. Only while the screen owning them is active.
+static void tick_clock_labels(void)
+{
+        if (s_home_clock && s_active_builder == build_home) {
+            bool visible = (np_current() == NP_NONE) && time_valid() && !s_asleep;
+            if (visible) {
                 time_t nowt = time(NULL);
                 struct tm tmv;
                 localtime_r(&nowt, &tmv);
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
-                if (strcmp(lv_label_get_text(s_alarm_time_lbl), buf) != 0) {
-                    lv_label_set_text(s_alarm_time_lbl, buf);
+                if (strcmp(lv_label_get_text(s_home_clock), buf) != 0) {
+                    lv_label_set_text(s_home_clock, buf);
                 }
-            }
-
-            // ---- Alarm engine (all on the LVGL task, no locking) ----
-            const config_t *acfg = config_store_get();
-            time_t wnow = time(NULL);
-            long step = (long)(wnow - s_last_wall);
-            s_last_wall = wnow;
-            bool step_ok = (step >= 0 && step <= 5);  // skip SNTP correction ticks
-            if (acfg) {
-                struct tm tmv;
-                localtime_r(&wnow, &tmv);
-
-                // ---- Sunrise light (C1), BEFORE the alarm block on purpose:
-                // on the fire tick the alarm takes over (alarm_fire runs
-                // exit_sleep, backlight 100, ringing screen) and this block
-                // sees the state change on its next tick (handoff). Quiet
-                // hours never block it: this path drives the panel and
-                // backlight directly, it passes through no user entry-point
-                // gate (same exemption-by-construction as alarm_fire). ----
-                if (!s_sunrise_active) {
-                    if (s_alarm_state == ALARM_IDLE && time_valid() && step_ok &&
-                        s_asleep && !audio_is_active() && !source_sendspin_session_active()) {
-                        int mu = 0;
-                        int nf = alarm_next_fire(acfg->alarms, CFG_MAX_ALARMS, &tmv, &mu);
-                        if (nf >= 0 && acfg->alarms[nf].sunrise > 0 &&
-                            mu >= 1 && mu <= acfg->alarms[nf].sunrise &&
-                            !(nf == s_sunrise_block_idx &&
-                              wnow / 60 + mu == s_sunrise_block_min)) {
-                            s_sunrise_active = true;
-                            s_sunrise_idx = nf;
-                            s_sunrise_pct = 5;
-                            s_sunrise_log_tick = 0;
-                            // Panel on, but s_asleep stays true (see the
-                            // statics comment: neutralizes the sleep
-                            // countdown, touch rides the normal wake path).
-                            if (s_panel) esp_lcd_panel_disp_on_off(s_panel, true);
-                            show(build_sunrise);
-                            bl_set(5);
-                            ESP_LOGI(TAG, "sunrise: start (alarm %d, %d min)",
-                                     nf + 1, acfg->alarms[nf].sunrise);
-                        }
-                    }
-                } else if (s_alarm_state != ALARM_IDLE) {
-                    // The alarm fired last tick: the ringing screen is up at
-                    // backlight 100. Just end the ramp, no screen change.
-                    s_sunrise_active = false;
-                    ESP_LOGI(TAG, "sunrise: handoff to alarm");
-                } else if (!s_asleep) {
-                    // Touch: the 50 ms wake check already ran exit_sleep
-                    // (backlight 100, touch swallowed). Normal wake = home.
-                    s_sunrise_active = false;
-                    sunrise_latch(acfg, wnow);
-                    show(build_home);
-                    ESP_LOGI(TAG, "sunrise: canceled (touch)");
-                } else if (audio_is_active() || source_sendspin_session_active()) {
-                    // Playback started (web remote / Music Assistant): full
-                    // brightness, keep a now-playing screen if one took over
-                    // (the Sendspin edge above may have shown it), else home.
-                    s_sunrise_active = false;
-                    sunrise_latch(acfg, wnow);
-                    s_asleep = false;
-                    bl_set(100);
-                    lv_display_trigger_activity(s_disp);  // restart the sleep countdown
-                    if (s_active_builder != build_now_playing &&
-                        s_active_builder != build_sendspin_playing) show(build_home);
-                    ESP_LOGI(TAG, "sunrise: canceled (play)");
-                } else if (step_ok) {
-                    // Ramp tick: recompute everything from the wall clock (an
-                    // SNTP step tick is skipped entirely via step_ok).
-                    int mu = 0;
-                    int nf = alarm_next_fire(acfg->alarms, CFG_MAX_ALARMS, &tmv, &mu);
-                    int sr = (nf >= 0) ? acfg->alarms[nf].sunrise : 0;
-                    if (nf != s_sunrise_idx || sr <= 0 || mu > sr) {
-                        // Disabled or retimed mid-ramp: back to the sleeping
-                        // state (home behind a dark panel, s_asleep stays true).
-                        s_sunrise_active = false;
-                        show(build_home);
-                        bl_set(0);
-                        if (s_panel) esp_lcd_panel_disp_on_off(s_panel, false);
-                        ESP_LOGI(TAG, "sunrise: canceled (disabled)");
-                    } else {
-                        int total = sr * 60;
-                        int left = (int)((wnow / 60 + mu) * 60 - wnow);  // seconds to fire
-                        int pct = 5 + 95 * (total - left) / total;
-                        if (pct < 5) pct = 5;
-                        if (pct > 100) pct = 100;
-                        if (pct != s_sunrise_pct) {
-                            s_sunrise_pct = pct;
-                            bl_set(pct);
-                        }
-                        if (++s_sunrise_log_tick >= 30) {  // ramp evidence in /api/logs
-                            s_sunrise_log_tick = 0;
-                            ESP_LOGI(TAG, "sunrise: ramp %d%%", pct);
-                        }
-                    }
-                }
-
-                switch (s_alarm_state) {
-                case ALARM_IDLE:
-                    // Fire on the exact minute of an enabled day, once per alarm
-                    // (latched). The step guard drops the tick that carries an
-                    // SNTP jump. When several alarms match the same minute, the
-                    // lowest index wins (first hit in the loop fires and breaks).
-                    for (int ai = 0; ai < CFG_MAX_ALARMS; ai++) {
-                        const config_alarm_t *aa = &acfg->alarms[ai];
-                        if (aa->enabled && time_valid() && step_ok &&
-                            tmv.tm_hour == aa->hour && tmv.tm_min == aa->minute &&
-                            (aa->days & (1 << ((tmv.tm_wday + 6) % 7))) &&
-                            (alarm_latch_key(&tmv) != s_alarm_fired_min[ai])) {
-                            alarm_fire(ai);
-                            break;
-                        }
-                    }
-                    break;
-                case ALARM_SNOOZED:
-                    if (!acfg->alarms[s_alarm_active_idx].enabled) {
-                        s_alarm_state = ALARM_IDLE;  // disabled while snoozed
-                    } else if (wnow >= s_alarm_snooze_until) {
-                        alarm_fire(s_alarm_active_idx);  // epoch math, no step guard needed
-                    }
-                    break;
-                case ALARM_RINGING: {
-                    lv_display_trigger_activity(s_disp);  // never sleep mid-ring
-                    long elapsed_s = (long)((esp_timer_get_time() - s_alarm_ring_start_us) / 1000000);
-                    // Volume ramp: the ramp owns the volume for the first 60 s,
-                    // v = start + (target-start)*elapsed/60, then it lands on the
-                    // target ONCE and hands the volume back. Re-asserting the
-                    // target every tick after that fought a sleepy human turning
-                    // the volume down, which contradicts the 60 s contract.
-                    // audio_set_volume clamps to volume_max.
-                    int target = acfg->alarms[s_alarm_active_idx].volume;
-                    int rstart = target * 15 / 100;
-                    if (rstart < 5) rstart = 5;
-                    if (elapsed_s < 60) {
-                        int v = rstart + (int)((target - rstart) * elapsed_s / 60);
-                        if (v != audio_get_volume()) audio_set_volume(v);
-                    } else if (!s_alarm_ramp_done) {
-                        s_alarm_ramp_done = true;
-                        audio_set_volume(target);
-                    }
-                    // Late failure: the source never produced audio (unreachable
-                    // stream, or a track shorter than the ring). Beep instead so
-                    // the alarm keeps sounding. s_play_failed is read-only here;
-                    // the now-playing consumer never runs on the ringing screen.
-                    // Gate on the beep actually SOUNDING (arbiter == BEEP), not on
-                    // s_alarm_beeping: if a REQ_BEEP was clobbered in the queue or
-                    // beep_run could not acquire the arbiter, s_alarm_beeping would
-                    // wedge the retry and the alarm would stay silent. Re-firing an
-                    // already-pending beep is harmless (single-slot queue).
-                    if (audio_arbiter_active() == AUDIO_SOURCE_BEEP && audio_is_active()) {
-                        s_alarm_beep_confirmed = true;
-                    }
-                    if (!s_alarm_beep_confirmed &&
-                        (s_play_failed || (!audio_is_active() && elapsed_s > 20))) {
-                        beep_start();
-                    }
-                    // Reflect the beep takeover on the ringing screen's source line.
-                    if (s_alarm_beeping && s_alarm_src_lbl &&
-                        strcmp(lv_label_get_text(s_alarm_src_lbl), T(STR_ALARM_BEEP)) != 0) {
-                        lv_label_set_text(s_alarm_src_lbl, T(STR_ALARM_BEEP));
-                    }
-                    // Auto-stop at 30 min, or the instant this alarm is disabled
-                    // (the kill switch): it targets the active alarm only.
-                    if (elapsed_s >= 30 * 60 || !acfg->alarms[s_alarm_active_idx].enabled) {
-                        alarm_finish(false);
-                    }
-                    break;
-                }
-                }
-            }
-            // Edge-triggered home rebuild on an alarm-state change, so the snooze
-            // reminder line appears/disappears (net-state rebuild pattern).
-            if (s_alarm_state != s_alarm_state_shown) {
-                s_alarm_state_shown = s_alarm_state;
-                if (s_active_builder == build_home) show(build_home);
-            }
-
-            // ---- Sleep timer engine (A2) ----
-            // esp_timer based, so an SNTP wall-clock jump cannot affect it. Runs
-            // after the alarm block on purpose: alarm_fire() (above) already
-            // clears the sleep timer, so if both would land on the same tick the
-            // alarm wins and s_sleep_stop_at_us is already 0 here.
-            // End-of-track only fires from the s_advance hook, which the current
-            // source may not have anymore (armed on an SD/podcast/library list,
-            // then the user switched to a radio or Sendspin took over). Convert
-            // to the 60-minute deadline, same rule as arming on such a source.
-            if (s_sleep_end_of_track && !sleep_has_track_end()) {
-                ESP_LOGI(TAG, "sleep timer: no track end anymore, falling back to 60 min");
-                sleep_arm(60);
-            }
-            if (s_sleep_stop_at_us != 0 && now >= s_sleep_stop_at_us) {
-                ESP_LOGI(TAG, "sleep timer: fired");
-                if (source_sendspin_session_active()) source_sendspin_command(SENDSPIN_CMD_STOP);
-                if (audio_is_active()) ui_stop();
-                if (s_active_builder == build_now_playing ||
-                    s_active_builder == build_sendspin_playing) show(build_home);
-                toast(T(STR_SLEEP_STOPPED));
-                sleep_clear();  // ui_stop() already does this when local audio was active
-            }
-            // Idle safety net: a source can die on its own (dead stream, decode
-            // error) without ever calling ui_stop, which would otherwise leave
-            // the timer armed with nothing left to stop. Debounced 5 s: right
-            // after arming, audio_is_active() (s_open in audio.c) can still read
-            // false for a moment while a radio/podcast stream is connecting
-            // (TLS handshake, CDN redirect, prebuffer), and a bare one-tick check
-            // would wrongly disarm a timer set during that window.
-            static int s_sleep_idle_ticks;
-            if (s_sleep_choice != 0 && !audio_is_active() && !source_sendspin_session_active()) {
-                if (++s_sleep_idle_ticks >= 5) sleep_clear();
+                lv_obj_remove_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
             } else {
-                s_sleep_idle_ticks = 0;
-            }
-            // Countdown label, only while a screen showing it is active (same
-            // gating as the alarm/home clock labels above).
-            if (s_active_builder == build_now_playing || s_active_builder == build_sendspin_playing) {
-                sleep_label_refresh();
-            }
-
-            // Parental block (quiet hours or exhausted daily limit),
-            // edge-triggered. Runs after the alarm block on purpose: if the
-            // alarm minute equals the block start, the alarm fires first and
-            // the enter-edge skips the stop (the alarm always wins).
-            bool q = quiet_active();
-            bool blocked = q || limit_hit();
-            if ((int)blocked != s_block_applied) {
-                bool first = (s_block_applied == -1);
-                s_block_applied = (int)blocked;
-                if (blocked && !first && s_alarm_state == ALARM_IDLE && !s_alarm_beeping) {
-                    if (source_sendspin_session_active())
-                        source_sendspin_command(SENDSPIN_CMD_STOP);
-                    // Also stop a stream reconnect in progress (audio is inactive
-                    // between attempts, but the retry loop would otherwise bring
-                    // the stream back during the window). ui_stop sets
-                    // s_stop_requested, which ends the retries.
-                    if (audio_is_active() || s_play_retrying) ui_stop();
-                    if (s_active_builder == build_now_playing ||
-                        s_active_builder == build_sendspin_playing ||
-                        s_active_builder == build_game ||
-                        s_active_builder == build_game_setup ||
-                        s_active_builder == build_talkie) show(build_home);
-                    toast(q ? T(STR_QUIET_HOURS) : T(STR_LIMIT_REACHED));
-                    ESP_LOGI(TAG, "%s, playback stopped",
-                             q ? "quiet hours: window opened" : "daily limit: quota reached");
-                }
-                if (!blocked && !first) ESP_LOGI(TAG, "parental block lifted");
-                if (s_active_builder == build_home) show(build_home);  // grey/un-grey tiles
+                lv_obj_add_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
             }
         }
-    }
+        if (s_alarm_time_lbl) {
+            time_t nowt = time(NULL);
+            struct tm tmv;
+            localtime_r(&nowt, &tmv);
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+            if (strcmp(lv_label_get_text(s_alarm_time_lbl), buf) != 0) {
+                lv_label_set_text(s_alarm_time_lbl, buf);
+            }
+        }
+}
 
-    // Reload the episodes screen once a podcast refresh finishes on the worker,
-    // and surface a failed refresh instead of silently showing the stale list.
+// ---- Sunrise light (C1), BEFORE the alarm block on purpose:
+// on the fire tick the alarm takes over (alarm_fire runs
+// exit_sleep, backlight 100, ringing screen) and this block
+// sees the state change on its next tick (handoff). Quiet
+// hours never block it: this path drives the panel and
+// backlight directly, it passes through no user entry-point
+// gate (same exemption-by-construction as alarm_fire). ----
+static void tick_sunrise(const tick_sec_t *s)
+{
+        if (!s_sunrise_active) {
+            if (s_alarm_state == ALARM_IDLE && time_valid() && s->step_ok &&
+                s_asleep && !audio_is_active() && !source_sendspin_session_active()) {
+                int mu = 0;
+                int nf = alarm_next_fire(s->cfg->alarms, CFG_MAX_ALARMS, &s->local, &mu);
+                if (nf >= 0 && s->cfg->alarms[nf].sunrise > 0 &&
+                    mu >= 1 && mu <= s->cfg->alarms[nf].sunrise &&
+                    !(nf == s_sunrise_block_idx &&
+                      s->wall / 60 + mu == s_sunrise_block_min)) {
+                    s_sunrise_active = true;
+                    s_sunrise_idx = nf;
+                    s_sunrise_pct = 5;
+                    s_sunrise_log_tick = 0;
+                    // Panel on, but s_asleep stays true (see the
+                    // statics comment: neutralizes the sleep
+                    // countdown, touch rides the normal wake path).
+                    if (s_panel) esp_lcd_panel_disp_on_off(s_panel, true);
+                    show(build_sunrise);
+                    bl_set(5);
+                    ESP_LOGI(TAG, "sunrise: start (alarm %d, %d min)",
+                             nf + 1, s->cfg->alarms[nf].sunrise);
+                }
+            }
+        } else if (s_alarm_state != ALARM_IDLE) {
+            // The alarm fired last tick: the ringing screen is up at
+            // backlight 100. Just end the ramp, no screen change.
+            s_sunrise_active = false;
+            ESP_LOGI(TAG, "sunrise: handoff to alarm");
+        } else if (!s_asleep) {
+            // Touch: the 50 ms wake check already ran exit_sleep
+            // (backlight 100, touch swallowed). Normal wake = home.
+            s_sunrise_active = false;
+            sunrise_latch(s->cfg, s->wall);
+            show(build_home);
+            ESP_LOGI(TAG, "sunrise: canceled (touch)");
+        } else if (audio_is_active() || source_sendspin_session_active()) {
+            // Playback started (web remote / Music Assistant): full
+            // brightness, keep a now-playing screen if one took over
+            // (the Sendspin edge above may have shown it), else home.
+            s_sunrise_active = false;
+            sunrise_latch(s->cfg, s->wall);
+            s_asleep = false;
+            bl_set(100);
+            lv_display_trigger_activity(s_disp);  // restart the sleep countdown
+            if (s_active_builder != build_now_playing &&
+                s_active_builder != build_sendspin_playing) show(build_home);
+            ESP_LOGI(TAG, "sunrise: canceled (play)");
+        } else if (s->step_ok) {
+            // Ramp tick: recompute everything from the wall clock (an
+            // SNTP step tick is skipped entirely via s->step_ok).
+            int mu = 0;
+            int nf = alarm_next_fire(s->cfg->alarms, CFG_MAX_ALARMS, &s->local, &mu);
+            int sr = (nf >= 0) ? s->cfg->alarms[nf].sunrise : 0;
+            if (nf != s_sunrise_idx || sr <= 0 || mu > sr) {
+                // Disabled or retimed mid-ramp: back to the sleeping
+                // state (home behind a dark panel, s_asleep stays true).
+                s_sunrise_active = false;
+                show(build_home);
+                bl_set(0);
+                if (s_panel) esp_lcd_panel_disp_on_off(s_panel, false);
+                ESP_LOGI(TAG, "sunrise: canceled (disabled)");
+            } else {
+                int total = sr * 60;
+                int left = (int)((s->wall / 60 + mu) * 60 - s->wall);  // seconds to fire
+                int pct = 5 + 95 * (total - left) / total;
+                if (pct < 5) pct = 5;
+                if (pct > 100) pct = 100;
+                if (pct != s_sunrise_pct) {
+                    s_sunrise_pct = pct;
+                    bl_set(pct);
+                }
+                if (++s_sunrise_log_tick >= 30) {  // ramp evidence in /api/logs
+                    s_sunrise_log_tick = 0;
+                    ESP_LOGI(TAG, "sunrise: ramp %d%%", pct);
+                }
+            }
+        }
+}
+
+// The alarm state machine: fire on a matching minute (latched), re-fire a
+// snooze, and drive a ringing alarm (volume ramp, beep fallback, auto-stop).
+static void tick_alarm(const tick_sec_t *s)
+{
+        switch (s_alarm_state) {
+        case ALARM_IDLE:
+            // Fire on the exact minute of an enabled day, once per alarm
+            // (latched). The step guard drops the tick that carries an
+            // SNTP jump. When several alarms match the same minute, the
+            // lowest index wins (first hit in the loop fires and breaks).
+            for (int ai = 0; ai < CFG_MAX_ALARMS; ai++) {
+                const config_alarm_t *aa = &s->cfg->alarms[ai];
+                if (aa->enabled && time_valid() && s->step_ok &&
+                    s->local.tm_hour == aa->hour && s->local.tm_min == aa->minute &&
+                    (aa->days & (1 << ((s->local.tm_wday + 6) % 7))) &&
+                    (alarm_latch_key(&s->local) != s_alarm_fired_min[ai])) {
+                    alarm_fire(ai);
+                    break;
+                }
+            }
+            break;
+        case ALARM_SNOOZED:
+            if (!s->cfg->alarms[s_alarm_active_idx].enabled) {
+                s_alarm_state = ALARM_IDLE;  // disabled while snoozed
+            } else if (s->wall >= s_alarm_snooze_until) {
+                alarm_fire(s_alarm_active_idx);  // epoch math, no step guard needed
+            }
+            break;
+        case ALARM_RINGING: {
+            lv_display_trigger_activity(s_disp);  // never sleep mid-ring
+            long elapsed_s = (long)((esp_timer_get_time() - s_alarm_ring_start_us) / 1000000);
+            // Volume ramp: the ramp owns the volume for the first 60 s,
+            // v = start + (target-start)*elapsed/60, then it lands on the
+            // target ONCE and hands the volume back. Re-asserting the
+            // target every tick after that fought a sleepy human turning
+            // the volume down, which contradicts the 60 s contract.
+            // audio_set_volume clamps to volume_max.
+            int target = s->cfg->alarms[s_alarm_active_idx].volume;
+            int rstart = target * 15 / 100;
+            if (rstart < 5) rstart = 5;
+            if (elapsed_s < 60) {
+                int v = rstart + (int)((target - rstart) * elapsed_s / 60);
+                if (v != audio_get_volume()) audio_set_volume(v);
+            } else if (!s_alarm_ramp_done) {
+                s_alarm_ramp_done = true;
+                audio_set_volume(target);
+            }
+            // Late failure: the source never produced audio (unreachable
+            // stream, or a track shorter than the ring). Beep instead so
+            // the alarm keeps sounding. s_play_failed is read-only here;
+            // the now-playing consumer never runs on the ringing screen.
+            // Gate on the beep actually SOUNDING (arbiter == BEEP), not on
+            // s_alarm_beeping: if a REQ_BEEP was clobbered in the queue or
+            // beep_run could not acquire the arbiter, s_alarm_beeping would
+            // wedge the retry and the alarm would stay silent. Re-firing an
+            // already-pending beep is harmless (single-slot queue).
+            if (audio_arbiter_active() == AUDIO_SOURCE_BEEP && audio_is_active()) {
+                s_alarm_beep_confirmed = true;
+            }
+            if (!s_alarm_beep_confirmed &&
+                (s_play_failed || (!audio_is_active() && elapsed_s > 20))) {
+                beep_start();
+            }
+            // Reflect the beep takeover on the ringing screen's source line.
+            if (s_alarm_beeping && s_alarm_src_lbl &&
+                strcmp(lv_label_get_text(s_alarm_src_lbl), T(STR_ALARM_BEEP)) != 0) {
+                lv_label_set_text(s_alarm_src_lbl, T(STR_ALARM_BEEP));
+            }
+            // Auto-stop at 30 min, or the instant this alarm is disabled
+            // (the kill switch): it targets the active alarm only.
+            if (elapsed_s >= 30 * 60 || !s->cfg->alarms[s_alarm_active_idx].enabled) {
+                alarm_finish(false);
+            }
+            break;
+        }
+        }
+}
+
+// Edge-triggered home rebuild on an alarm-state change, so the snooze
+// reminder line appears/disappears (net-state rebuild pattern).
+static void tick_alarm_screen_edge(void)
+{
+        if (s_alarm_state != s_alarm_state_shown) {
+            s_alarm_state_shown = s_alarm_state;
+            if (s_active_builder == build_home) show(build_home);
+        }
+}
+
+// ---- Sleep timer engine (A2) ----
+// esp_timer based, so an SNTP wall-clock jump cannot affect it. Runs
+// after the alarm block on purpose: alarm_fire() (above) already
+// clears the sleep timer, so if both would land on the same tick the
+// alarm wins and s_sleep_stop_at_us is already 0 here.
+// End-of-track only fires from the s_advance hook, which the current
+// source may not have anymore (armed on an SD/podcast/library list,
+// then the user switched to a radio or Sendspin took over). Convert
+// to the 60-minute deadline, same rule as arming on such a source.
+static void tick_sleep_engine(int64_t now_us)
+{
+        if (s_sleep_end_of_track && !sleep_has_track_end()) {
+            ESP_LOGI(TAG, "sleep timer: no track end anymore, falling back to 60 min");
+            sleep_arm(60);
+        }
+        if (s_sleep_stop_at_us != 0 && now_us >= s_sleep_stop_at_us) {
+            ESP_LOGI(TAG, "sleep timer: fired");
+            if (source_sendspin_session_active()) source_sendspin_command(SENDSPIN_CMD_STOP);
+            if (audio_is_active()) ui_stop();
+            if (s_active_builder == build_now_playing ||
+                s_active_builder == build_sendspin_playing) show(build_home);
+            toast(T(STR_SLEEP_STOPPED));
+            sleep_clear();  // ui_stop() already does this when local audio was active
+        }
+        // Idle safety net: a source can die on its own (dead stream, decode
+        // error) without ever calling ui_stop, which would otherwise leave
+        // the timer armed with nothing left to stop. Debounced 5 s: right
+        // after arming, audio_is_active() (s_open in audio.c) can still read
+        // false for a moment while a radio/podcast stream is connecting
+        // (TLS handshake, CDN redirect, prebuffer), and a bare one-tick check
+        // would wrongly disarm a timer set during that window.
+        static int s_sleep_idle_ticks;
+        if (s_sleep_choice != 0 && !audio_is_active() && !source_sendspin_session_active()) {
+            if (++s_sleep_idle_ticks >= 5) sleep_clear();
+        } else {
+            s_sleep_idle_ticks = 0;
+        }
+        // Countdown label, only while a screen showing it is active (same
+        // gating as the alarm/home clock labels above).
+        if (s_active_builder == build_now_playing || s_active_builder == build_sendspin_playing) {
+            sleep_label_refresh();
+        }
+}
+
+// Parental block (quiet hours or exhausted daily limit),
+// edge-triggered. Runs after the alarm block on purpose: if the
+// alarm minute equals the block start, the alarm fires first and
+// the enter-edge skips the stop (the alarm always wins).
+static void tick_parental_block(void)
+{
+        bool q = quiet_active();
+        bool blocked = q || limit_hit();
+        if ((int)blocked != s_block_applied) {
+            bool first = (s_block_applied == -1);
+            s_block_applied = (int)blocked;
+            if (blocked && !first && s_alarm_state == ALARM_IDLE && !s_alarm_beeping) {
+                if (source_sendspin_session_active())
+                    source_sendspin_command(SENDSPIN_CMD_STOP);
+                // Also stop a stream reconnect in progress (audio is inactive
+                // between attempts, but the retry loop would otherwise bring
+                // the stream back during the window). ui_stop sets
+                // s_stop_requested, which ends the retries.
+                if (audio_is_active() || s_play_retrying) ui_stop();
+                if (s_active_builder == build_now_playing ||
+                    s_active_builder == build_sendspin_playing ||
+                    s_active_builder == build_game ||
+                    s_active_builder == build_game_setup ||
+                    s_active_builder == build_talkie) show(build_home);
+                toast(q ? T(STR_QUIET_HOURS) : T(STR_LIMIT_REACHED));
+                ESP_LOGI(TAG, "%s, playback stopped",
+                         q ? "quiet hours: window opened" : "daily limit: quota reached");
+            }
+            if (!blocked && !first) ESP_LOGI(TAG, "parental block lifted");
+            if (s_active_builder == build_home) show(build_home);  // grey/un-grey tiles
+        }
+}
+
+// The once-per-second half of the UI tick. The call order below is load-bearing:
+// each constraint is stated at its call site.
+static void tick_1hz(void)
+{
+    static int64_t s_clock_last_us;
+    int64_t now = esp_timer_get_time();
+    if (now - s_clock_last_us < 1000000) return;
+    s_clock_last_us = now;
+
+    tick_stats_and_usage();
+    tick_clock_labels();
+
+    tick_sec_t sec = { .cfg = config_store_get(), .wall = time(NULL) };
+    long step = (long)(sec.wall - s_last_wall);
+    s_last_wall = sec.wall;
+    sec.step_ok = (step >= 0 && step <= 5);  // skip SNTP correction ticks
+    localtime_r(&sec.wall, &sec.local);
+    if (sec.cfg) {
+        tick_sunrise(&sec);  // BEFORE the alarm on purpose (see the function)
+        tick_alarm(&sec);
+    }
+    tick_alarm_screen_edge();
+    // AFTER the alarm on purpose: alarm_fire() already cleared the sleep timer,
+    // so when both land on the same tick the alarm wins.
+    tick_sleep_engine(now);
+    // AFTER the alarm on purpose: if the alarm minute equals the window start,
+    // the alarm fires first and the enter-edge skips the stop.
+    tick_parental_block();
+}
+
+
+// Reload the episodes screen once a podcast refresh finishes on the worker,
+// and surface a failed refresh instead of silently showing the stale list.
+static void tick_refresh_done(void)
+{
     if (s_refresh_done) {
         s_refresh_done = false;
         if (s_active_builder == build_episodes) {
@@ -6750,12 +6839,15 @@ static void sleep_timer_cb(lv_timer_t *t)
             }
         }
     }
+}
 
-    // Rebuild the home screen when connectivity changes, so the network sources
-    // grey out or re-enable themselves without the user leaving the screen. Also
-    // leave the provisioning screen as soon as Wi-Fi connects (net keeps retrying
-    // in the background while the setup AP is up): without this the user is
-    // stranded on the QR screen even though the device is already online.
+// Rebuild the home screen when connectivity changes, so the network sources
+// grey out or re-enable themselves without the user leaving the screen. Also
+// leave the provisioning screen as soon as Wi-Fi connects (net keeps retrying
+// in the background while the setup AP is up): without this the user is
+// stranded on the QR screen even though the device is already online.
+static void tick_net_change(void)
+{
     net_state_t ns = net_state();
     if (ns != s_last_net) {
         s_last_net = ns;
@@ -6776,6 +6868,12 @@ static void sleep_timer_cb(lv_timer_t *t)
             show(build_episodes);
         }
     }
+}
+
+// Wake on the BOOT button, then the screen-sleep countdown. Last on purpose:
+// every engine above may have called lv_display_trigger_activity().
+static void tick_wake_and_sleep(void)
+{
     if (gpio_get_level(BOARD_BOOT_BTN_GPIO) == 0) {  // BOOT pressed (active low)
         lv_display_trigger_activity(s_disp);
     }
@@ -6791,6 +6889,31 @@ static void sleep_timer_cb(lv_timer_t *t)
         // correspondent's messages, which must not play to a dark panel).
         enter_sleep();
     }
+}
+
+static void sleep_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+
+    tick_screenshot();
+    tick_stats_reset();
+    tick_nav_request();
+    tick_download_scheduler();
+    tick_apply_config();
+    tick_tuner();
+    tick_memo_talkie();
+    tick_sd_presence();
+    tick_favorites();
+    tick_volume_limit();
+    tick_sendspin();
+    tick_now_playing();
+    tick_remote();
+    tick_advance();
+    mini_bar_update();  // persistent now-playing bar across screens
+    tick_1hz();
+    tick_refresh_done();
+    tick_net_change();
+    tick_wake_and_sleep();
 }
 
 esp_err_t ui_start(i2c_master_bus_handle_t i2c_bus)
