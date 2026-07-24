@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"  // xTaskCreateWithCaps
+#include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -132,7 +133,10 @@ public:
     }
 
     void on_volume_changed(uint8_t volume) override {
-        audio_set_volume((int)volume * 100 / 255);  // 0..255 -> 0..100
+        // Round, do not truncate: 1 and 2 out of 255 would floor to 0 (mute),
+        // and the reverse direction (update_volume) already rounds, so a
+        // server-set volume must echo back unchanged.
+        audio_set_volume(((int)volume * 100 + 127) / 255);  // 0..255 -> 0..100
     }
 };
 
@@ -265,7 +269,9 @@ extern "C" esp_err_t source_sendspin_init(void)
     cfg.name = g_name;
     cfg.product_name = "Bugne";
     cfg.manufacturer = "Bugne";
-    cfg.software_version = "0.1.0";
+    // Real firmware version (version.txt via PROJECT_VER): this is what Music
+    // Assistant shows for the player.
+    cfg.software_version = esp_app_get_description()->version;
     cfg.httpd_psram_stack = true;  // httpd task stack in PSRAM: frees internal RAM for HTTPS streaming
 
     g_client = new SendspinClient(std::move(cfg));

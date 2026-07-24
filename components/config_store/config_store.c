@@ -124,6 +124,25 @@ static void parse_one_alarm(const cJSON *alarm, config_alarm_t *a)
     if (cJSON_IsNumber(sr)) a->sunrise = clampi(sr->valueint, 0, 15);
 }
 
+// Ids must be unique and positive: alarms and favorites reference a webradio BY
+// ID (deliberately, so a web reorder cannot repoint them), and the fallback id
+// for an entry that has none is positional, so a hand-edited or restored config
+// can collide. Renumbers only the offenders, so every well-formed id survives.
+static void dedup_ids(int *ids, size_t n)
+{
+    int max = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ids[i] > max) max = ids[i];
+    }
+    for (size_t i = 0; i < n; i++) {
+        bool dup = (ids[i] <= 0);
+        for (size_t j = 0; !dup && j < i; j++) {
+            if (ids[j] == ids[i]) dup = true;
+        }
+        if (dup) ids[i] = ++max;
+    }
+}
+
 // Overlay parsed JSON onto the already-defaulted s_config. Missing fields keep
 // their defaults. All strings are bounded. An entry without its required URL is
 // skipped. Treat every value as untrusted.
@@ -169,6 +188,10 @@ static void load_from_json(const cJSON *root)
                     : (cJSON_IsString(sp) && sp->valuestring) ? atoi(sp->valuestring) : 0;
             w->skip_preroll = spv ? 1 : 0;
         }
+        int ids[CFG_MAX_WEBRADIOS];
+        for (size_t i = 0; i < s_config.webradio_count; i++) ids[i] = s_config.webradios[i].id;
+        dedup_ids(ids, s_config.webradio_count);
+        for (size_t i = 0; i < s_config.webradio_count; i++) s_config.webradios[i].id = ids[i];
     }
 
     const cJSON *pods = cJSON_GetObjectItemCaseSensitive(root, "podcasts");
@@ -191,6 +214,10 @@ static void load_from_json(const cJSON *root)
                    : (cJSON_IsString(skip) && skip->valuestring) ? atoi(skip->valuestring) : 0;
             p->skip_seconds = sk < 0 ? 0 : sk;
         }
+        int ids[CFG_MAX_PODCASTS];
+        for (size_t i = 0; i < s_config.podcast_count; i++) ids[i] = s_config.podcasts[i].id;
+        dedup_ids(ids, s_config.podcast_count);
+        for (size_t i = 0; i < s_config.podcast_count; i++) s_config.podcasts[i].id = ids[i];
     }
 
     const cJSON *ui = cJSON_GetObjectItemCaseSensitive(root, "ui");
@@ -412,9 +439,12 @@ static esp_err_t save_to_disk(const config_t *c)
     } else {
         size_t len = strlen(txt);
         size_t wr = fwrite(txt, 1, len, f);
-        fclose(f);
-        if (wr != len) {
+        // fclose can still fail (the final flush hits a full LittleFS): promoting
+        // the temp file then would replace a good config with a truncated one.
+        bool closed = (fclose(f) == 0);
+        if (wr != len || !closed) {
             ESP_LOGE(TAG, "short write to %s", CONFIG_TMP_PATH);
+            remove(CONFIG_TMP_PATH);
             err = ESP_FAIL;
         } else if (rename(CONFIG_TMP_PATH, CONFIG_PATH) != 0) {
             ESP_LOGE(TAG, "rename to %s failed", CONFIG_PATH);
@@ -427,8 +457,12 @@ static esp_err_t save_to_disk(const config_t *c)
 }
 
 // Load config.json into s_config. Always leaves a valid in-memory config.
-// Missing or unparseable files self-heal by writing defaults back to flash. An
-// unknown schema_version keeps the file untouched and uses defaults in memory.
+// A missing or empty file self-heals by writing defaults back to flash. A file
+// that exists but cannot be used (too large, unparseable, unknown
+// schema_version) is KEPT: it is the user's data, and overwriting it would wipe
+// every radio, podcast, alarm and parental setting over what may be a transient
+// failure (a low-memory boot fails the parse too). Defaults are used in memory
+// and the error is logged; the file stays available for download and inspection.
 static esp_err_t load_config(void)
 {
     set_defaults(&s_config);
@@ -442,10 +476,16 @@ static esp_err_t load_config(void)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > CONFIG_FILE_MAX) {
+    if (sz <= 0) {
         fclose(f);
-        ESP_LOGE(TAG, "config.json size %ld out of bounds, restoring defaults", sz);
+        ESP_LOGE(TAG, "config.json is empty, writing defaults");
         return save_to_disk(&s_config);
+    }
+    if (sz > CONFIG_FILE_MAX) {
+        fclose(f);
+        ESP_LOGE(TAG, "config.json size %ld over the %d limit, using defaults "
+                      "without overwriting the file", sz, CONFIG_FILE_MAX);
+        return ESP_OK;
     }
 
     char *buf = malloc((size_t)sz + 1);
@@ -460,8 +500,8 @@ static esp_err_t load_config(void)
     cJSON *root = cJSON_Parse(buf);
     free(buf);
     if (!root) {
-        ESP_LOGE(TAG, "config.json parse failed, restoring defaults");
-        return save_to_disk(&s_config);
+        ESP_LOGE(TAG, "config.json parse failed, using defaults without overwriting the file");
+        return ESP_OK;
     }
 
     const cJSON *ver = cJSON_GetObjectItemCaseSensitive(root, "schema_version");
@@ -649,16 +689,6 @@ esp_err_t config_store_set_wifi_slot(int slot, const char *ssid, const char *pas
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     return err;
-}
-
-esp_err_t config_store_get_wifi(char *ssid, size_t ssid_size, char *pass, size_t pass_size)
-{
-    return config_store_get_wifi_slot(0, ssid, ssid_size, pass, pass_size);
-}
-
-esp_err_t config_store_set_wifi(const char *ssid, const char *pass)
-{
-    return config_store_set_wifi_slot(0, ssid, pass);
 }
 
 esp_err_t config_store_read_json(char *buf, size_t size, size_t *out_len)

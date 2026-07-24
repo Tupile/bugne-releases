@@ -138,43 +138,44 @@ FILE *memo_tk_create(char *final_abs, size_t final_size,
     return NULL;
 }
 
-void memo_clean_parts(void)
+// Delete temporaries: talkie files (tk-*) when talkie is true, in-flight
+// leftovers (*.part and the finalized capture) otherwise. Names are collected
+// into a small stack buffer before deleting (never delete while walking the
+// directory), so a directory holding more leftovers than fit takes several
+// passes. Loops until a pass is not full, or makes no progress.
+#define PURGE_BATCH 8
+
+static void purge(bool talkie)
 {
-    DIR *dir = opendir(MEMO_ABS_DIR);
-    if (!dir) return;
-    char victims[8][MEMO_NAME_MAX];
-    int nv = 0;
-    struct dirent *de;
-    while ((de = readdir(dir)) != NULL && nv < 8) {
-        size_t len = strlen(de->d_name);
-        bool part = len > 5 && strcmp(de->d_name + len - 5, ".part") == 0;
-        if (part || strcmp(de->d_name, MEMO_REC_NAME) == 0)
-            strlcpy(victims[nv++], de->d_name, MEMO_NAME_MAX);
-    }
-    closedir(dir);
-    for (int i = 0; i < nv; i++) {
-        char abs[MEMO_NAME_MAX + 20];
-        memo_abs_path(abs, sizeof(abs), victims[i]);
-        ESP_LOGI(TAG, "removing leftover %s", victims[i]);
-        remove(abs);
+    for (;;) {
+        DIR *dir = opendir(MEMO_ABS_DIR);
+        if (!dir) return;
+        char victims[PURGE_BATCH][MEMO_NAME_MAX];
+        int nv = 0;
+        struct dirent *de;
+        while ((de = readdir(dir)) != NULL && nv < PURGE_BATCH) {
+            bool hit;
+            if (talkie) {
+                hit = strncmp(de->d_name, MEMO_TK_PREFIX, strlen(MEMO_TK_PREFIX)) == 0;
+            } else {
+                size_t len = strlen(de->d_name);
+                hit = (len > 5 && strcmp(de->d_name + len - 5, ".part") == 0) ||
+                      strcmp(de->d_name, MEMO_REC_NAME) == 0;
+            }
+            if (hit) strlcpy(victims[nv++], de->d_name, MEMO_NAME_MAX);
+        }
+        closedir(dir);
+        int removed = 0;
+        for (int i = 0; i < nv; i++) {
+            char abs[MEMO_NAME_MAX + 20];
+            memo_abs_path(abs, sizeof(abs), victims[i]);
+            if (!talkie) ESP_LOGI(TAG, "removing leftover %s", victims[i]);
+            if (remove(abs) == 0) removed++;
+        }
+        if (nv < PURGE_BATCH || removed == 0) return;
     }
 }
 
-void memo_clean_talkie(void)
-{
-    DIR *dir = opendir(MEMO_ABS_DIR);
-    if (!dir) return;
-    char victims[8][MEMO_NAME_MAX];
-    int nv = 0;
-    struct dirent *de;
-    while ((de = readdir(dir)) != NULL && nv < 8) {
-        if (strncmp(de->d_name, MEMO_TK_PREFIX, strlen(MEMO_TK_PREFIX)) == 0)
-            strlcpy(victims[nv++], de->d_name, MEMO_NAME_MAX);
-    }
-    closedir(dir);
-    for (int i = 0; i < nv; i++) {
-        char abs[MEMO_NAME_MAX + 20];
-        memo_abs_path(abs, sizeof(abs), victims[i]);
-        remove(abs);
-    }
-}
+void memo_clean_parts(void) { purge(false); }
+
+void memo_clean_talkie(void) { purge(true); }

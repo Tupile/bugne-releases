@@ -317,7 +317,10 @@ Tout le reste est ici :
   Lampe sur l'écran d'accueil de l'appareil (fonctionnalité expérimentale).
 - Réseaux Wi-Fi : ajouter, modifier ou supprimer les réseaux enregistrés.
 - Mot de passe de la page, sauvegarde et restauration de la configuration,
-  journaux de l'appareil, et mises à jour du firmware (voir plus bas).
+  journaux de l'appareil, et mises à jour du firmware (voir plus bas). La carte
+  Diagnostics propose aussi un bouton Rapport de plantage : si l'appareil
+  redémarre tout seul, il indique ce que le firmware faisait à cet instant,
+  ce qu'il faut justement pour un rapport de bug.
 
 Remarque : après une mise à jour du firmware, rechargez la page web avant
 de modifier des réglages.

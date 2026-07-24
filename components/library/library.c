@@ -139,12 +139,21 @@ static void write_index(void)
         ESP_LOGW(TAG, "cannot write index");
         return;
     }
-    for (size_t i = 0; i < s_count; i++) {
+    bool ok = true;
+    for (size_t i = 0; i < s_count && ok; i++) {
         lib_track_t t = s_tracks[i];  // copy so sanitizing does not touch the model
         sanitize(t.artist); sanitize(t.album); sanitize(t.title); sanitize(t.path);
-        fprintf(f, "%s\t%s\t%d\t%s\t%s\n", t.artist, t.album, t.track, t.title, t.path);
+        if (fprintf(f, "%s\t%s\t%d\t%s\t%s\n", t.artist, t.album, t.track, t.title, t.path) < 0) {
+            ok = false;
+        }
     }
-    fclose(f);
+    if (fclose(f) != 0) ok = false;
+    // A half-written index would load as a partial library on the next boot.
+    // Drop it instead: no index means "rescan", which self-heals.
+    if (!ok) {
+        ESP_LOGW(TAG, "index write failed, removing it");
+        remove(INDEX_PATH);
+    }
 }
 
 esp_err_t library_scan_cancelable(volatile bool *cancel)

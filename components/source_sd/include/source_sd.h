@@ -65,6 +65,10 @@ FILE *source_sd_create(const char *rel_path);
 // error. Caller fcloses.
 FILE *source_sd_open(const char *rel_path);
 
+// Rename rel_from to rel_to (both validated), replacing rel_to if it exists.
+// Used to promote a ".part" upload only once it is complete.
+esp_err_t source_sd_rename(const char *rel_from, const char *rel_to);
+
 // Create directory rel_path (and parents). ESP_OK if it now exists.
 esp_err_t source_sd_mkdir(const char *rel_path);
 

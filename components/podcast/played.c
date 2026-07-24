@@ -54,12 +54,13 @@ static void save(void)
     bool ok = fwrite(&s_count, sizeof(s_count), 1, f) == 1 &&
               fwrite(&s_next, sizeof(s_next), 1, f) == 1 &&
               (s_count == 0 || fwrite(s_hashes, sizeof(uint64_t), (size_t)s_count, f) == (size_t)s_count);
-    fclose(f);
+    if (fclose(f) != 0) ok = false;  // the flush is where a full LittleFS fails
     if (!ok) {
         remove(PLAYED_TMP);
         return;
     }
-    remove(PLAYED_FILE);
+    // No remove() first: this file is on LittleFS, whose rename replaces the
+    // target atomically. Removing it opened a power-loss window with no file.
     if (rename(PLAYED_TMP, PLAYED_FILE) != 0) {
         ESP_LOGE(TAG, "cannot rename %s into place", PLAYED_TMP);
         remove(PLAYED_TMP);

@@ -92,6 +92,23 @@ static esp_err_t init_i2s(void)
 esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus)
 {
     s_i2c_bus = i2c_bus;
+    // Lock, close timer and arbiter FIRST, before anything that can fail on a
+    // hardware fault. audio_init is best-effort at boot (see bugne_main.c), so
+    // when the codec or I2C is broken the rest of the firmware keeps running and
+    // still calls into this component: it must find a usable mutex, not NULL.
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_NO_MEM, TAG, "audio lock alloc failed");
+    }
+    if (!s_close_timer) {
+        const esp_timer_create_args_t tca = {
+            .callback = codec_close_timer_cb,
+            .name = "codec_close",
+        };
+        ESP_RETURN_ON_ERROR(esp_timer_create(&tca, &s_close_timer), TAG, "close timer failed");
+    }
+    ESP_RETURN_ON_ERROR(audio_arbiter_init(), TAG, "arbiter init failed");
+
     ESP_RETURN_ON_ERROR(init_i2s(), TAG, "i2s setup failed");
 
     audio_codec_i2s_cfg_t i2s_cfg = {
@@ -144,16 +161,6 @@ esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus)
     gpio_config(&amp);
     amp_mute(true);
 
-    s_lock = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_NO_MEM, TAG, "audio lock alloc failed");
-    const esp_timer_create_args_t tca = {
-        .callback = codec_close_timer_cb,
-        .name = "codec_close",
-    };
-    ESP_RETURN_ON_ERROR(esp_timer_create(&tca, &s_close_timer), TAG, "close timer failed");
-
-    ESP_RETURN_ON_ERROR(audio_arbiter_init(), TAG, "arbiter init failed");
-
     ESP_LOGI(TAG, "audio output ready (ES8311 on shared I2C, I2S port %d, amp IO%d)",
              AUDIO_I2S_PORT, BOARD_AMP_EN_GPIO);
     return ESP_OK;
@@ -161,6 +168,9 @@ esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus)
 
 esp_err_t audio_open(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t channels)
 {
+    if (!s_dev || !s_lock) {  // audio_init failed (hardware fault): stay silent, never crash
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = bits_per_sample,
         .channel = channels,
@@ -252,6 +262,7 @@ void audio_output_off(void)
 
 esp_err_t audio_close(void)
 {
+    if (!s_lock) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (!s_open) {
         xSemaphoreGive(s_lock);
@@ -320,6 +331,9 @@ static esp_err_t record_dev_create(void)
 
 esp_err_t audio_record_open(uint32_t sample_rate)
 {
+    if (!s_lock || !s_rx) {  // audio_init failed: no mic, but no crash either
+        return ESP_ERR_INVALID_STATE;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     // Flush a pending lazy close (audio_close defers the real codec close by
     // 2 s): the still-open playback channel would otherwise make the I2S
@@ -362,6 +376,7 @@ esp_err_t audio_record_read(void *pcm, size_t bytes)
 
 void audio_record_close(void)
 {
+    if (!s_lock) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_rec_dev) {
         esp_codec_dev_close(s_rec_dev);

@@ -215,6 +215,36 @@ static void test_clean(void)
           "memos survive clean_talkie");
 }
 
+// More leftovers than one collection batch holds: the purge must loop until the
+// directory is clean, not stop after the first batch (a power cut mid-receive
+// can leave several .part files, and stray tk- files are invisible to the list,
+// the badge and the 20-memo cap, so nothing else would ever remove them).
+static void test_clean_many(void)
+{
+    reset_dir();
+    char name[32];
+    for (int i = 0; i < 12; i++) {
+        snprintf(name, sizeof(name), "leftover-%02d.part", i);
+        touch(name, 0);
+        snprintf(name, sizeof(name), "tk-%03d.wav", 100 + i);
+        touch(name, 0);
+    }
+    touch("my-001.wav", 0);
+
+    memo_clean_parts();
+    for (int i = 0; i < 12; i++) {
+        snprintf(name, sizeof(name), "leftover-%02d.part", i);
+        CHECK(!file_exists(name), "every part removed, not just the first batch");
+    }
+
+    memo_clean_talkie();
+    for (int i = 0; i < 12; i++) {
+        snprintf(name, sizeof(name), "tk-%03d.wav", 100 + i);
+        CHECK(!file_exists(name), "every tk removed, not just the first batch");
+    }
+    CHECK(file_exists("my-001.wav"), "stored memo survives both purges");
+}
+
 int main(void)
 {
     test_abs_path();
@@ -224,6 +254,7 @@ int main(void)
     test_rx_create();
     test_tk_create();
     test_clean();
+    test_clean_many();
     reset_dir();
     rmdir(MEMO_ABS_DIR);
 

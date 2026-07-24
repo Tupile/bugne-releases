@@ -308,7 +308,9 @@ Everything else lives here:
   the device's home screen.
 - Wi-Fi networks: add, edit or remove saved networks.
 - Page password, backup and restore of the configuration, device logs, and
-  firmware updates (see below).
+  firmware updates (see below). The Diagnostics card also has a Crash report
+  button: if the device ever restarts on its own, it shows what the firmware
+  was doing at that moment, which is what a bug report needs.
 
 Note: after a firmware update, reload the web page before changing
 settings.

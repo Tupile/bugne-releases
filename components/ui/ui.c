@@ -270,6 +270,9 @@ static volatile bool s_talkie_active;      // talkie screen shown right now
 static volatile bool s_talkie_rx_pending;  // an ephemeral tk file awaits auto-play
 static char s_talkie_rx_from[MEMO_SENDER_MAX];  // sender behind the pending file
 static char s_talkie_rx_path[96];               // absolute path of the pending file
+// Guards the two strings above: written by the httpd task (ui_talkie_received),
+// read by the tick on the LVGL task. Only bounded copies run inside it.
+static portMUX_TYPE s_talkie_rx_mux = portMUX_INITIALIZER_UNLOCKED;
 static lv_obj_t *s_talkie_status_lbl;      // updated in place by the tick; reset in show()
 static int s_talkie_peers_shown;           // peer count build_talkie last rendered
 static void talkie_send_run(void);
@@ -360,7 +363,8 @@ typedef enum { ALARM_IDLE, ALARM_RINGING, ALARM_SNOOZED } alarm_state_t;
 static alarm_state_t s_alarm_state;
 static alarm_state_t s_alarm_state_shown;  // last state the home screen reflects
 static int s_alarm_active_idx;         // which alarms[] is ringing/snoozed
-static int64_t s_alarm_fired_min[CFG_MAX_ALARMS]; // per-alarm epoch/60 fire latch
+static int64_t s_alarm_fired_min[CFG_MAX_ALARMS]; // per-alarm fire latch, see alarm_latch_key
+static bool s_alarm_ramp_done;          // the 60 s ramp landed on the target volume
 static time_t  s_alarm_snooze_until;   // absolute epoch of the snooze re-fire
 static int64_t s_alarm_ring_start_us;  // esp_timer clock: ramp + auto-stop timing
 static int     s_alarm_saved_vol;      // user volume, restored at alarm end
@@ -1228,6 +1232,59 @@ static void tuner_stop_sync(void)
     if (s_tuner_active) ESP_LOGW(TAG, "tuner: stop timed out");
 }
 
+// Release the "in progress" state of a request that was dropped from the
+// single-slot queue before the worker could serve it. Producers set a flag and
+// only the worker's handler clears it, so a dropped request would otherwise
+// wedge the UI (a refresh button that stays dead, a memo screen stuck on
+// "Sending..."). Called from req_post, on the LVGL task.
+static void req_abandoned(req_kind_t kind)
+{
+    switch (kind) {
+    case REQ_REFRESH:
+    case REQ_REFRESH_ALL:
+        s_refreshing = false;
+        s_refresh_ok = false;   // surfaces "refresh failed" instead of a silent wedge
+        s_refresh_done = true;
+        break;
+    case REQ_DOWNLOAD_JOB:
+        s_downloading = false;  // the job stays active and is rescheduled when idle
+        break;
+    case REQ_MEMO_PEERS:
+        s_memo_peer_count = 0;  // no longer browsing (-1 means "running")
+        if (s_memo_state == MEMO_UI_PICK_PEER) s_memo_state = MEMO_UI_PREVIEW;
+        break;
+    case REQ_MEMO_SEND:
+    case REQ_TALKIE_SEND:
+        // The capture is still on the card: back to preview, which is also what
+        // the talkie tick uses as its "queue the send again" edge.
+        s_memo_state = MEMO_UI_PREVIEW;
+        break;
+    case REQ_MEMO_RECORD:
+        s_memo_state = MEMO_UI_IDLE;  // the capture never started
+        break;
+    case REQ_PLAY:
+    case REQ_BEEP:            // the alarm retries on its own (s_alarm_beep_confirmed)
+    case REQ_MEMO_PLAY:
+    case REQ_TALKIE_PLAY:
+        break;                // nothing was latched by the producer
+    }
+}
+
+// The single writer of the depth-1 request slot. Overwrite semantics are wanted
+// (the newest user intent wins, and a play must never queue behind a minutes-long
+// download), but the dropped request's flag has to be released. Peek-then-write
+// is safe without a lock because every producer runs on the LVGL task: the event
+// handlers, and ui_remote/ui_remote_play_path only set a flag that
+// sleep_timer_cb turns into a call to ui_remote_apply.
+static void req_post(const play_req_t *req)
+{
+    play_req_t old;
+    if (xQueuePeek(s_play_q, &old, 0) == pdTRUE && old.kind != req->kind) {
+        req_abandoned(old.kind);
+    }
+    xQueueOverwrite(s_play_q, req);
+}
+
 static void ui_play(bool is_file, const char *target, const char *title, int skip_ms)
 {
     tuner_stop_sync();        // free the mic and the arbiter before a source starts
@@ -1261,7 +1318,7 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
     s_audio_idle_since_us = esp_timer_get_time();
     play_req_t req = { .kind = REQ_PLAY, .is_file = is_file, .skip_ms = skip_ms };
     strlcpy(req.target, target, sizeof(req.target));
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
 }
 
 // Sleep timer (A2): clear the armed state. Called from ui_stop (any stop path),
@@ -2216,7 +2273,7 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         if (!audio_is_active() && !s_refreshing && !s_downloading) {
             s_refreshing = true;
             play_req_t req = { .kind = REQ_REFRESH_ALL };
-            xQueueOverwrite(s_play_q, &req);
+            req_post(&req);
         }
         break;
     case UI_REMOTE_DOWNLOAD_PODCAST:    // arg = podcast id, fetch missing episodes
@@ -2780,7 +2837,7 @@ static void on_refresh(lv_event_t *e)
     s_refreshing = true;
     play_req_t req = { .kind = REQ_REFRESH, .id = s_nav_podcast_id };
     strlcpy(req.target, s_nav_podcast_rss, sizeof(req.target));
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
     show(build_episodes);  // re-render to show the T(STR_REFRESHING) state
 }
 
@@ -3136,6 +3193,9 @@ static void on_game_none(lv_event_t *e)
 static void on_game_start(lv_event_t *e)
 {
     (void)e;
+    // Same gate as on_open_game: the picker may have been opened before a quiet
+    // window opened or the daily quota ran out.
+    if (play_denied()) return;
     if (s_game_tables == 0) { toast(T(STR_GAME_PICK_ONE)); return; }
     s_game_a = 0;  // force a fresh question in build_game
     show(build_game);
@@ -3496,7 +3556,7 @@ static void memo_record_run(void)
         if (ok && buf) {
             // Voice through the onboard mic records quietly even at the 42 dB
             // PGA max (bench-confirmed): normalize the finished file so the
-            // peak lands near full scale (digital gain capped at x16).
+            // peak lands near full scale (digital gain capped, see NORM_GAIN_MAX).
             FILE *nf = fopen(MEMO_ABS_DIR "/.rec.part", "r+b");
             if (nf) {
                 if (!memo_wav_normalize(nf, buf, MEMO_REC_CHUNK)) {
@@ -3642,7 +3702,7 @@ static void memo_request(req_kind_t kind, const char *path)
     s_memo_stop = false;  // ui_stop just set it; this is a fresh memo operation
     play_req_t req = { .kind = kind };
     if (path) strlcpy(req.target, path, sizeof(req.target));
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
 }
 
 // Show the record screen for the current state and remember what was shown, so
@@ -3735,7 +3795,7 @@ static void on_memo_send_open(lv_event_t *e)
     s_memo_peer_count = -1;  // browse running
     s_memo_state = MEMO_UI_PICK_PEER;
     play_req_t req = { .kind = REQ_MEMO_PEERS };
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
     memo_show_record();
 }
 
@@ -3754,7 +3814,7 @@ static void on_memo_peer(lv_event_t *e)
     if (idx < -1 || idx >= s_memo_peer_count) return;
     s_memo_state = MEMO_UI_SENDING;
     play_req_t req = { .kind = REQ_MEMO_SEND, .id = idx };
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
     memo_show_record();
 }
 
@@ -4019,8 +4079,14 @@ void ui_talkie_received(const char *from, const char *abs_path)
     if (s_talkie_rx_pending && strcmp(s_talkie_rx_path, abs_path) != 0) {
         remove(s_talkie_rx_path);
     }
+    // The two strings are read by the tick on the LVGL task. The spinlock (no
+    // blocking call inside, just two bounded copies) keeps a message arriving
+    // mid-read from handing the tick a half-updated path, which would fail to
+    // open and lose the message.
+    taskENTER_CRITICAL(&s_talkie_rx_mux);
     strlcpy(s_talkie_rx_from, from ? from : "", sizeof(s_talkie_rx_from));
     strlcpy(s_talkie_rx_path, abs_path, sizeof(s_talkie_rx_path));
+    taskEXIT_CRITICAL(&s_talkie_rx_mux);
     s_talkie_rx_pending = true;
 }
 
@@ -4047,7 +4113,7 @@ static void on_open_talkie(lv_event_t *e)
     s_talkie_active = true;
     s_memo_peer_count = -1;  // browse running
     play_req_t req = { .kind = REQ_MEMO_PEERS };
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
     show(build_talkie);
 }
 
@@ -5511,7 +5577,15 @@ static void beep_start(void)
         source_sendspin_command(SENDSPIN_CMD_STOP);
     }
     play_req_t req = { .kind = REQ_BEEP };
-    xQueueOverwrite(s_play_q, &req);
+    req_post(&req);
+}
+
+// Fire latch key: the LOCAL day and minute, not the epoch minute. On the night
+// the clocks go back, the same local hour:minute happens twice at two different
+// epoch minutes, so an epoch latch let the alarm fire a second time.
+static int64_t alarm_latch_key(const struct tm *t)
+{
+    return ((int64_t)(t->tm_year * 366 + t->tm_yday)) * 1440 + t->tm_hour * 60 + t->tm_min;
 }
 
 // Fire alarms[idx]: wake the screen, start the configured source (or the beep
@@ -5522,10 +5596,14 @@ static void alarm_fire(int idx)
     if (!c || idx < 0 || idx >= CFG_MAX_ALARMS) return;
     const config_alarm_t *ca = &c->alarms[idx];
     s_alarm_active_idx = idx;              // RINGING/SNOOZED code reads this alarm
-    s_alarm_fired_min[idx] = time(NULL) / 60;   // latch this minute so it fires once
+    time_t fnow = time(NULL);
+    struct tm ftm;
+    localtime_r(&fnow, &ftm);
+    s_alarm_fired_min[idx] = alarm_latch_key(&ftm);  // latch this minute: fires once
     s_alarm_saved_vol = audio_get_volume(); // restored at alarm end
     s_alarm_beeping = false;
     s_alarm_beep_confirmed = false;
+    s_alarm_ramp_done = false;
     sleep_clear();  // the alarm always wins over a sleep timer (A2)
 
     if (s_asleep) exit_sleep();
@@ -5806,7 +5884,7 @@ static void sleep_timer_cb(lv_timer_t *t)
                 s_talkie_active = true;
                 s_memo_peer_count = -1;
                 play_req_t req = { .kind = REQ_MEMO_PEERS };
-                xQueueOverwrite(s_play_q, &req);
+                req_post(&req);
             } else if (strcmp(name, "talkie_ready") == 0) {
                 // Fake session peer so remote screenshots and the curl
                 // auto-play bench test reach the PTT state without touch
@@ -5840,7 +5918,7 @@ static void sleep_timer_cb(lv_timer_t *t)
             s_downloading = true;
             s_dl_cancel = false;
             play_req_t req = { .kind = REQ_DOWNLOAD_JOB };
-            xQueueOverwrite(s_play_q, &req);
+            req_post(&req);
         } else if ((s_played_since_maint || !s_maint_done_since_boot) && net_ok && idle_5min) {
             // Auto-maintenance (#61): refresh all feeds and download new episodes when
             // idle 5 min -- once after each listening session, and also once after a
@@ -6055,7 +6133,7 @@ static void sleep_timer_cb(lv_timer_t *t)
                 uxQueueMessagesWaiting(s_play_q) == 0) {
                 s_memo_state = MEMO_UI_SENDING;
                 play_req_t req = { .kind = REQ_TALKIE_SEND };
-                xQueueOverwrite(s_play_q, &req);
+                req_post(&req);
             }
             // Auto-play a pending incoming message once the worker is free.
             // memo_request, not a bare queue write: it must take the arbiter
@@ -6064,7 +6142,9 @@ static void sleep_timer_cb(lv_timer_t *t)
             if (s_talkie_rx_pending && s_memo_state == MEMO_UI_IDLE &&
                 uxQueueMessagesWaiting(s_play_q) == 0 && !play_denied()) {
                 char path[sizeof(s_talkie_rx_path)];
+                taskENTER_CRITICAL(&s_talkie_rx_mux);  // see ui_talkie_received
                 strlcpy(path, s_talkie_rx_path, sizeof(path));
+                taskEXIT_CRITICAL(&s_talkie_rx_mux);
                 s_talkie_rx_pending = false;
                 memo_request(REQ_TALKIE_PLAY, path);
             }
@@ -6517,7 +6597,7 @@ static void sleep_timer_cb(lv_timer_t *t)
                         if (aa->enabled && time_valid() && step_ok &&
                             tmv.tm_hour == aa->hour && tmv.tm_min == aa->minute &&
                             (aa->days & (1 << ((tmv.tm_wday + 6) % 7))) &&
-                            (wnow / 60 != s_alarm_fired_min[ai])) {
+                            (alarm_latch_key(&tmv) != s_alarm_fired_min[ai])) {
                             alarm_fire(ai);
                             break;
                         }
@@ -6534,15 +6614,19 @@ static void sleep_timer_cb(lv_timer_t *t)
                     lv_display_trigger_activity(s_disp);  // never sleep mid-ring
                     long elapsed_s = (long)((esp_timer_get_time() - s_alarm_ring_start_us) / 1000000);
                     // Volume ramp: the ramp owns the volume for the first 60 s,
-                    // v = start + (target-start)*elapsed/60, then it settles
-                    // exactly on the target. audio_set_volume clamps to volume_max.
+                    // v = start + (target-start)*elapsed/60, then it lands on the
+                    // target ONCE and hands the volume back. Re-asserting the
+                    // target every tick after that fought a sleepy human turning
+                    // the volume down, which contradicts the 60 s contract.
+                    // audio_set_volume clamps to volume_max.
                     int target = acfg->alarms[s_alarm_active_idx].volume;
                     int rstart = target * 15 / 100;
                     if (rstart < 5) rstart = 5;
                     if (elapsed_s < 60) {
                         int v = rstart + (int)((target - rstart) * elapsed_s / 60);
                         if (v != audio_get_volume()) audio_set_volume(v);
-                    } else if (audio_get_volume() != target) {
+                    } else if (!s_alarm_ramp_done) {
+                        s_alarm_ramp_done = true;
                         audio_set_volume(target);
                     }
                     // Late failure: the source never produced audio (unreachable
@@ -6643,6 +6727,7 @@ static void sleep_timer_cb(lv_timer_t *t)
                     if (s_active_builder == build_now_playing ||
                         s_active_builder == build_sendspin_playing ||
                         s_active_builder == build_game ||
+                        s_active_builder == build_game_setup ||
                         s_active_builder == build_talkie) show(build_home);
                     toast(q ? T(STR_QUIET_HOURS) : T(STR_LIMIT_REACHED));
                     ESP_LOGI(TAG, "%s, playback stopped",

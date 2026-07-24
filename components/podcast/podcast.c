@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>  // strncasecmp
 #include <time.h>
 #include <sys/stat.h>
 
@@ -26,6 +27,11 @@ static const char *TAG = "podcast";
 // single stalled read, but a server that trickles bytes could keep the loop
 // going for a long time. This guarantees the refresh always terminates.
 #define REFRESH_MAX_MS  30000
+// Same reasoning for an episode download, with room for a long episode on a slow
+// link: an enclosure URL comes from an untrusted feed and could point at a live
+// stream, which would otherwise be downloaded until the card is full.
+#define EPISODE_MAX_BYTES (300ULL * 1024 * 1024)
+#define EPISODE_MAX_MS    (60 * 60 * 1000)
 
 // Open the client, following redirects. Returns the final status code or -1.
 static int http_open_redirect(esp_http_client_handle_t client)
@@ -91,7 +97,19 @@ typedef struct {
     const char *rss_url;
     char        generated_at[32];
     const rss_parser_t *p;          // for the feed's <title> at header time
+    uint32_t   *seen;               // hash of each cache_path already emitted
+    int         seen_max;           // 0 when the allocation failed (dedup off)
 } manifest_writer_t;
+
+// FNV-1a, only ever compared against itself (cache_path dedup below).
+static uint32_t path_hash(const char *s)
+{
+    uint32_t h = 2166136261u;
+    for (; *s; s++) {
+        h = (h ^ (unsigned char)*s) * 16777619u;
+    }
+    return h;
+}
 
 static void mw_write_header(manifest_writer_t *w)
 {
@@ -114,6 +132,31 @@ static void mw_write_header(manifest_writer_t *w)
     w->header_written = true;
 }
 
+// Cache extension, from the URL PATH and matched at its END. Searching the whole
+// URL made a query string win: "ep.mp3?src=feed.m4a" was cached as .m4a, then
+// handed to the AAC decoder and skipped the MP3 intro trim.
+static const char *url_ext(const char *url)
+{
+    static const struct { const char *dot; const char *ext; } MAP[] = {
+        {".flac", "flac"}, {".m4a", "m4a"}, {".mp4", "m4a"}, {".aac", "m4a"},
+        {".opus", "opus"}, {".ogg", "ogg"}, {".oga", "ogg"}, {".mp3", "mp3"},
+    };
+    size_t n = strcspn(url, "?#");        // path part only
+    size_t start = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (url[i] == '/') start = i + 1;  // last path segment
+    }
+    const char *seg = url + start;
+    size_t len = n - start;
+    for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
+        size_t dl = strlen(MAP[i].dot);
+        if (len >= dl && strncasecmp(seg + len - dl, MAP[i].dot, dl) == 0) {
+            return MAP[i].ext;
+        }
+    }
+    return "mp3";  // most feeds, and the safe default for an extensionless URL
+}
+
 // rss_parse callback: append one episode object to the manifest file.
 static void mw_on_episode(const rss_episode_t *ep, void *ctx)
 {
@@ -122,18 +165,30 @@ static void mw_on_episode(const rss_episode_t *ep, void *ctx)
     if (!w->header_written) mw_write_header(w);
     if (w->failed) return;
 
-    const char *url = ep->url;
-    const char *ext = strstr(url, ".flac") ? "flac"
-                    : (strstr(url, ".m4a") || strstr(url, ".mp4") || strstr(url, ".aac")) ? "m4a"
-                    : strstr(url, ".opus") ? "opus"
-                    : (strstr(url, ".ogg") || strstr(url, ".oga")) ? "ogg"
-                    : "mp3";
+    const char *ext = url_ext(ep->url);
     char epname[128];
     char fallback[16];
     snprintf(fallback, sizeof(fallback), "episode_%d", w->count);
     sanitize_name(ep->title, epname, sizeof(epname), fallback);
     char cache_path[PODCAST_PATH_MAX];
     snprintf(cache_path, sizeof(cache_path), "/sdcard/podcasts/%s/%s.%s", w->podir, epname, ext);
+
+    // Two episodes whose titles sanitize (or truncate) to the same name would
+    // share one cached file, so the second would play the first one's audio.
+    // Disambiguate only on an ACTUAL collision: every other episode keeps its
+    // historical path, so files already downloaded stay recognized (cached-ness
+    // is a stat() of cache_path, so a blanket renaming would orphan them all).
+    if (w->seen && w->count < w->seen_max) {
+        uint32_t h = path_hash(cache_path);
+        for (int i = 0; i < w->count; i++) {
+            if (w->seen[i] != h) continue;
+            snprintf(cache_path, sizeof(cache_path), "/sdcard/podcasts/%s/%s_%d.%s",
+                     w->podir, epname, w->count, ext);
+            h = path_hash(cache_path);
+            break;
+        }
+        w->seen[w->count] = h;
+    }
 
     cJSON *e = cJSON_CreateObject();
     if (!e) { w->failed = true; return; }
@@ -171,6 +226,10 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
     w.name = name;
     w.rss_url = rss_url;
     w.p = p;
+    // Cache-path dedup table (1.2 KB, PSRAM). Best effort: without it the writer
+    // simply behaves as before, so a failed allocation must not fail the refresh.
+    w.seen = heap_caps_malloc(RSS_MAX_EPISODES * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    w.seen_max = w.seen ? RSS_MAX_EPISODES : 0;
     time_t now = time(NULL);
     struct tm tm_utc;
     gmtime_r(&now, &tm_utc);
@@ -178,7 +237,7 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
     w.f = fopen(tmp_path, "w");
     if (!w.f) {
         ESP_LOGE(TAG, "cannot write %s", tmp_path);
-        free(p); free(ybuf);
+        free(p); free(ybuf); free(w.seen);
         return ESP_FAIL;
     }
     rss_parse_init(p, ybuf, RSS_YXML_BUF_SIZE, mw_on_episode, &w);
@@ -223,9 +282,13 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
     esp_err_t ret = ESP_FAIL;
     bool good = net_ok && !w.failed && w.header_written;
     if (good && fputs("]}", w.f) < 0) good = false;  // close the array + object
-    fclose(w.f);
+    // fclose flushes: on a full LittleFS it is where the write actually fails, so
+    // a bad close must not promote a truncated manifest over the good one.
+    if (fclose(w.f) != 0) good = false;
     if (good) {
-        remove(final_path);
+        // No remove() first: the manifest lives on LittleFS, whose rename replaces
+        // the target atomically. Removing it opened a power-loss window where
+        // neither the old nor the new manifest existed.
         if (rename(tmp_path, final_path) == 0) {
             ret = ESP_OK;
             ESP_LOGI(TAG, "manifest written: %d episodes", w.count);
@@ -240,6 +303,7 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
 
     free(p);
     free(ybuf);
+    free(w.seen);
     return ret;
 }
 
@@ -388,11 +452,25 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
         char *buf = heap_caps_malloc(DL_BUF_BYTES, MALLOC_CAP_SPIRAM);
         if (buf) {
             ok = true;
+            int64_t deadline = esp_timer_get_time() + (int64_t)EPISODE_MAX_MS * 1000;
+            uint64_t total = 0;
             for (;;) {
                 if (cancel && *cancel) { ok = false; aborted = true; break; }
+                if (esp_timer_get_time() > deadline) {
+                    ESP_LOGW(TAG, "episode download exceeded %d ms, aborting", EPISODE_MAX_MS);
+                    ok = false;
+                    break;
+                }
                 int n = esp_http_client_read(client, buf, DL_BUF_BYTES);
                 if (n < 0) { ok = false; break; }
                 if (n == 0) break;  // end of body
+                total += (uint64_t)n;
+                if (total > EPISODE_MAX_BYTES) {
+                    ESP_LOGW(TAG, "episode download over %llu bytes, aborting",
+                             (unsigned long long)EPISODE_MAX_BYTES);
+                    ok = false;
+                    break;
+                }
                 if (fwrite(buf, 1, (size_t)n, fo) != (size_t)n) { ok = false; break; }
             }
             free(buf);
@@ -400,7 +478,9 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
     }
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    fclose(fo);
+    // The final flush can fail on a full card: promoting the file then would
+    // cache a truncated episode that plays short forever.
+    if (fclose(fo) != 0) ok = false;
 
     if (!ok) {
         remove(part_abs);

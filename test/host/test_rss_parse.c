@@ -140,6 +140,14 @@ static void test_duration(void)
     CHECK_INT(rss_parse_duration("1:2:3:4"), 3723, "duration >3 parts");
     CHECK_INT(rss_parse_duration("abc"), 0, "duration non-numeric");
     CHECK_INT(rss_parse_duration("12:abc"), 720, "duration partial non-numeric");
+    // Untrusted feed text: saturate instead of wrapping (atoi was undefined on
+    // overflow and could yield a negative duration).
+    CHECK_INT(rss_parse_duration("99999999999999999999"), 24 * 3600,
+              "duration huge saturates");
+    CHECK_INT(rss_parse_duration("-5"), 0, "duration negative rejected");
+    CHECK_INT(rss_parse_duration("9999:9999:9999"), 24 * 3600,
+              "duration huge parts saturate");
+    CHECK_INT(rss_parse_duration(" 42"), 42, "duration leading space");
 }
 
 static void test_truncation(void)

@@ -52,7 +52,7 @@ bool memo_wav_parse(const uint8_t *buf, size_t len, uint32_t *data_off, uint32_t
 
 // Normalize a finished memo WAV in place to a comfortable level: scan the
 // data chunk's peak, then scale every sample so the peak lands near -1 dBFS.
-// Gain is capped at x16 so silence or room noise is never blown up; a file
+// Gain is capped (NORM_GAIN_MAX) so silence or room noise is never blown up; a file
 // already at level is left untouched. f must be open "r+b"; buf (>= 512
 // bytes, even size) is the caller's work buffer. False on I/O/parse errors.
 bool memo_wav_normalize(FILE *f, uint8_t *buf, size_t buf_len);

@@ -31,6 +31,7 @@
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "esp_app_desc.h"
+#include "esp_core_dump.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
@@ -136,6 +137,18 @@ static bool is_authed(httpd_req_t *req)
     return cookie_authed(req) || basic_authed(req);
 }
 
+// The auth gate every handler opens with. One place to change the posture, and
+// a route cannot silently ship without it. rv is what the handler returns after
+// the 401 has been sent: ESP_OK when there is no unread request body, ESP_FAIL
+// for a POST whose body was not consumed (ESP_FAIL closes the socket, so
+// leftover body bytes cannot be parsed as the next request).
+#define REQUIRE_AUTH(req, rv) do {                                             \
+    if (!is_authed(req)) {                                                     \
+        httpd_resp_send_err((req), HTTPD_401_UNAUTHORIZED, "login required");   \
+        return (rv);                                                           \
+    }                                                                          \
+} while (0)
+
 static esp_err_t read_body(httpd_req_t *req, char *buf, size_t size, size_t *out_len)
 {
     if (req->content_len >= size) {
@@ -238,10 +251,7 @@ static esp_err_t password_post(httpd_req_t *req)
 
 static esp_err_t scan_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     net_ap_t aps[24];
     size_t n = 0;
     if (net_scan(aps, sizeof(aps) / sizeof(aps[0]), &n) != ESP_OK) {
@@ -274,10 +284,7 @@ static esp_err_t scan_get(httpd_req_t *req)
 
 static esp_err_t config_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     char *buf = heap_caps_malloc(WEB_MAX_BODY, MALLOC_CAP_SPIRAM);  // keep it out of internal RAM
     if (!buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
@@ -296,12 +303,101 @@ static esp_err_t config_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ---- Crash reports (coredump partition) ----
+// The fleet runs with no serial attached and the log ring lives in PSRAM, so it
+// does not survive a reset: without this, a spontaneous reboot was only
+// classifiable through reset_reason. The panic handler writes a dump to the
+// coredump partition (see sdkconfig.defaults) and these routes read its summary
+// back: crashed task, PC, exception cause and backtrace. Feed the backtrace
+// addresses to addr2line against the matching build to get file:line.
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+#define COREDUMP_SUPPORTED 1
+// Cached: esp_core_dump_image_check reads the whole dump from flash and checks
+// its CRC, while /api/status is polled on a timer (Home Assistant). The answer
+// cannot change at runtime, a dump only appears through a panic (which reboots),
+// so the only invalidation needed is our own erase route.
+static int s_coredump_cached = -1;  // -1 unknown, 0 none, 1 present
+
+static bool coredump_present(void)
+{
+    if (s_coredump_cached < 0) {
+        s_coredump_cached = (esp_core_dump_image_check() == ESP_OK) ? 1 : 0;
+    }
+    return s_coredump_cached == 1;
+}
+#else
+#define COREDUMP_SUPPORTED 0
+static bool coredump_present(void) { return false; }
+#endif
+
+// GET /api/coredump: {"enabled":bool,"present":bool} plus, when present,
+// task/pc/cause/vaddr/backtrace/corrupted.
+static esp_err_t coredump_get(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_OK);
+    cJSON *o = cJSON_CreateObject();
+    if (!o) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    cJSON_AddBoolToObject(o, "enabled", COREDUMP_SUPPORTED);
+    bool present = false;
+#if COREDUMP_SUPPORTED
+    if (coredump_present()) {
+        // Several hundred bytes: keep it off the httpd task stack.
+        esp_core_dump_summary_t *s = heap_caps_malloc(sizeof(*s), MALLOC_CAP_SPIRAM);
+        if (s && esp_core_dump_get_summary(s) == ESP_OK) {
+            present = true;
+            char hex[16], task[17];
+            // exc_task is a fixed 16-byte field, not guaranteed NUL-terminated.
+            snprintf(task, sizeof(task), "%.16s", s->exc_task);
+            cJSON_AddStringToObject(o, "task", task);
+            snprintf(hex, sizeof(hex), "0x%08x", (unsigned)s->exc_pc);
+            cJSON_AddStringToObject(o, "pc", hex);
+            snprintf(hex, sizeof(hex), "0x%x", (unsigned)s->ex_info.exc_cause);
+            cJSON_AddStringToObject(o, "cause", hex);
+            snprintf(hex, sizeof(hex), "0x%08x", (unsigned)s->ex_info.exc_vaddr);
+            cJSON_AddStringToObject(o, "vaddr", hex);
+            cJSON_AddBoolToObject(o, "corrupted", s->exc_bt_info.corrupted);
+            cJSON *bt = cJSON_AddArrayToObject(o, "backtrace");
+            uint32_t depth = s->exc_bt_info.depth;
+            if (depth > 16) depth = 16;  // bt[] is a fixed 16-entry array
+            for (uint32_t i = 0; bt && i < depth; i++) {
+                snprintf(hex, sizeof(hex), "0x%08x", (unsigned)s->exc_bt_info.bt[i]);
+                cJSON_AddItemToArray(bt, cJSON_CreateString(hex));
+            }
+        }
+        free(s);
+    }
+#endif
+    cJSON_AddBoolToObject(o, "present", present);
+    char *txt = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    if (!txt) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t r = httpd_resp_sendstr(req, txt);
+    cJSON_free(txt);
+    return r;
+}
+
+// POST /api/coredump/erase: drop the saved dump so the next crash is the one
+// reported (the panic handler overwrites anyway, this is for a clean slate).
+static esp_err_t coredump_erase_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_FAIL);
+#if COREDUMP_SUPPORTED
+    esp_core_dump_image_erase();
+    s_coredump_cached = 0;
+#endif
+    return httpd_resp_sendstr(req, "ok");
+}
+
 static esp_err_t logs_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     char *buf = malloc(LOGSTORE_SIZE + 1);
     if (!buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
@@ -320,10 +416,7 @@ static esp_err_t logs_get(httpd_req_t *req)
 // safe without a lock. Streamed in chunks: the file can reach a few tens of KB.
 static esp_err_t stats_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     httpd_resp_set_type(req, "application/json");
     FILE *f = fopen("/littlefs/stats.json", "r");
     if (!f) {  // never written yet: empty history
@@ -353,10 +446,7 @@ static esp_err_t stats_get(httpd_req_t *req)
 // UI task (sole owner of both); this just requests it.
 static esp_err_t stats_reset_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     ui_stats_reset();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -367,10 +457,7 @@ static esp_err_t stats_reset_post(httpd_req_t *req)
 // partition, then boot it. The body is the raw firmware image.
 static esp_err_t ota_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     // Stop playback before touching flash: esp_ota_begin/write disable the flash
     // cache, and a non-IRAM ISR from active SD/I2S playback firing in that window
     // crashes (#32). Request a stop and wait for it to take effect.
@@ -491,10 +578,7 @@ esp_err_t web_config_gh_check(char *latest, size_t cap, bool *update)
 
 static esp_err_t gh_check_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     const esp_app_desc_t *cur = esp_app_get_description();
     char resp[176];
     httpd_resp_set_type(req, "application/json");
@@ -522,10 +606,7 @@ static esp_err_t gh_check_get(httpd_req_t *req)
 // since boot (RAM-only cache).
 static esp_err_t ghota_status_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     const esp_app_desc_t *cur = esp_app_get_description();
     long long age_s = s_gh_checked ? (long long)((esp_timer_get_time() - s_gh_check_time_us) / 1000000) : -1;
     char resp[224];
@@ -543,10 +624,7 @@ static esp_err_t ghota_status_get(httpd_req_t *req)
 // a fixed asset under the same version stays installable).
 static esp_err_t gh_ota_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     // Stop playback before flash writes, same reason as ota_post above.
     ui_remote(UI_REMOTE_STOP, 0);
     for (int i = 0; i < 30; i++) {
@@ -584,10 +662,7 @@ static esp_err_t gh_ota_post(httpd_req_t *req)
 
 static esp_err_t config_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     char *buf = heap_caps_malloc(WEB_MAX_BODY, MALLOC_CAP_SPIRAM);  // keep it out of internal RAM
     if (!buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
@@ -631,10 +706,7 @@ static esp_err_t config_post(httpd_req_t *req)
 // {"networks":["Home","Office", ...]}.
 static esp_err_t wifi_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     cJSON *root = cJSON_CreateObject();
     cJSON *arr = root ? cJSON_AddArrayToObject(root, "networks") : NULL;
     if (!arr) { cJSON_Delete(root); httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_FAIL; }
@@ -657,10 +729,7 @@ static esp_err_t wifi_get(httpd_req_t *req)
 // reorder/keep networks without retyping. Reboots to apply.
 static esp_err_t wifi_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_FAIL;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     char *buf = malloc(4096);  // up to 16 networks; off the small httpd stack
     if (!buf) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_FAIL; }
     esp_err_t rb = read_body(req, buf, 4096, NULL);
@@ -731,6 +800,8 @@ static esp_err_t captive_redirect(httpd_req_t *req, httpd_err_code_t err)
 
 #define WEB_SD_PATH_MAX 320
 #define WEB_SD_BROWSE_MAX 256
+// Upload cap: generous for music (a long FLAC album side), still a real bound.
+#define WEB_SD_UPLOAD_MAX_BYTES (512ULL * 1024 * 1024)
 
 static int hexv(char c)
 {
@@ -748,7 +819,15 @@ static void url_decode(char *s)
     while (*s) {
         int hi, lo;
         if (*s == '%' && (hi = hexv(s[1])) >= 0 && (lo = hexv(s[2])) >= 0) {
-            *o++ = (char)((hi << 4) | lo);
+            char c = (char)((hi << 4) | lo);
+            if (c == '\0') {
+                // %00 would end the string early and hide whatever follows from
+                // the path checks. Keep it literal instead: the resulting name
+                // simply does not exist on the card.
+                *o++ = *s++;
+                continue;
+            }
+            *o++ = c;
             s += 3;
         } else {
             *o++ = *s++;
@@ -774,17 +853,14 @@ static void sd_query_path(httpd_req_t *req, char *out, size_t size)
 {
     query_param(req, "path", out, size);
     while (out[0] == '/') {
-        memmove(out, out + 1, strlen(out)); // strlen(out) includes up to \0 so strlen(out) + 0... wait, strlen(out) + 1 - 1 = strlen(out)
+        memmove(out, out + 1, strlen(out));  // strlen(out) bytes from out+1 carries the NUL
     }
 }
 
 // GET /api/sd/list?path=<dir>: JSON {present,path,entries:[{name,dir,size}]}.
 static esp_err_t sd_list_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char path[WEB_SD_PATH_MAX];
     sd_query_path(req, path, sizeof(path));
     cJSON *o = cJSON_CreateObject();
@@ -833,42 +909,62 @@ static esp_err_t sd_list_get(httpd_req_t *req)
 // the SD card (parent directories created as needed).
 static esp_err_t sd_upload_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_FAIL);
     char path[WEB_SD_PATH_MAX];
     sd_query_path(req, path, sizeof(path));
     if (!path[0]) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing path");
-        return ESP_OK;
+        return ESP_FAIL;
     }
-    FILE *f = source_sd_create(path);
+    // Bound the body, like every other transfer in the project: content_len is a
+    // size_t and used to be assigned to an int, so a huge Content-Length wrapped
+    // negative and the handler answered "ok" without reading the body at all.
+    // A chunked request has content_len 0 and is rejected by the same check.
+    if (req->content_len == 0 || req->content_len > WEB_SD_UPLOAD_MAX_BYTES) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad upload size");
+        return ESP_FAIL;
+    }
+    uint64_t free_b = 0;
+    if (!source_sd_usage(NULL, &free_b) || free_b < req->content_len + (4u << 20)) {
+        httpd_resp_set_status(req, "507 Insufficient Storage");
+        httpd_resp_sendstr(req, "not enough space on the card");
+        return ESP_FAIL;
+    }
+    // Write to "<path>.part" and promote it only once complete: an interrupted
+    // upload must not leave a truncated file at the final path, where the next
+    // library scan would pick it up as a real track.
+    char part[WEB_SD_PATH_MAX + 8];
+    snprintf(part, sizeof(part), "%s.part", path);
+    FILE *f = source_sd_create(part);
     if (!f) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot create file");
-        return ESP_OK;
+        return ESP_FAIL;
     }
     char *buf = malloc(4096);
     if (!buf) {
         fclose(f);
+        source_sd_delete(part);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
-        return ESP_OK;
+        return ESP_FAIL;
     }
-    int remaining = req->content_len;
+    size_t remaining = req->content_len;
     bool ok = true;
     while (remaining > 0) {
-        int r = httpd_req_recv(req, buf, remaining < 4096 ? remaining : 4096);
-        if (r <= 0 || fwrite(buf, 1, r, f) != (size_t)r) {
+        size_t want = remaining < 4096 ? remaining : 4096;
+        int r = httpd_req_recv(req, buf, want);
+        if (r <= 0 || fwrite(buf, 1, (size_t)r, f) != (size_t)r) {
             ok = false;
             break;
         }
-        remaining -= r;
+        remaining -= (size_t)r;
     }
     free(buf);
-    fclose(f);
+    if (fclose(f) != 0) ok = false;  // the final flush can still fail on a full card
+    if (ok && source_sd_rename(part, path) != ESP_OK) ok = false;
     if (!ok) {
+        source_sd_delete(part);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
-        return ESP_OK;
+        return ESP_FAIL;
     }
     return httpd_resp_sendstr(req, "ok");
 }
@@ -876,10 +972,7 @@ static esp_err_t sd_upload_post(httpd_req_t *req)
 // POST /api/sd/mkdir?path=<rel/dir>: create a directory (and parents).
 static esp_err_t sd_mkdir_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char path[WEB_SD_PATH_MAX];
     sd_query_path(req, path, sizeof(path));
     if (!path[0]) {
@@ -896,10 +989,7 @@ static esp_err_t sd_mkdir_post(httpd_req_t *req)
 // POST /api/sd/delete?path=<rel>: delete a file, or a folder and its contents.
 static esp_err_t sd_delete_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char path[WEB_SD_PATH_MAX];
     sd_query_path(req, path, sizeof(path));
     if (!path[0]) {
@@ -916,10 +1006,7 @@ static esp_err_t sd_delete_post(httpd_req_t *req)
 // GET /api/sd/download?path=<rel/path.ext>: download a file from the SD card.
 static esp_err_t sd_download_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char path[WEB_SD_PATH_MAX];
     sd_query_path(req, path, sizeof(path));
     if (!path[0]) {
@@ -934,8 +1021,19 @@ static esp_err_t sd_download_get(httpd_req_t *req)
     const char *fn = strrchr(path, '/');
     fn = fn ? fn + 1 : path;
 
-    char cd[WEB_SD_PATH_MAX + 32];
-    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fn);
+    // The name goes inside a quoted header value, so anything that could close
+    // the quote or start a new header line is replaced. FAT already rejects these
+    // characters in a file name, but the header must not depend on that.
+    char safe[WEB_SD_PATH_MAX];  // fn is a suffix of path, so this never truncates
+    size_t si = 0;
+    for (const char *q = fn; *q && si + 1 < sizeof(safe); q++) {
+        unsigned char c = (unsigned char)*q;
+        safe[si++] = (c < 0x20 || c == '"' || c == '\\' || c == 0x7F) ? '_' : (char)c;
+    }
+    safe[si] = '\0';
+
+    char cd[sizeof(safe) + 32];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", safe);
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Content-Disposition", cd);
 
@@ -1069,10 +1167,7 @@ static esp_err_t memo_post(httpd_req_t *req)
 // GET /api/playback: a JSON snapshot of what the device is playing.
 static esp_err_t playback_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     ui_status_t st;
     ui_status(&st);
     cJSON *o = cJSON_CreateObject();
@@ -1105,10 +1200,7 @@ static esp_err_t playback_get(httpd_req_t *req)
 // POST /api/playback: {"action":"toggle|stop|next|prev|volume|radio|path|sleep|seek","value":N|str}
 static esp_err_t playback_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char body[512];  // "path" carries a library path up to LIB_PATH_MAX chars
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
@@ -1160,10 +1252,7 @@ static esp_err_t playback_post(httpd_req_t *req)
 // runs on the device's playback worker, so it is refused while audio is playing.
 static esp_err_t podcasts_refresh_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     ui_status_t st;
     ui_status(&st);
     if (st.active) {
@@ -1176,10 +1265,7 @@ static esp_err_t podcasts_refresh_post(httpd_req_t *req)
 // GET /api/podcasts/refresh: whether a refresh is still running, for polling.
 static esp_err_t podcasts_refresh_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, ui_podcast_refreshing()
                               ? "{\"refreshing\":true}" : "{\"refreshing\":false}");
@@ -1190,10 +1276,7 @@ static esp_err_t podcasts_refresh_get(httpd_req_t *req)
 // SD card and is refused while audio plays.
 static esp_err_t podcasts_download_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     if (!source_sd_present()) {
         return httpd_resp_sendstr(req, "Insert an SD card first.");
     }
@@ -1237,10 +1320,7 @@ static esp_err_t podcasts_download_post(httpd_req_t *req)
 // GET /api/podcasts/download: download progress, for polling.
 static esp_err_t podcasts_download_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     ui_dl_status_t st;
     ui_download_status(&st);
     const char *phase = st.phase == UI_DL_SCHEDULED  ? "scheduled"
@@ -1262,10 +1342,7 @@ static esp_err_t podcasts_download_get(httpd_req_t *req)
 // POST /api/podcasts/download/cancel: stop a running download.
 static esp_err_t podcasts_download_cancel_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     ui_remote(UI_REMOTE_CANCEL_DOWNLOAD, 0);
     return httpd_resp_sendstr(req, "Cancelling download...");
 }
@@ -1273,10 +1350,7 @@ static esp_err_t podcasts_download_cancel_post(httpd_req_t *req)
 // POST /api/library/scan: (re)build the SD music index on a background task.
 static esp_err_t library_scan_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     if (!library_scan_start()) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "busy or no SD card");
         return ESP_OK;
@@ -1290,10 +1364,7 @@ static esp_err_t library_scan_post(httpd_req_t *req)
 //   ?artist=A&album=B -> {tracks:[{title,path}]}
 static esp_err_t library_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char artist[LIB_NAME_MAX], album[LIB_NAME_MAX];
     query_param(req, "artist", artist, sizeof(artist));
     query_param(req, "album", album, sizeof(album));
@@ -1350,10 +1421,7 @@ static esp_err_t library_get(httpd_req_t *req)
 // (tools/screenshot.py fetches and converts it). Serialized by ui_screenshot.
 static esp_err_t screenshot_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     const uint8_t *px = NULL;
     int w = 0, h = 0;
     esp_err_t err = ui_screenshot(&px, &w, &h, 3000);
@@ -1397,10 +1465,7 @@ static esp_err_t screenshot_get(httpd_req_t *req)
 // name (ui_remote_nav validates against its screen table).
 static esp_err_t debug_nav_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     char body[128];
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
@@ -1423,10 +1488,7 @@ static esp_err_t debug_nav_post(httpd_req_t *req)
 // this endpoint).
 static esp_err_t status_get(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     const config_t *c = config_store_get();
     wifi_ap_record_t ap;
     int rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
@@ -1451,6 +1513,9 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(o, "heap_free", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddStringToObject(o, "reset_reason", board_reset_reason_name());
+    // A saved crash report is waiting in the coredump partition: one field so a
+    // fleet check does not need a second request. Details: GET /api/coredump.
+    cJSON_AddBoolToObject(o, "coredump", coredump_present());
     cJSON_AddNumberToObject(o, "rssi", rssi);
     cJSON_AddStringToObject(o, "ip", ip);
     // Daily usage consumed today (parental limit counter, listening + game
@@ -1489,10 +1554,7 @@ static esp_err_t status_get(httpd_req_t *req)
 // good manners anyway), reply, then restart.
 static esp_err_t reboot_post(httpd_req_t *req)
 {
-    if (!is_authed(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "login required");
-        return ESP_OK;
-    }
+    REQUIRE_AUTH(req, ESP_OK);
     ui_remote(UI_REMOTE_STOP, 0);
     for (int i = 0; i < 30; i++) {
         ui_status_t st;
@@ -1522,8 +1584,9 @@ esp_err_t web_config_start(void)
                                // class of bug as the Sendspin httpd fix). Stays
                                // internal RAM: these handlers write flash.
     cfg.max_open_sockets = 3;  // keep lwip sockets free for streaming + Sendspin
-    cfg.max_uri_handlers = 36; // default 8 is below our route count (registration
-                               // past the limit fails silently, e.g. /api/playback)
+    cfg.max_uri_handlers = 40; // default 8 is below our route count (registration
+                               // past the limit fails silently, e.g. /api/playback).
+                               // Keep a couple of spare slots above the table below.
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd start failed");
 
     const httpd_uri_t routes[] = {
@@ -1533,6 +1596,8 @@ esp_err_t web_config_start(void)
         {.uri = "/api/config",   .method = HTTP_GET,  .handler = config_get},
         {.uri = "/api/config",   .method = HTTP_POST, .handler = config_post},
         {.uri = "/api/logs",     .method = HTTP_GET,  .handler = logs_get},
+        {.uri = "/api/coredump", .method = HTTP_GET,  .handler = coredump_get},
+        {.uri = "/api/coredump/erase", .method = HTTP_POST, .handler = coredump_erase_post},
         {.uri = "/api/ota",      .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/ghota/check", .method = HTTP_GET,  .handler = gh_check_get},
         {.uri = "/api/ghota/status", .method = HTTP_GET,  .handler = ghota_status_get},

@@ -504,6 +504,10 @@ static esp_err_t run_flac(const decode_source_t *src, uint32_t skip_ms)
 static int mp4_read_cb(int64_t offset, void *buffer, size_t size, void *token)
 {
     const decode_source_t *s = token;
+    // The byte-source seek takes an int: refuse an offset that would not survive
+    // the narrowing (a file over 2 GB, or a forged chunk offset from an untrusted
+    // MP4) instead of silently seeking somewhere else entirely.
+    if (offset < 0 || offset > INT32_MAX) return -1;
     if (!s->seek || !s->seek(s->ctx, (int)offset, 0 /* SEEK_SET */)) return -1;
     uint8_t *p = buffer;
     size_t left = size;

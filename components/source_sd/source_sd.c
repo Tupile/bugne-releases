@@ -336,6 +336,20 @@ FILE *source_sd_open(const char *rel_path)
     return fopen(full, "rb");
 }
 
+esp_err_t source_sd_rename(const char *rel_from, const char *rel_to)
+{
+    if (!s_present) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char from[SD_PATH_MAX], to[SD_PATH_MAX];
+    if (!sd_safe_path(rel_from, from, sizeof(from)) ||
+        !sd_safe_path(rel_to, to, sizeof(to))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    remove(to);  // FATFS rename does not replace an existing target
+    return rename(from, to) == 0 ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t source_sd_mkdir(const char *rel_path)
 {
     if (!s_present) {

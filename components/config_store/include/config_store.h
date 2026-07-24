@@ -188,14 +188,8 @@ esp_err_t config_store_favorite_remove(int index);
 #define CFG_WIFI_SSID_MAX 33  // 32 chars + null
 #define CFG_WIFI_PASS_MAX 64  // 63 chars + null
 
-// Read stored Wi-Fi credentials. Returns ESP_ERR_NVS_NOT_FOUND if none are set.
-esp_err_t config_store_get_wifi(char *ssid, size_t ssid_size, char *pass, size_t pass_size);
-
-// Store Wi-Fi credentials, replacing any previous ones.
-esp_err_t config_store_set_wifi(const char *ssid, const char *pass);
-
-// Slotted Wi-Fi credentials: slot 0 is the primary network (same storage as the
-// functions above), the rest are optional extra networks. The net layer picks the
+// Slotted Wi-Fi credentials: slot 0 is the primary network, the rest are
+// optional extra networks. The net layer picks the
 // strongest visible one at connect time and roams between them. An empty SSID in a
 // slot means "no network configured there". The web UI lets the user add as many
 // as this cap. NVS keys are backward compatible: slot 0 = wifi_ssid/wifi_pass,

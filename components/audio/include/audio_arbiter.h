@@ -1,8 +1,8 @@
 // audio_arbiter: only one audio source is active at a time.
 //
 // Sources acquire the arbiter before opening the output and release it after.
-// The "syncing" state lets a source suspend playback while RSS refresh or a
-// cache download runs, so decoding and network bulk transfer never overlap.
+// Every call tolerates an uninitialized arbiter (audio_init is best-effort at
+// boot): acquire fails, release is a no-op, active reports NONE.
 #pragma once
 
 #include <stdbool.h>
@@ -34,11 +34,6 @@ void audio_arbiter_release(audio_source_t src);
 
 // The currently active source, or AUDIO_SOURCE_NONE.
 audio_source_t audio_arbiter_active(void);
-
-// Suspend or resume playback for syncing work. While syncing, sources must not
-// decode or write audio.
-void audio_arbiter_set_syncing(bool syncing);
-bool audio_arbiter_is_syncing(void);
 
 #ifdef __cplusplus
 }

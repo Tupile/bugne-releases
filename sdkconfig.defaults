@@ -73,7 +73,7 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # OTA) may do this: flash writes disable the cache, and a PSRAM stack is
 # unreachable without it. Pinned here because the generated sdkconfig had it
 # while sdkconfig.defaults did not, so a clean build would silently lose it.
-CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 
 # Wi-Fi buffer tuning to free internal DMA-capable RAM (the scarce resource
 # during HTTPS streaming). The static RX buffers are the 802.11 hardware DMA
@@ -98,3 +98,27 @@ CONFIG_LWIP_TCP_WND_DEFAULT=8640
 # reflash of the BOOTLOADER to take effect (an OTA alone cannot change the
 # flash mode); validated on the bench with USB recovery at hand.
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# Coredumps to the flash partition that partitions.csv has always reserved
+# (64 KB at 0x920000) but that nothing used. The fleet units run with no serial
+# attached and the log ring lives in PSRAM, so it does not survive a reset: a
+# spontaneous reboot was only classifiable through reset_reason. With this, the
+# crashed task, PC and backtrace are readable afterwards over GET /api/coredump.
+# ELF format is required by esp_core_dump_get_summary().
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+# Only a few tasks: the partition cannot grow (it would move littlefs, so a USB
+# reflash and a config reformat), a dumped task carries its whole stack (ui_play
+# alone has 16 KB), and the summary API only reports the crashed task anyway. A
+# dump that does not fit is a dump lost.
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=4
+# The espcoredump log strings would sit in DRAM (~5 KB) to print on a serial
+# port nobody is watching.
+CONFIG_ESP_COREDUMP_LOGS=n
+# Reserved internal (DRAM) stack for the dump writer, pinned explicitly: several
+# of our tasks run on PSRAM stacks (sendspin, stream_rd, tuner, lib_scan) and
+# writing flash disables the cache, so a dump from one of those tasks CANNOT run
+# on the crashing task's own stack. IDF derives this from
+# FREERTOS_TASK_CREATE_ALLOW_EXT_MEM; setting the size here keeps the ~1.8 KB
+# cost visible instead of implicit.
+CONFIG_ESP_COREDUMP_STACK_SIZE=1792

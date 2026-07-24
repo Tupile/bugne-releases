@@ -40,20 +40,43 @@ static void append_target(rss_parser_t *r, const char *s)
     r->target[r->target_len] = '\0';
 }
 
+// One numeric field of a duration. Saturating: feed text is untrusted, so a
+// 40-digit number must not wrap into a negative or nonsense value (atoi, used
+// here before, is undefined on overflow). Returns -1 when there is no digit.
+#define RSS_DURATION_MAX (24 * 3600)  // any real episode is far under a day
+
+static int duration_field(const char **pp)
+{
+    const char *p = *pp;
+    while (*p == ' ' || *p == '\t') p++;
+    long v = 0;
+    bool digit = false;
+    while (*p >= '0' && *p <= '9') {
+        digit = true;
+        if (v <= RSS_DURATION_MAX) v = v * 10 + (*p - '0');  // saturate, never wrap
+        p++;
+    }
+    *pp = p;
+    if (!digit) return -1;
+    return v > RSS_DURATION_MAX ? RSS_DURATION_MAX : (int)v;
+}
+
 int rss_parse_duration(const char *s)
 {
     int parts[3] = {0, 0, 0};
     int n = 0;
     const char *p = s;
     while (*p && n < 3) {
-        parts[n++] = atoi(p);
-        const char *colon = strchr(p, ':');
-        if (!colon) break;
-        p = colon + 1;
+        int v = duration_field(&p);
+        parts[n++] = (v < 0) ? 0 : v;  // a malformed field counts as 0, as before
+        if (*p != ':') break;          // "12:abc" stays 12 minutes, not 12 seconds
+        p++;
     }
-    if (n == 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-    if (n == 2) return parts[0] * 60 + parts[1];
-    return parts[0];
+    long total = 0;
+    if (n == 3)      total = (long)parts[0] * 3600 + (long)parts[1] * 60 + parts[2];
+    else if (n == 2) total = (long)parts[0] * 60 + parts[1];
+    else if (n == 1) total = parts[0];
+    return total > RSS_DURATION_MAX ? RSS_DURATION_MAX : (int)total;
 }
 
 static void on_token(rss_parser_t *r, yxml_t *x, yxml_ret_t t)
