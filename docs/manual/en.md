@@ -227,9 +227,10 @@ slider at the bottom sets the volume.
 ![Settings](img/en/settings.png) ![Theme](img/en/settings_theme.png)
 
 The gear on the home screen opens the settings: the two QR codes (config
-page and setup hotspot), music library sync, podcast refresh, and the alarm
-clock. The droplet button picks the theme (light or dark, five colors); the
-loop button flips the screen between portrait and landscape.
+page and setup hotspot), the alarm clock, the theme (light or dark, five
+colors), and the screen orientation (portrait or landscape). The music
+library and the podcast feeds keep themselves up to date automatically
+whenever the device sits idle.
 
 ### The alarm clock
 

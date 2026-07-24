@@ -233,10 +233,10 @@ ne sont pas conservés, et le curseur en bas règle le volume.
 ![Réglages](img/fr/settings.png) ![Thème](img/fr/settings_theme.png)
 
 La roue dentée de l'accueil ouvre les réglages : les deux QR codes (page
-de config et point d'accès d'installation), la synchronisation de la
-bibliothèque, l'actualisation des podcasts et le réveil. Le bouton goutte
-choisit le thème (clair ou sombre, cinq couleurs) ; le bouton boucle fait
-pivoter l'écran entre portrait et paysage.
+de config et point d'accès d'installation), le réveil, le thème (clair ou
+sombre, cinq couleurs) et l'orientation de l'écran (portrait ou paysage).
+La bibliothèque musicale et les flux de podcast se mettent à jour tout
+seuls quand l'appareil est inactif.
 
 ### Le réveil
 

@@ -4242,22 +4242,22 @@ static void on_open_settings(lv_event_t *e)  { (void)e; show(build_settings); }
 // Portrait = one column, landscape = a 2-column grid.
 static void menu_pos(int idx, int count, int *x, int *y)
 {
-    // The last row's bottom edge must clear the floating mini bar, so the row
-    // spacing derives from that limit. Button heights match add_menu_button's
-    // callers: 40 px on 5-item menus, 50 px on 4-item ones. 40 (not 44) so
-    // the resulting pitch stays >= the button height in both orientations
-    // (five 44 px buttons do not fit the band and overlapped by 1-2 px).
+    // The band runs from below the 44 px round back button (bottom edge at
+    // 52, so rows start at 56) down to the floating mini bar; the row spacing
+    // derives from those two limits. Button heights match add_menu_button's
+    // callers: 38 px on 5-item menus (40 px rows starting at 56 leave no gap
+    // between rows), 50 px on 4-item ones.
     const int limit = scr_h() - MINI_CLEAR;
-    const int h = (count == 5) ? 40 : 50;
+    const int h = (count == 5) ? 38 : 50;
     if (scr_w() > scr_h()) {
         // 2x2 grid (4 items, 2 rows) or 2+2+1 with a centered last (5 items, 3 rows).
         *x = (count == 5 && idx == 4) ? 0 : (idx % 2) ? 80 : -80;
-        const int y0 = (count == 5) ? 46 : 60;
+        const int y0 = (count == 5) ? 56 : 60;
         const int rows = (count == 5) ? 3 : 2;
         *y = y0 + (idx / 2) * ((limit - y0 - h) / (rows - 1));
     } else {
         *x = 0;
-        const int y0 = (count == 5) ? 44 : 56;  // 4-item menus clear the 44 px round back button
+        const int y0 = 56;
         *y = y0 + idx * ((limit - y0 - h) / (count - 1));
     }
 }
@@ -4612,10 +4612,6 @@ static void build_setup(lv_obj_t *scr)
 }
 
 // Settings is a small menu of sub-screens.
-static lv_obj_t *s_set_lib_lbl;  // library-sync status label (live-updated)
-static lv_obj_t *s_set_pod_lbl;  // refresh-all-podcasts status label (live-updated)
-static bool s_pod_was_refreshing;  // edge-detect refresh completion for the label
-
 static void on_settings_back(lv_event_t *e) { (void)e; show(build_settings); }
 
 // Sub-screen: QR + URL to the config web page (mDNS host when connected, else the
@@ -4691,90 +4687,8 @@ static void build_settings_ap(lv_obj_t *scr)
     }
 }
 
-static void on_set_lib_scan(lv_event_t *e)
-{
-    (void)e;
-    if (library_scan_start() && s_set_lib_lbl) {
-        lv_label_set_text(s_set_lib_lbl, T(STR_SCANNING_SD));
-    }
-}
-
-// Sub-screen: music library status + a synchronize button.
-static void build_settings_library(lv_obj_t *scr)
-{
-    add_back_cb(scr, on_settings_back);
-    add_title_wide(scr, T(STR_MUSIC_LIBRARY));
-    if (library_track_count() == 0) library_load();
-    lv_obj_t *info = lv_label_create(scr);
-    lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(info, scr_w() - 20);
-    lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(info, LV_ALIGN_CENTER, 0, -30);
-    muted(info);
-    s_set_lib_lbl = info;
-    char t[64];
-    if (library_scanning()) strlcpy(t, T(STR_SCANNING_SD), sizeof(t));
-    else snprintf(t, sizeof(t), T(STR_TRACKS_INDEXED_FMT), (unsigned)library_track_count());
-    lv_label_set_text(info, t);
-
-    lv_obj_t *b = lv_button_create(scr);
-    lv_obj_set_size(b, 200, 50);
-    lv_obj_align(b, LV_ALIGN_CENTER, 0, 30);
-    lv_obj_t *bl = lv_label_create(b);
-    lv_label_set_text(bl, T(STR_SYNC_NOW));
-    lv_obj_center(bl);
-    lv_obj_add_event_cb(b, on_set_lib_scan, LV_EVENT_CLICKED, NULL);
-}
-
-// Refresh every configured podcast feed on the worker. Blocked while audio plays
-// (the refresh shares the playback worker), matching the per-podcast refresh.
-static void on_set_pod_refresh(lv_event_t *e)
-{
-    (void)e;
-    if (audio_is_active()) {
-        if (s_set_pod_lbl) lv_label_set_text(s_set_pod_lbl, T(STR_STOP_PLAYBACK_FIRST));
-        return;
-    }
-    if (s_refreshing || s_downloading) return;  // see on_refresh: a download holds
-                                                 // the worker; don't queue behind it
-    s_refreshing = true;
-    s_pod_was_refreshing = true;
-    play_req_t req = { .kind = REQ_REFRESH_ALL };
-    xQueueOverwrite(s_play_q, &req);
-    if (s_set_pod_lbl) lv_label_set_text(s_set_pod_lbl, T(STR_REFRESHING_ALL));
-}
-
-// Sub-screen: refresh all podcast feeds.
-static void build_settings_podcasts(lv_obj_t *scr)
-{
-    add_back_cb(scr, on_settings_back);
-    add_title_wide(scr, T(STR_PODCASTS));
-    const config_t *c = config_store_get();
-    lv_obj_t *info = lv_label_create(scr);
-    lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(info, scr_w() - 20);
-    lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(info, LV_ALIGN_CENTER, 0, -30);
-    muted(info);
-    s_set_pod_lbl = info;
-    char t[64];
-    if (s_refreshing) strlcpy(t, T(STR_REFRESHING_ALL), sizeof(t));
-    else snprintf(t, sizeof(t), T(STR_PODCAST_FEEDS_FMT), (unsigned)(c ? c->podcast_count : 0));
-    lv_label_set_text(info, t);
-
-    lv_obj_t *b = lv_button_create(scr);
-    lv_obj_set_size(b, 200, 50);
-    lv_obj_align(b, LV_ALIGN_CENTER, 0, 30);
-    lv_obj_t *bl = lv_label_create(b);
-    lv_label_set_text(bl, T(STR_REFRESH_ALL_FEEDS));
-    lv_obj_center(bl);
-    lv_obj_add_event_cb(b, on_set_pod_refresh, LV_EVENT_CLICKED, NULL);
-}
-
 static void on_set_web(lv_event_t *e) { (void)e; show(build_settings_web); }
 static void on_set_ap(lv_event_t *e)  { (void)e; show(build_settings_ap); }
-static void on_set_lib(lv_event_t *e) { (void)e; show(build_settings_library); }
-static void on_set_pod(lv_event_t *e) { (void)e; show(build_settings_podcasts); }
 
 // Flip portrait/landscape and persist. Only the config is written here: the
 // sleep_timer_cb poll applies it within one tick (same path as a web-side
@@ -5369,44 +5283,18 @@ static void build_lamp(lv_obj_t *scr)
 static void build_settings(lv_obj_t *scr)
 {
     add_back_button(scr);
-    // Two round 44 px icon buttons sit top-right here (rot at -8, theme at -60,
-    // 8 px gap between them, same rhythm as the back button's 8 px inset), so the
-    // default title width would underlap them. Center the title in the free gap
-    // instead. Portrait: back button right edge at 52, theme button left edge at
-    // scr_w()-104 (136 on a 240 px panel) leaves an 84 px frame, minus padding
-    // ~76 px; "Reglages" needs 103 px at the 20 px font, so it still does not
-    // fit and portrait keeps the 14 px body font. Landscape has a much wider
-    // frame (back to 320-104=216) and keeps the 20 px font.
-    lv_obj_t *title = add_title(scr, T(STR_SETTINGS));
-    if (scr_w() > scr_h()) {
-        lv_obj_set_width(title, 138);
-        lv_obj_align(title, LV_ALIGN_TOP_MID, -30, 8);
-    } else {
-        lv_obj_set_style_text_font(title, &bugne_font_14, 0);
-        lv_obj_set_width(title, 76);
-        lv_obj_align(title, LV_ALIGN_TOP_MID, -26, 12);
-    }
-    s_set_lib_lbl = NULL;
-    s_set_pod_lbl = NULL;
-
-    // Orientation toggle, top-right (same spot and size as the home gear).
-    lv_obj_t *rot = make_round_btn(scr, LV_SYMBOL_LOOP, 44, false, on_toggle_orientation);
-    lv_obj_align(rot, LV_ALIGN_TOP_RIGHT, -8, 8);
-
-    // Theme picker, next to the orientation toggle, 8 px gap.
-    lv_obj_t *th = make_round_btn(scr, LV_SYMBOL_TINT, 44, false, on_open_theme);
-    lv_obj_align(th, LV_ALIGN_TOP_RIGHT, -60, 8);
+    add_title_wide(scr, T(STR_SETTINGS));
     int bx, by;
     menu_pos(0, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_CONFIG_PAGE_QR, bx, by, 40, on_set_web);
+    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_CONFIG_PAGE_QR, bx, by, 38, on_set_web);
     menu_pos(1, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_SETUP_HOTSPOT_QR, bx, by, 40, on_set_ap);
+    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_SETUP_HOTSPOT_QR, bx, by, 38, on_set_ap);
     menu_pos(2, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_AUDIO, STR_SYNC_LIBRARY, bx, by, 40, on_set_lib);
+    add_menu_button_t(scr, LV_SYMBOL_BELL, STR_ALARM, bx, by, 38, on_open_settings_alarm);
     menu_pos(3, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_REFRESH, STR_REFRESH_PODCASTS, bx, by, 40, on_set_pod);
+    add_menu_button_t(scr, LV_SYMBOL_TINT, STR_THEME, bx, by, 38, on_open_theme);
     menu_pos(4, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_BELL, STR_ALARM, bx, by, 40, on_open_settings_alarm);
+    add_menu_button_t(scr, LV_SYMBOL_LOOP, STR_ORIENTATION, bx, by, 38, on_toggle_orientation);
 }
 
 // ---- Toast (brief top-layer message, survives screen changes) ----
@@ -5770,8 +5658,6 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "settings_alarm",    build_settings_alarm },
     { "settings_web",      build_settings_web },
     { "settings_ap",       build_settings_ap },
-    { "settings_library",  build_settings_library },
-    { "settings_podcasts", build_settings_podcasts },
     { "setup",             build_setup },
     { "favorites",         build_favorites },
     { "now_playing",       build_now_playing },
@@ -6430,37 +6316,6 @@ static void sleep_timer_cb(lv_timer_t *t)
                     toast(T(STR_END_OF_LIST));
                     if (s_active_builder == build_now_playing) show(build_home);
                 }
-            }
-        }
-    }
-
-    // Live-update the library sync status while that screen is open.
-    if (s_active_builder == build_settings_library && s_set_lib_lbl) {
-        char t[64];
-        if (library_scanning()) strlcpy(t, T(STR_SCANNING_SD), sizeof(t));
-        else snprintf(t, sizeof(t), T(STR_TRACKS_INDEXED_FMT), (unsigned)library_track_count());
-        if (strcmp(lv_label_get_text(s_set_lib_lbl), t) != 0) {
-            lv_label_set_text(s_set_lib_lbl, t);
-        }
-    }
-
-    // Refresh-all status: show progress while running, the feed count when done.
-    // Leave any other message (e.g. T(STR_STOP_PLAYBACK_FIRST)) untouched.
-    if (s_active_builder == build_settings_podcasts && s_set_pod_lbl) {
-        if (s_refreshing) {
-            if (strcmp(lv_label_get_text(s_set_pod_lbl), T(STR_REFRESHING_ALL)) != 0) {
-                lv_label_set_text(s_set_pod_lbl, T(STR_REFRESHING_ALL));
-            }
-            s_pod_was_refreshing = true;
-        } else if (s_pod_was_refreshing) {
-            s_pod_was_refreshing = false;
-            if (s_refresh_ok) {
-                const config_t *c = config_store_get();
-                char t[64];
-                snprintf(t, sizeof(t), T(STR_REFRESH_DONE_FMT), (unsigned)(c ? c->podcast_count : 0));
-                lv_label_set_text(s_set_pod_lbl, t);
-            } else {
-                lv_label_set_text(s_set_pod_lbl, T(STR_REFRESH_FAILED));
             }
         }
     }
