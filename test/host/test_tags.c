@@ -329,6 +329,48 @@ static void test_vorbis_truncates(void)
           strlen(t.title));
 }
 
+// A fixed-size copy of an untrusted UTF-8 name can cut a multi-byte sequence in
+// half. The stray bytes made GET /api/sd/list return invalid UTF-8, so the web
+// Files tab's JSON.parse threw and the folder looked empty (seen on a real card).
+static void test_utf8_trim_partial(void)
+{
+    char s[80];
+
+    // Untouched: pure ASCII, and complete sequences of every length.
+    strcpy(s, "plain name.mp3");   tags_utf8_trim_partial(s);
+    CHECK_STR(s, "plain name.mp3", "ascii untouched");
+    strcpy(s, "caf\xC3\xA9");      tags_utf8_trim_partial(s);
+    CHECK_STR(s, "caf\xC3\xA9", "complete 2-byte kept");
+    strcpy(s, "prix \xE2\x82\xAC"); tags_utf8_trim_partial(s);
+    CHECK_STR(s, "prix \xE2\x82\xAC", "complete 3-byte kept");
+    strcpy(s, "hi \xF0\x9F\x8E\xB5"); tags_utf8_trim_partial(s);
+    CHECK_STR(s, "hi \xF0\x9F\x8E\xB5", "complete 4-byte kept");
+
+    // Cut sequences: the incomplete tail goes.
+    strcpy(s, "caf\xC3");          tags_utf8_trim_partial(s);
+    CHECK_STR(s, "caf", "2-byte cut after the lead");
+    strcpy(s, "prix \xE2");        tags_utf8_trim_partial(s);
+    CHECK_STR(s, "prix ", "3-byte cut after the lead");
+    strcpy(s, "prix \xE2\x82");    tags_utf8_trim_partial(s);
+    CHECK_STR(s, "prix ", "3-byte cut mid-sequence");
+    strcpy(s, "hi \xF0\x9F\x8E");  tags_utf8_trim_partial(s);
+    CHECK_STR(s, "hi ", "4-byte cut mid-sequence");
+
+    // The exact shape seen on the card: a no-break space (C2 A0) cut in half by
+    // a 63-byte copy.
+    strcpy(s, "Le brevet en seconde en 2027\xC2");
+    tags_utf8_trim_partial(s);
+    CHECK_STR(s, "Le brevet en seconde en 2027", "the real bench case");
+
+    // Degenerate input must not hang or read past the buffer.
+    strcpy(s, "");                 tags_utf8_trim_partial(s);
+    CHECK_STR(s, "", "empty string");
+    strcpy(s, "\x82\x82\x82");     tags_utf8_trim_partial(s);
+    CHECK_STR(s, "", "nothing but continuation bytes");
+    strcpy(s, "ok\x82");           tags_utf8_trim_partial(s);
+    CHECK_STR(s, "ok", "stray continuation byte after ascii");
+}
+
 int main(void)
 {
     test_id3v23_basic();
@@ -342,6 +384,7 @@ int main(void)
     test_vorbis_basic();
     test_vorbis_wrap_lengths();
     test_vorbis_truncates();
+    test_utf8_trim_partial();
 
     if (g_fail) {
         printf("test_tags: %d FAILURE(S)\n", g_fail);

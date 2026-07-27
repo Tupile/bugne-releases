@@ -15,6 +15,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "tags.h"  // tags_utf8_trim_partial
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
@@ -234,6 +235,11 @@ esp_err_t source_sd_list(const char *dir, char names[][SOURCE_SD_NAME_MAX], size
             continue;  // only playable files
         }
         strlcpy(names[*count], ent->d_name, SOURCE_SD_NAME_MAX);
+        // FATFS hands us UTF-8 names that can be longer than the buffer, so the
+        // copy above may cut a multi-byte sequence in half. Trim it: a stray
+        // half-character renders as a garbage glyph on screen (and breaks the
+        // JSON of GET /api/sd/list, see source_sd_browse).
+        tags_utf8_trim_partial(names[*count]);
         (*count)++;
     }
     closedir(d);
@@ -291,6 +297,12 @@ esp_err_t source_sd_browse(const char *rel_dir, source_sd_entry_t *out, size_t m
         }
         source_sd_entry_t *e = &out[*count];
         strlcpy(e->name, ent->d_name, sizeof(e->name));
+        // Same truncation as source_sd_list, with a sharper symptom: this name is
+        // embedded in the JSON of GET /api/sd/list, and half a UTF-8 sequence
+        // makes the whole response invalid UTF-8, so the web Files tab's
+        // JSON.parse throws and the folder looks empty. Seen on a real card
+        // (a name cut at 63 bytes through a no-break space).
+        tags_utf8_trim_partial(e->name);
         e->is_dir = (ent->d_type == DT_DIR);
         e->size = 0;
         if (!e->is_dir && with_sizes) {

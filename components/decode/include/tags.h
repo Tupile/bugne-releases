@@ -2,6 +2,11 @@
 // 2026-07-24 so it can be host-tested (test/host/test_tags.c). Pure: no ESP or
 // decoder dependency. Every input is untrusted tag data, so every read is
 // bounded and every output is a NUL-terminated, length-bounded UTF-8 string.
+//
+// It also hosts one small UTF-8 utility, tags_utf8_trim_partial, for any code
+// that strlcpy's untrusted UTF-8 into a fixed buffer (SD file names, ICY
+// titles). source_stream.c still carries its own static copy for the ICY path:
+// converge here if a third call site appears.
 #pragma once
 
 #include <stdbool.h>
@@ -29,3 +34,9 @@ void tags_id3_text(char *out, size_t size, const uint8_t *p, size_t len);
 
 // Bounded copy of a Vorbis comment value (UTF-8 by spec).
 void tags_copy_utf8(char *out, size_t size, const char *s, size_t n);
+
+// Drop a multi-byte UTF-8 sequence left incomplete by a truncating copy, in
+// place. A truncated sequence is not just cosmetic: it makes the JSON of an API
+// that embeds the string invalid (GET /api/sd/list did this, and the web Files
+// tab stopped parsing that folder) and renders as a garbage glyph on screen.
+void tags_utf8_trim_partial(char *s);

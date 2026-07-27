@@ -163,3 +163,19 @@ void tags_parse_vorbis(tags_t *out, const uint8_t *p, uint32_t n)
         off += clen;
     }
 }
+
+void tags_utf8_trim_partial(char *s)
+{
+    size_t len = strlen(s);
+    if (len == 0) return;
+    size_t i = len;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) i--;  // continuation run
+    if (i == 0) { s[0] = '\0'; return; }           // nothing but continuation bytes
+    unsigned char lead = (unsigned char)s[i - 1];
+    if ((lead & 0x80) == 0) {                      // ASCII, so the run is stray
+        s[i] = '\0';
+        return;
+    }
+    size_t need = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : 2;
+    if (len - (i - 1) < need) s[i - 1] = '\0';     // sequence cut short: drop it
+}
