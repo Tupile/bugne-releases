@@ -240,6 +240,11 @@ typedef struct {
 esp_err_t config_store_get_resume(config_resume_t *r);
 esp_err_t config_store_set_resume(const config_resume_t *r);
 
+// Leitner review levels array for multiplication game (10x10).
+// Index = (a-1)*10 + (b-1). Value = 0 (to learn) to 5 (mastered).
+esp_err_t config_store_get_leitner(uint8_t boxes[100]);
+esp_err_t config_store_set_leitner(const uint8_t boxes[100]);
+
 // Multiplication game high score, persisted in NVS. get returns 0 when unset.
 uint32_t config_store_get_highscore(void);
 esp_err_t config_store_set_highscore(uint32_t score);

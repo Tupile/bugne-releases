@@ -63,6 +63,10 @@ typedef enum {
     STR_GAME_ALL,           // game setup: check every table
     STR_GAME_NONE,          // game setup: uncheck every table
     STR_GAME_PICK_ONE,      // toast: tried to start with no table checked
+    STR_GAME_REVISIONS,     // game setup: Leitner review mode chip
+    STR_GAME_EXPRESS,       // game setup: express 20-question review chip
+    STR_GAME_SESSION_DONE,  // toast: express session complete
+    STR_GAME_MASTERED_FMT,  // game header: mastered count in review mode
     STR_THEME,
     STR_THEME_LIGHT,
     STR_THEME_DARK,

@@ -636,6 +636,7 @@ esp_err_t config_store_favorite_remove(int index)
 #define NVS_KEY_RESUME  "resume"
 #define NVS_KEY_HISCORE "highscore"
 #define NVS_KEY_MAXSTRK "maxstreak"
+#define NVS_KEY_LEITNER "leitner"
 #define NVS_KEY_USE_DAY "use_day"
 #define NVS_KEY_USE_SEC "use_sec"
 #define PW_SALT_LEN     16
@@ -886,6 +887,35 @@ esp_err_t config_store_set_maxstreak(uint32_t streak)
     nvs_handle_t h;
     ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
     esp_err_t err = nvs_set_u32(h, NVS_KEY_MAXSTRK, streak);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t config_store_get_leitner(uint8_t boxes[100])
+{
+    if (!boxes) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        memset(boxes, 0, 100);
+        return ESP_OK;
+    }
+    size_t len = 100;
+    err = nvs_get_blob(h, NVS_KEY_LEITNER, boxes, &len);
+    nvs_close(h);
+    if (err != ESP_OK || len != 100) {
+        memset(boxes, 0, 100);
+    }
+    return ESP_OK;
+}
+
+esp_err_t config_store_set_leitner(const uint8_t boxes[100])
+{
+    if (!boxes) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
+    esp_err_t err = nvs_set_blob(h, NVS_KEY_LEITNER, boxes, 100);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     return err;

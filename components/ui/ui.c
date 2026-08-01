@@ -2991,6 +2991,21 @@ static uint16_t s_game_tables;        // bit i set = table (i+1) enabled; RAM on
 static lv_obj_t *s_game_tbl_btn[10];  // table-picker chips, build_game_setup only
 #define GAME_TABLES_ALL 0x03FF        // all 10 tables enabled
 
+static bool     s_game_mode_leitner;
+static int      s_game_limit;         // 0 = endless, >0 = question limit per session
+static int      s_game_count;         // completed questions in session
+static uint8_t  s_game_leitner_boxes[100];
+static bool     s_game_leitner_dirty;
+static lv_obj_t *s_game_leitner_btn;
+
+static void game_save_leitner_if_dirty(void)
+{
+    if (s_game_leitner_dirty) {
+        config_store_set_leitner(s_game_leitner_boxes);
+        s_game_leitner_dirty = false;
+    }
+}
+
 static void game_refresh(void)
 {
     if (!s_game_q_lbl || !s_game_score_lbl) return;
@@ -2998,31 +3013,95 @@ static void game_refresh(void)
     snprintf(q, sizeof(q), "%d × %d = %s", s_game_a, s_game_b,
              s_game_input[0] ? s_game_input : "?");
     lv_label_set_text(s_game_q_lbl, q);
-    char sc[32], best[32], streak[32], max_streak[32], line[160];
-    snprintf(sc, sizeof(sc), T(STR_SCORE_FMT), (unsigned)s_game_score);
-    snprintf(best, sizeof(best), T(STR_BEST_FMT), (unsigned)s_game_best);
-    snprintf(streak, sizeof(streak), T(STR_STREAK_FMT), s_game_streak);
-    snprintf(max_streak, sizeof(max_streak), T(STR_MAX_STREAK_FMT), s_game_max_streak);
-    if (scr_w() > scr_h()) {
-        // Landscape stacks the header on multiple lines in the narrow left column.
-        snprintf(line, sizeof(line), "%s\n%s\n%s\n%s", sc, best, streak, max_streak);
+
+    char line[160];
+    if (s_game_mode_leitner) {
+        int mastered = 0;
+        for (int i = 0; i < 100; i++) {
+            if (s_game_leitner_boxes[i] == 5) mastered++;
+        }
+        char master_str[32];
+        snprintf(master_str, sizeof(master_str), T(STR_GAME_MASTERED_FMT), mastered);
+        if (s_game_limit > 0) {
+            int current = s_game_count + 1;
+            if (current > s_game_limit) current = s_game_limit;
+            if (scr_w() > scr_h()) {
+                snprintf(line, sizeof(line), "%s (%d/%d)\n%s", T(STR_GAME_REVISIONS),
+                         current, s_game_limit, master_str);
+            } else {
+                snprintf(line, sizeof(line), "%s (%d/%d)   %s", T(STR_GAME_REVISIONS),
+                         current, s_game_limit, master_str);
+            }
+        } else {
+            if (scr_w() > scr_h()) {
+                snprintf(line, sizeof(line), "%s\n%s", T(STR_GAME_REVISIONS), master_str);
+            } else {
+                snprintf(line, sizeof(line), "%s   %s", T(STR_GAME_REVISIONS), master_str);
+            }
+        }
     } else {
-        // Portrait fits two elements per line.
-        snprintf(line, sizeof(line), "%s   %s\n%s   %s", sc, best, streak, max_streak);
+        char sc[32], best[32], streak[32], max_streak[32];
+        snprintf(sc, sizeof(sc), T(STR_SCORE_FMT), (unsigned)s_game_score);
+        snprintf(best, sizeof(best), T(STR_BEST_FMT), (unsigned)s_game_best);
+        snprintf(streak, sizeof(streak), T(STR_STREAK_FMT), s_game_streak);
+        snprintf(max_streak, sizeof(max_streak), T(STR_MAX_STREAK_FMT), s_game_max_streak);
+        if (scr_w() > scr_h()) {
+            // Landscape stacks the header on multiple lines in the narrow left column.
+            snprintf(line, sizeof(line), "%s\n%s\n%s\n%s", sc, best, streak, max_streak);
+        } else {
+            // Portrait fits two elements per line.
+            snprintf(line, sizeof(line), "%s   %s\n%s   %s", sc, best, streak, max_streak);
+        }
     }
     lv_label_set_text(s_game_score_lbl, line);
 }
 
 static void game_new_question(void)
 {
-    // The "table" operand comes from the chosen set (bit i = table i+1); the
-    // other operand stays 1..10, as in a classic times-table drill.
-    int tbl[10], n = 0;
-    for (int i = 0; i < 10; i++) if (s_game_tables & (1 << i)) tbl[n++] = i + 1;
-    if (n == 0) { for (int i = 0; i < 10; i++) tbl[n++] = i + 1; }  // guard: nothing chosen
-    int a = tbl[esp_random() % n];
-    int b = 1 + (int)(esp_random() % 10);
-    if (a == s_game_a && b == s_game_b) a = tbl[esp_random() % n];  // reroll once
+    int a = 0, b = 0;
+    if (s_game_mode_leitner) {
+        static const int weights[6] = {10, 10, 5, 3, 2, 1};
+        int total_weight = 0;
+        for (int i = 0; i < 100; i++) {
+            uint8_t lvl = s_game_leitner_boxes[i];
+            if (lvl > 5) lvl = 5;
+            total_weight += weights[lvl];
+        }
+        if (total_weight <= 0) total_weight = 1;
+
+        int selected_idx = 0;
+        for (int attempts = 0; attempts < 10; attempts++) {
+            uint32_t r = esp_random() % total_weight;
+            int acc = 0;
+            int picked = 0;
+            for (int i = 0; i < 100; i++) {
+                uint8_t lvl = s_game_leitner_boxes[i];
+                if (lvl > 5) lvl = 5;
+                acc += weights[lvl];
+                if (r < (uint32_t)acc) {
+                    picked = i;
+                    break;
+                }
+            }
+            int cand_a = (picked / 10) + 1;
+            int cand_b = (picked % 10) + 1;
+            selected_idx = picked;
+            if (cand_a != s_game_a || cand_b != s_game_b) {
+                break;
+            }
+        }
+        a = (selected_idx / 10) + 1;
+        b = (selected_idx % 10) + 1;
+    } else {
+        // The "table" operand comes from the chosen set (bit i = table i+1); the
+        // other operand stays 1..10, as in a classic times-table drill.
+        int tbl[10], n = 0;
+        for (int i = 0; i < 10; i++) if (s_game_tables & (1 << i)) tbl[n++] = i + 1;
+        if (n == 0) { for (int i = 0; i < 10; i++) tbl[n++] = i + 1; }  // guard: nothing chosen
+        a = tbl[esp_random() % n];
+        b = 1 + (int)(esp_random() % 10);
+        if (a == s_game_a && b == s_game_b) a = tbl[esp_random() % n];  // reroll once
+    }
     s_game_a = a;
     s_game_b = b;
     s_game_attempt = 0;
@@ -3036,7 +3115,18 @@ static void game_advance_cb(lv_timer_t *t)
 {
     (void)t;
     s_game_timer = NULL;  // one-shot: LVGL deletes it after this run
-    if (s_active_builder == build_game) game_new_question();
+    if (s_active_builder == build_game) {
+        if (s_game_mode_leitner && s_game_limit > 0) {
+            s_game_count++;
+            if (s_game_count >= s_game_limit) {
+                game_save_leitner_if_dirty();
+                toast(T(STR_GAME_SESSION_DONE));
+                show(build_game_setup);
+                return;
+            }
+        }
+        game_new_question();
+    }
 }
 
 static void game_arm_advance(uint32_t ms)
@@ -3064,6 +3154,8 @@ static void on_game_key(lv_event_t *e)
     if (strcmp(txt, LV_SYMBOL_OK) == 0) {
         if (!s_game_input[0]) return;
         char fb[80];
+        int idx = (s_game_a >= 1 && s_game_a <= 10 && s_game_b >= 1 && s_game_b <= 10)
+                  ? (s_game_a - 1) * 10 + (s_game_b - 1) : -1;
         if (atoi(s_game_input) == s_game_a * s_game_b) {
             int pts = (s_game_attempt == 0) ? 10 : 5;
             s_game_score += pts;
@@ -3072,11 +3164,21 @@ static void on_game_key(lv_event_t *e)
                 if (s_game_streak > s_game_max_streak) {
                     s_game_max_streak = s_game_streak;
                 }
+                if (s_game_mode_leitner && idx >= 0) {
+                    if (s_game_leitner_boxes[idx] < 5) {
+                        s_game_leitner_boxes[idx]++;
+                    }
+                    s_game_leitner_dirty = true;
+                }
             } else {
                 s_game_streak = 0;
+                if (s_game_mode_leitner && idx >= 0) {
+                    s_game_leitner_boxes[idx] = 1;
+                    s_game_leitner_dirty = true;
+                }
             }
             snprintf(fb, sizeof(fb), T(STR_CORRECT_FMT), pts);
-            if (s_game_score > s_game_best) {
+            if (!s_game_mode_leitner && s_game_score > s_game_best) {
                 s_game_best = s_game_score;  // header follows live; NVS on back
                 snprintf(fb + strlen(fb), sizeof(fb) - strlen(fb), "  %s", T(STR_NEW_BEST));
             }
@@ -3089,18 +3191,26 @@ static void on_game_key(lv_event_t *e)
             s_game_attempt = 1;
             s_game_streak = 0;
             s_game_input[0] = '\0';
+            if (s_game_mode_leitner && idx >= 0) {
+                s_game_leitner_boxes[idx] = 1;
+                s_game_leitner_dirty = true;
+            }
             lv_obj_set_style_text_color(s_game_fb_lbl, lv_palette_main(LV_PALETTE_ORANGE), 0);
             lv_label_set_text(s_game_fb_lbl, T(STR_TRY_AGAIN));
             game_refresh();
         } else {
             s_game_reveal = true;
             s_game_streak = 0;
+            if (s_game_mode_leitner && idx >= 0) {
+                s_game_leitner_boxes[idx] = 1;
+                s_game_leitner_dirty = true;
+            }
             snprintf(fb, sizeof(fb), "%d × %d = %d", s_game_a, s_game_b, s_game_a * s_game_b);
             lv_obj_set_style_text_color(s_game_fb_lbl, lv_palette_main(LV_PALETTE_RED), 0);
             lv_label_set_text(s_game_fb_lbl, fb);
             
             s_game_error_count++;
-            if (s_game_error_count > 3) {
+            if (!s_game_mode_leitner && s_game_error_count > 3) {
                 if (s_game_best > config_store_get_highscore()) {
                     config_store_set_highscore(s_game_best);
                 }
@@ -3129,14 +3239,15 @@ static void on_game_back(lv_event_t *e)
 {
     (void)e;
     if (s_game_timer) { lv_timer_delete(s_game_timer); s_game_timer = NULL; }
-    // Persist a beaten high score. NVS write from the LVGL task is safe
-    // (internal stack).
-    if (s_game_best > config_store_get_highscore()) {
-        config_store_set_highscore(s_game_best);
+    if (!s_game_mode_leitner) {
+        if (s_game_best > config_store_get_highscore()) {
+            config_store_set_highscore(s_game_best);
+        }
+        if (s_game_max_streak > config_store_get_maxstreak()) {
+            config_store_set_maxstreak(s_game_max_streak);
+        }
     }
-    if (s_game_max_streak > config_store_get_maxstreak()) {
-        config_store_set_maxstreak(s_game_max_streak);
-    }
+    game_save_leitner_if_dirty();
     show(build_home);
 }
 
@@ -3147,12 +3258,18 @@ static void on_open_game(lv_event_t *e)
     (void)e;
     if (play_denied()) return;
     if (s_game_timer) { lv_timer_delete(s_game_timer); s_game_timer = NULL; }
+    game_save_leitner_if_dirty();
     s_game_score = 0;
     s_game_error_count = 0;
     s_game_streak = 0;
     s_game_best = config_store_get_highscore();
     s_game_max_streak = config_store_get_maxstreak();
     s_game_tables = 0;  // every session starts with nothing checked; the child picks
+    s_game_mode_leitner = false;
+    s_game_limit = 0;
+    s_game_count = 0;
+    config_store_get_leitner(s_game_leitner_boxes);
+    s_game_leitner_dirty = false;
     s_game_a = 0;  // force a fresh question in build_game
     show(build_game_setup);
 }
@@ -3174,6 +3291,9 @@ static void on_game_table(lv_event_t *e)
     if (i == 10) return;
     if (lv_obj_has_state(chip, LV_STATE_CHECKED)) s_game_tables |= (1 << i);
     else s_game_tables &= ~(1 << i);
+
+    s_game_mode_leitner = false;
+    if (s_game_leitner_btn) lv_obj_remove_state(s_game_leitner_btn, LV_STATE_CHECKED);
 }
 
 static void on_game_all(lv_event_t *e)
@@ -3181,6 +3301,8 @@ static void on_game_all(lv_event_t *e)
     (void)e;
     s_game_tables = GAME_TABLES_ALL;
     for (int i = 0; i < 10; i++) game_set_chip(i, true);
+    s_game_mode_leitner = false;
+    if (s_game_leitner_btn) lv_obj_remove_state(s_game_leitner_btn, LV_STATE_CHECKED);
 }
 
 static void on_game_none(lv_event_t *e)
@@ -3188,6 +3310,32 @@ static void on_game_none(lv_event_t *e)
     (void)e;
     s_game_tables = 0;
     for (int i = 0; i < 10; i++) game_set_chip(i, false);
+    s_game_mode_leitner = false;
+    if (s_game_leitner_btn) lv_obj_remove_state(s_game_leitner_btn, LV_STATE_CHECKED);
+}
+
+static void on_game_leitner_toggle(lv_event_t *e)
+{
+    (void)e;
+    s_game_mode_leitner = !s_game_mode_leitner;
+    if (s_game_mode_leitner) {
+        s_game_tables = 0;
+        for (int i = 0; i < 10; i++) game_set_chip(i, false);
+        if (s_game_leitner_btn) lv_obj_add_state(s_game_leitner_btn, LV_STATE_CHECKED);
+    } else {
+        if (s_game_leitner_btn) lv_obj_remove_state(s_game_leitner_btn, LV_STATE_CHECKED);
+    }
+}
+
+static void on_game_express(lv_event_t *e)
+{
+    (void)e;
+    if (play_denied()) return;
+    s_game_mode_leitner = true;
+    s_game_limit = 20;
+    s_game_count = 0;
+    s_game_a = 0;  // force fresh question
+    show(build_game);
 }
 
 static void on_game_start(lv_event_t *e)
@@ -3196,7 +3344,11 @@ static void on_game_start(lv_event_t *e)
     // Same gate as on_open_game: the picker may have been opened before a quiet
     // window opened or the daily quota ran out.
     if (play_denied()) return;
-    if (s_game_tables == 0) { toast(T(STR_GAME_PICK_ONE)); return; }
+    if (!s_game_mode_leitner && s_game_tables == 0) { toast(T(STR_GAME_PICK_ONE)); return; }
+    if (s_game_mode_leitner) {
+        s_game_limit = 0;  // endless mode
+        s_game_count = 0;
+    }
     s_game_a = 0;  // force a fresh question in build_game
     show(build_game);
 }
@@ -3253,6 +3405,38 @@ static void build_game_setup(lv_obj_t *scr)
         lv_obj_add_event_cb(chip, on_game_table, LV_EVENT_CLICKED, NULL);
         s_game_tbl_btn[i] = chip;
     }
+
+    // Leitner review chip
+    lv_obj_t *rev_chip = lv_button_create(row_tbl);
+    lv_obj_set_height(rev_chip, 40);
+    lv_obj_set_width(rev_chip, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_hor(rev_chip, 10, 0);
+    lv_obj_add_flag(rev_chip, LV_OBJ_FLAG_CHECKABLE);
+    lv_obj_add_style(rev_chip, &s_round_surface, 0);
+    lv_obj_add_style(rev_chip, &s_round_surface_pr, LV_STATE_PRESSED);
+    lv_obj_add_style(rev_chip, &s_chip_ck, LV_STATE_CHECKED);
+    if (s_game_mode_leitner) lv_obj_add_state(rev_chip, LV_STATE_CHECKED);
+    lv_obj_t *rl = lv_label_create(rev_chip);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_LOOP, T(STR_GAME_REVISIONS));
+    lv_label_set_text(rl, buf);
+    lv_obj_center(rl);
+    lv_obj_add_event_cb(rev_chip, on_game_leitner_toggle, LV_EVENT_CLICKED, NULL);
+    s_game_leitner_btn = rev_chip;
+
+    // Express 20 chip
+    lv_obj_t *exp_chip = lv_button_create(row_tbl);
+    lv_obj_set_height(exp_chip, 40);
+    lv_obj_set_width(exp_chip, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_hor(exp_chip, 10, 0);
+    lv_obj_add_style(exp_chip, &s_round_surface, 0);
+    lv_obj_add_style(exp_chip, &s_round_surface_pr, LV_STATE_PRESSED);
+    lv_obj_t *el = lv_label_create(exp_chip);
+    char exp_buf[40];
+    snprintf(exp_buf, sizeof(exp_buf), "%s %s", LV_SYMBOL_CHARGE, T(STR_GAME_EXPRESS));
+    lv_label_set_text(el, exp_buf);
+    lv_obj_center(el);
+    lv_obj_add_event_cb(exp_chip, on_game_express, LV_EVENT_CLICKED, NULL);
 
     // All / None.
     lv_obj_t *row_bulk = alarm_row(content, LV_FLEX_ALIGN_SPACE_EVENLY);
