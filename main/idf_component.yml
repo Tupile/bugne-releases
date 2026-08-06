@@ -1,9 +1,9 @@
 # External dependencies for Bugne, resolved by the IDF component manager.
-# Versions confirmed against the ESP Component Registry on 2026-06-21.
+# Versions confirmed against the ESP Component Registry on 2026-08-05.
 # Single-file libraries (dr_mp3, dr_flac, yxml, qrcodegen) are vendored into
 # their own component directories, so they are not listed here.
 dependencies:
-  # ESP-IDF floor. Raised to 5.5 because sendspin-cpp 0.6.1 requires it.
+  # ESP-IDF floor. Raised to 5.5 because sendspin-cpp requires it.
   idf:
     version: ">=5.5"
 
@@ -31,6 +31,13 @@ dependencies:
   espressif/esp_lcd_touch_ft5x06:
     version: "^1.1.0"
 
+  # JPEG decoder (TJpgDec) for cover art. Decodes straight to RGB565 and can
+  # scale by 1/2, 1/4 or 1/8 while decoding, so a 600 px cover becomes a
+  # ~150 px bitmap without a full-size intermediate. LVGL's own TJPGD wrapper
+  # is deliberately NOT used (see the note in sdkconfig.defaults).
+  espressif/esp_jpeg:
+    version: "^1.3.1"
+
   # LittleFS for the JSON config in internal flash. Mature.
   joltwallet/littlefs:
     version: "^1.22.2"
@@ -43,4 +50,4 @@ dependencies:
   # Music Assistant protocol. Pinned to an exact version on purpose.
   # Requires ESP-IDF >= 5.5 (the project baseline).
   sendspin/sendspin-cpp:
-    version: "==0.6.1"
+    version: "==0.7.0"

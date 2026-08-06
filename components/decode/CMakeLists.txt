@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "decode.c" "tags.c"
+    SRCS "decode.c" "tags.c" "art.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES audio espressif__esp_audio_codec
+    PRIV_REQUIRES audio espressif__esp_audio_codec espressif__esp_jpeg
 )

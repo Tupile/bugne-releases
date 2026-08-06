@@ -56,3 +56,9 @@ bool podcast_episode_cached(const podcast_episode_t *ep);
 // true to abort (the partial file is removed). Blocks; call from a worker task.
 // Returns ESP_OK on success, ESP_ERR_INVALID_STATE if cancelled.
 esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds, volatile bool *cancel);
+
+// Absolute path of a feed's cached cover ("/sdcard/podcasts/<folder>/cover.jpg").
+// `name` is the configured podcast title (NULL or empty falls back to the same
+// default the manifest writer uses), so the folder matches the episodes'.
+// The file may not exist: the UI treats a missing cover as "no artwork".
+void podcast_cover_path(int id, const char *name, char *out, size_t out_size);

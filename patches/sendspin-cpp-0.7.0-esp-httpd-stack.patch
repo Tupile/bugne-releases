@@ -1,0 +1,27 @@
+Bugne build-time patch for sendspin-cpp 0.7.0, applied by the top-level
+CMakeLists.txt at configure time (managed_components is gitignored and
+re-fetched on clean builds).
+
+Since 0.7.0 the library handles the ESP-IDF WebSocket handshake natively
+(it registers its handler as ws_post_handshake_cb and its Kconfig selects
+HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT), so the 0.6.1-era handshake fix is gone.
+One local fix remains: the library never sets the httpd task stack size, so
+it inherits the 4 KB HTTPD_DEFAULT_CONFIG default. The open/close callbacks
+(C++ shared_ptr + std::function) and the async frame sends all run on that
+task, and 4 KB corrupts the LWIP select semaphore under load (bench-proven
+crash: assert "taking semaphore failed"). Give it 8 KB.
+
+--- a/src/esp/ws_server.cpp
++++ b/src/esp/ws_server.cpp
+@@ -60,7 +60,11 @@
+
+     // Configure the HTTP server
+     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
++    // Bugne: the default 4 KB httpd task stack is tight; the open/close callbacks
++    // (C++ shared_ptr + std::function) and the async frame sends all run on this
++    // task, and 4 KB corrupts the LWIP select semaphore under load.
++    config.stack_size = 8192;
+     if (task_stack_in_psram) {
+         config.task_caps = MALLOC_CAP_SPIRAM;
+     }
+     config.task_priority = task_priority;

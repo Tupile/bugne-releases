@@ -170,12 +170,87 @@ static void test_truncation(void)
     CHECK(strlen(p.podcast_title) < RSS_TITLE_MAX, "title bounded to < RSS_TITLE_MAX");
 }
 
+
+// ---- Channel artwork ---------------------------------------------------------
+
+// itunes:image carries its URL in an href attribute, like enclosure's url.
+static const char FEED_ITUNES_IMAGE[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<rss version=\"2.0\">\n"
+    " <channel>\n"
+    "  <title>Arty</title>\n"
+    "  <itunes:image href=\"https://ex.com/cover.jpg\"/>\n"
+    "  <item>\n"
+    "    <title>Ep</title>\n"
+    "    <itunes:image href=\"https://ex.com/episode-art.jpg\"/>\n"
+    "    <enclosure url=\"https://ex.com/ep.mp3\"/>\n"
+    "  </item>\n"
+    " </channel>\n"
+    "</rss>\n";
+
+// Plain RSS puts it in <image><url>, which also contains a <title> that must
+// not overwrite the channel title.
+static const char FEED_RSS_IMAGE[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<rss version=\"2.0\">\n"
+    " <channel>\n"
+    "  <title>Arty</title>\n"
+    "  <image>\n"
+    "    <url>https://ex.com/chan.png</url>\n"
+    "    <title>Decoy Title</title>\n"
+    "    <link>https://ex.com/</link>\n"
+    "  </image>\n"
+    "  <item>\n"
+    "    <title>Ep</title>\n"
+    "    <enclosure url=\"https://ex.com/ep.mp3\"/>\n"
+    "  </item>\n"
+    " </channel>\n"
+    "</rss>\n";
+
+static void test_itunes_image(void)
+{
+    char ybuf[RSS_YXML_BUF_SIZE];
+    collector_t c = {0};
+    rss_parser_t p;
+    rss_parse_init(&p, ybuf, sizeof(ybuf), collect_cb, &c);
+    feed_chunked(&p, FEED_ITUNES_IMAGE, 5);
+    CHECK_STR(p.image_url, "https://ex.com/cover.jpg", "itunes:image href");
+    CHECK_STR(p.podcast_title, "Arty", "title survives the image element");
+    CHECK_INT(c.count, 1, "episode still parsed");
+    if (c.count >= 1) CHECK_STR(c.eps[0].url, "https://ex.com/ep.mp3", "ep url intact");
+}
+
+static void test_rss_image_url(void)
+{
+    char ybuf[RSS_YXML_BUF_SIZE];
+    collector_t c = {0};
+    rss_parser_t p;
+    rss_parse_init(&p, ybuf, sizeof(ybuf), collect_cb, &c);
+    feed_chunked(&p, FEED_RSS_IMAGE, 5);
+    CHECK_STR(p.image_url, "https://ex.com/chan.png", "<image><url>");
+    CHECK_STR(p.podcast_title, "Arty", "the image's own <title> must not win");
+    CHECK_INT(c.count, 1, "episode still parsed");
+}
+
+static void test_no_image(void)
+{
+    char ybuf[RSS_YXML_BUF_SIZE];
+    collector_t c = {0};
+    rss_parser_t p;
+    rss_parse_init(&p, ybuf, sizeof(ybuf), collect_cb, &c);
+    feed_chunked(&p, SAMPLE, 7);
+    CHECK_STR(p.image_url, "", "a feed without artwork reports none");
+}
+
 int main(void)
 {
     test_duration();
     test_sample();
     test_attr_on_content();
     test_truncation();
+    test_itunes_image();
+    test_rss_image_url();
+    test_no_image();
     if (g_fail == 0) {
         printf("OK: all rss_parse host tests passed\n");
         return 0;

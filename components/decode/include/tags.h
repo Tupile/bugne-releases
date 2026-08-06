@@ -40,3 +40,11 @@ void tags_copy_utf8(char *out, size_t size, const char *s, size_t n);
 // that embeds the string invalid (GET /api/sd/list did this, and the web Files
 // tab stopped parsing that folder) and renders as a garbage glyph on screen.
 void tags_utf8_trim_partial(char *s);
+
+// Locate the embedded JPEG cover in an ID3v2 tag (APIC frame, PIC in v2.2).
+// Report-only, so it stays pure: on success *off/*len delimit the image bytes
+// INSIDE tag, which the caller copies before its buffer goes away. A front
+// cover (picture type 3) wins over any other type; otherwise the first JPEG
+// found is used. Only JPEG is reported (the UI decodes nothing else).
+bool tags_find_apic(const uint8_t *tag, size_t size, size_t *off, size_t *len);
+

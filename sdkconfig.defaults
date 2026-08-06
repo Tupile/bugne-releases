@@ -43,6 +43,14 @@ CONFIG_LV_USE_SNAPSHOT=y
 # instead of a 64 KB static array in scarce internal RAM.
 CONFIG_LV_USE_CUSTOM_MALLOC=y
 
+# NOTE (cover art, 2026-08-06): no LVGL image decoder is enabled on purpose.
+# LVGL's TJPGD wrapper needs LV_USE_FS_MEMFS for an in-memory source, decodes
+# to RGB888, and its get_area path ignores lv_image_set_scale, so a 600 px
+# cover rendered nothing (bench-proven). Covers are instead decoded to a
+# small RGB565 bitmap by espressif/esp_jpeg on a worker task and handed to
+# lv_image as a plain lv_image_dsc_t: no decoder, no cache, no transform at
+# draw time. Do not re-enable LV_USE_TJPGD expecting scaling to work.
+
 # LVGL: built-in Montserrat fonts used as fallback for our custom bugne fonts
 # (LV_SYMBOL_* glyphs) and for headings that need a larger stock size.
 CONFIG_LV_FONT_MONTSERRAT_20=y
@@ -52,9 +60,10 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 # stream's HTTP client together exceed the default of 10.
 CONFIG_LWIP_MAX_SOCKETS=16
 
-# WebSocket post-handshake callback: IDF does not call the URI handler on the WS
-# handshake, so the Sendspin server uses this callback to fire on_connected (send
-# client/hello). Without it Music Assistant drops the player as an unknown client.
+# WebSocket post-handshake callback: the Sendspin server relies on it to see the
+# WS handshake (without it Music Assistant drops the player as an unknown
+# client). sendspin-cpp >= 0.7.0 selects it from its own Kconfig; kept explicit
+# here for clarity.
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
 # Allocate mbedTLS (TLS) buffers from PSRAM. Internal RAM is too tight for a TLS

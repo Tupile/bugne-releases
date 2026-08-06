@@ -179,3 +179,115 @@ void tags_utf8_trim_partial(char *s)
     size_t need = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : 2;
     if (len - (i - 1) < need) s[i - 1] = '\0';     // sequence cut short: drop it
 }
+
+
+// Frame-walk preamble shared with tags_parse_id3v2: validate the tag header,
+// step over an extended header, and report the frame header length. Returns
+// false when this is not a usable ID3v2 tag.
+static bool id3_walk_start(const uint8_t *tag, size_t size, uint8_t *ver_out,
+                           size_t *hdrlen, size_t *pos)
+{
+    if (size < 10 || tag[0] != 'I' || tag[1] != 'D' || tag[2] != '3') return false;
+    uint8_t ver = tag[3];
+    uint8_t flags = tag[5];
+    bool v22 = (ver == 2);
+    *hdrlen = v22 ? 6 : 10;
+    *pos = 10;
+    if (!v22 && (flags & 0x40)) {
+        if (*pos + 4 > size) return false;
+        size_t ext = (ver == 4)
+            ? (((size_t)(tag[*pos] & 0x7F) << 21) | ((tag[*pos+1] & 0x7F) << 14) |
+               ((tag[*pos+2] & 0x7F) << 7) | (tag[*pos+3] & 0x7F))
+            : (((size_t)tag[*pos] << 24) | ((size_t)tag[*pos+1] << 16) |
+               ((size_t)tag[*pos+2] << 8) | tag[*pos+3]);
+        *pos += 4 + ext;
+    }
+    *ver_out = ver;
+    return true;
+}
+
+// Frame size at id, using the version's encoding (syncsafe for v2.4).
+static size_t id3_frame_size(const uint8_t *id, uint8_t ver, bool v22)
+{
+    if (v22) return ((size_t)id[3] << 16) | ((size_t)id[4] << 8) | id[5];
+    const uint8_t *s = id + 4;
+    if (ver == 4) {
+        return ((size_t)(s[0] & 0x7F) << 21) | ((s[1] & 0x7F) << 14) |
+               ((s[2] & 0x7F) << 7) | (s[3] & 0x7F);
+    }
+    return ((size_t)s[0] << 24) | ((size_t)s[1] << 16) | ((size_t)s[2] << 8) | s[3];
+}
+
+// Body of one APIC/PIC frame -> the JPEG bytes inside it.
+// v2.3/2.4: enc, MIME (NUL-terminated), picture type, description, data.
+// v2.2:     enc, 3-char image format ("JPG"), picture type, description, data.
+// Description is UTF-16 for encodings 1 and 2, so its terminator is 2 NULs on
+// an even offset. Returns false unless the payload is a JPEG (SOI marker).
+static bool apic_payload(const uint8_t *p, size_t n, bool v22, size_t *off,
+                         size_t *len, uint8_t *pic_type)
+{
+    if (n < 4) return false;
+    uint8_t enc = p[0];
+    size_t i = 1;
+    if (v22) {
+        if (n < 1 + 3 + 1) return false;
+        if (strncasecmp((const char *)(p + 1), "JPG", 3) != 0) return false;
+        i = 4;
+    } else {
+        size_t m = i;
+        while (m < n && p[m] != 0) m++;
+        if (m >= n) return false;
+        // Accept image/jpeg and the "image/jpg" some taggers emit.
+        const char *mime = (const char *)(p + i);
+        size_t mlen = m - i;
+        bool jpeg = (mlen >= 4 && strncasecmp(mime + mlen - 4, "jpeg", 4) == 0) ||
+                    (mlen >= 3 && strncasecmp(mime + mlen - 3, "jpg", 3) == 0);
+        if (!jpeg) return false;
+        i = m + 1;
+    }
+    if (i >= n) return false;
+    *pic_type = p[i++];
+    if (enc == 1 || enc == 2) {  // UTF-16 description: terminator is 00 00
+        while (i + 1 < n && !(p[i] == 0 && p[i + 1] == 0)) i += 2;
+        if (i + 1 >= n) return false;
+        i += 2;
+    } else {
+        while (i < n && p[i] != 0) i++;
+        if (i >= n) return false;
+        i++;
+    }
+    if (i + 2 >= n || p[i] != 0xFF || p[i + 1] != 0xD8) return false;  // not a JPEG
+    *off = i;
+    *len = n - i;
+    return true;
+}
+
+bool tags_find_apic(const uint8_t *tag, size_t size, size_t *off, size_t *len)
+{
+    uint8_t ver = 0;
+    size_t hdrlen = 0, pos = 0;
+    if (!id3_walk_start(tag, size, &ver, &hdrlen, &pos)) return false;
+    bool v22 = (ver == 2);
+    bool found = false;
+    while (pos + hdrlen <= size) {
+        const uint8_t *id = tag + pos;
+        if (id[0] == 0) break;  // padding
+        size_t fsize = id3_frame_size(id, ver, v22);
+        if (fsize == 0 || fsize > size - pos - hdrlen) break;  // wrap-safe, as above
+        bool is_pic = v22 ? !memcmp(id, "PIC", 3) : !memcmp(id, "APIC", 4);
+        if (is_pic) {
+            size_t o = 0, l = 0;
+            uint8_t type = 0;
+            if (apic_payload(tag + pos + hdrlen, fsize, v22, &o, &l, &type)) {
+                if (type == 3 || !found) {   // front cover wins, else keep the first
+                    if (off) *off = pos + hdrlen + o;
+                    if (len) *len = l;
+                    found = true;
+                }
+                if (type == 3) return true;
+            }
+        }
+        pos += hdrlen + fsize;
+    }
+    return found;
+}

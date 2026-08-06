@@ -31,12 +31,18 @@ typedef void (*rss_episode_cb)(const rss_episode_t *ep, void *ctx);
 
 typedef struct {
     char   podcast_title[RSS_TITLE_MAX];
+    // Channel artwork, from <itunes:image href> or <image><url>. Channel level
+    // only: per-episode images are ignored, one cover per feed is what the UI
+    // shows. Empty when the feed has none.
+    char   image_url[RSS_URL_MAX];
     rss_episode_cb on_episode;    // emitted per item; episodes are not stored here
     void  *cb_ctx;
     size_t emitted;               // count handed to the callback so far
 
     // internal state
     bool   got_podcast_title;
+    bool   got_image_url;
+    bool   cur_is_itunes_image;
     bool   in_item;
     bool   cur_is_enclosure;
     rss_episode_t cur;            // the single episode being assembled

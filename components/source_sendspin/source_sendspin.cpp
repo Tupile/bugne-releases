@@ -41,6 +41,11 @@ static const char *TAG = "source_sendspin";
 static std::atomic<bool> s_active{false};
 static std::atomic<bool> s_session{false};
 static std::atomic<int> s_pending_cmd{-1};
+// Queued absolute seek (-1 none), separate from s_pending_cmd so a seek never
+// stomps a queued transport command (and vice versa).
+static std::atomic<int64_t> s_pending_seek{-1};
+// Seek bound from the server's controller state; 0 = seek unavailable.
+static std::atomic<uint32_t> s_seek_max_ms{0};
 static std::atomic<uint32_t> s_progress_ms{0};
 static std::atomic<uint32_t> s_duration_ms{0};
 static std::mutex s_meta_mutex;
@@ -133,10 +138,9 @@ public:
     }
 
     void on_volume_changed(uint8_t volume) override {
-        // Round, do not truncate: 1 and 2 out of 255 would floor to 0 (mute),
-        // and the reverse direction (update_volume) already rounds, so a
-        // server-set volume must echo back unchanged.
-        audio_set_volume(((int)volume * 100 + 127) / 255);  // 0..255 -> 0..100
+        // Since 0.7.0 the wire volume is 0..100 (values above 100 are dropped
+        // at parse), same scale as audio_set_volume: pass through.
+        audio_set_volume(volume > 100 ? 100 : volume);
     }
 };
 
@@ -144,6 +148,33 @@ class BugneNetworkProvider : public SendspinNetworkProvider {
 public:
     bool is_network_ready() override {
         return net_state() == NET_STATE_CONNECTED;
+    }
+};
+
+// Tracks whether the server offers SEEK and its bound (seek_max_ms is present
+// only for seekable tracks, absent for live/unknown-duration streams). The UI
+// polls source_sendspin_seek_max() to show or hide the progress knob.
+class BugneControllerListener : public ControllerRoleListener {
+public:
+    // Fires on the main loop thread.
+    void on_controller_state(const ServerStateControllerObject &state) override {
+        uint32_t max = 0;
+        if (state.seek_max_ms.has_value()) {
+            for (SendspinControllerCommand c : state.supported_commands) {
+                if (c == SendspinControllerCommand::SEEK) {
+                    max = *state.seek_max_ms;
+                    break;
+                }
+            }
+        }
+        uint32_t prev = s_seek_max_ms.exchange(max);
+        if ((prev == 0) != (max == 0)) {  // log availability edges only
+            ESP_LOGI(TAG, "seek %s", max ? "available" : "unavailable");
+        }
+    }
+    void on_controller_state_clear() override {
+        s_seek_max_ms.store(0);
+        s_pending_seek.store(-1);
     }
 };
 
@@ -168,6 +199,7 @@ SendspinClient *g_client = nullptr;
 BugnePlayerListener g_player_listener;
 BugneNetworkProvider g_net_provider;
 BugneMetadataListener g_metadata_listener;
+BugneControllerListener g_controller_listener;
 MetadataRole *g_metadata = nullptr;
 ControllerRole *g_controller = nullptr;
 std::string g_name;
@@ -187,25 +219,31 @@ void sendspin_task(void *arg)
         int cmd = s_pending_cmd.exchange(-1);
         if (cmd >= 0 && g_controller) {
             switch ((sendspin_cmd_t)cmd) {
-            case SENDSPIN_CMD_PLAY:  g_controller->send_command(SendspinControllerCommand::PLAY);  break;
-            case SENDSPIN_CMD_PAUSE: g_controller->send_command(SendspinControllerCommand::PAUSE); break;
+            case SENDSPIN_CMD_PLAY:  g_controller->send_command({.command = SendspinControllerCommand::PLAY});  break;
+            case SENDSPIN_CMD_PAUSE: g_controller->send_command({.command = SendspinControllerCommand::PAUSE}); break;
             case SENDSPIN_CMD_STOP:
-                g_controller->send_command(SendspinControllerCommand::STOP);
+                g_controller->send_command({.command = SendspinControllerCommand::STOP});
                 s_session.store(false);  // stop ends the session: close the screen
                 break;
-            case SENDSPIN_CMD_NEXT:     g_controller->send_command(SendspinControllerCommand::NEXT);     break;
-            case SENDSPIN_CMD_PREVIOUS: g_controller->send_command(SendspinControllerCommand::PREVIOUS); break;
+            case SENDSPIN_CMD_NEXT:     g_controller->send_command({.command = SendspinControllerCommand::NEXT});     break;
+            case SENDSPIN_CMD_PREVIOUS: g_controller->send_command({.command = SendspinControllerCommand::PREVIOUS}); break;
             }
         }
+        // Drain a UI-queued seek the same way (send_command must stay on this task).
+        int64_t seek = s_pending_seek.exchange(-1);
+        if (seek >= 0 && g_controller) {
+            g_controller->send_command({.command = SendspinControllerCommand::SEEK,
+                                        .position_ms = (uint32_t)seek});
+            ESP_LOGI(TAG, "seek to %u ms sent", (unsigned)seek);
+        }
         // Report the device volume to the server, edge-triggered. Runs on this
-        // task because publish_state is not thread-safe. Round to nearest so a
-        // server-set volume echoes back unchanged (128 -> 50 -> 128).
+        // task because publish_state is not thread-safe. Wire volume is 0..100
+        // since 0.7.0, same scale as audio_get_volume: pass through.
         int vol = audio_get_volume();
         if (vol != last_vol && g_player_listener.player) {
             last_vol = vol;
-            uint8_t v255 = (uint8_t)((vol * 255 + 50) / 100);
-            g_player_listener.player->update_volume(v255);
-            ESP_LOGI(TAG, "volume %d published to server (%u/255)", vol, (unsigned)v255);
+            g_player_listener.player->update_volume((uint8_t)vol);
+            ESP_LOGI(TAG, "volume %d published to server", vol);
         }
         // Report external_source when a non-Sendspin source owns the audio
         // output, so the server knows the player is busy.
@@ -273,6 +311,13 @@ extern "C" esp_err_t source_sendspin_init(void)
     // Assistant shows for the player.
     cfg.software_version = esp_app_get_description()->version;
     cfg.httpd_psram_stack = true;  // httpd task stack in PSRAM: frees internal RAM for HTTPS streaming
+    // Keep the 0.6.1 socket footprint (0.7.0 default is 4): LWIP_MAX_SOCKETS=16
+    // is budgeted for config httpd + captive DNS + Sendspin WS + mDNS + the
+    // stream's HTTP client, and Music Assistant needs at most 2 WS connections.
+    cfg.server_max_connections = 2;
+    // Couple the server port to the constant the mDNS advert uses (configurable
+    // since 0.7.0, previously hardcoded to the same value inside the library).
+    cfg.server_port = SENDSPIN_WS_PORT;
 
     g_client = new SendspinClient(std::move(cfg));
 
@@ -295,8 +340,10 @@ extern "C" esp_err_t source_sendspin_init(void)
     g_metadata = &g_client->add_metadata();
     g_metadata->set_listener(&g_metadata_listener);
 
-    // Controller role: lets the device send PLAY/PAUSE/STOP to Music Assistant.
+    // Controller role: lets the device send PLAY/PAUSE/STOP/SEEK to Music
+    // Assistant; its listener tracks whether the current track is seekable.
     g_controller = &g_client->add_controller();
+    g_controller->set_listener(&g_controller_listener);
 
     g_client->set_network_provider(&g_net_provider);
 
@@ -361,4 +408,18 @@ extern "C" void source_sendspin_command(sendspin_cmd_t cmd)
         audio_output_off();
     }
     s_pending_cmd.store((int)cmd);
+}
+
+extern "C" void source_sendspin_seek(uint32_t position_ms)
+{
+    uint32_t max = s_seek_max_ms.load();
+    if (max == 0) {
+        return;  // server does not offer seek right now
+    }
+    s_pending_seek.store(position_ms > max ? max : position_ms);
+}
+
+extern "C" uint32_t source_sendspin_seek_max(void)
+{
+    return s_seek_max_ms.load();
 }

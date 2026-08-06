@@ -132,6 +132,10 @@ static const lang_def_t LANGS[] = {
             [STR_TALKIE_LEFT_MEMO]   = "Left as a memo",
             [STR_LAMP]               = "Lamp",
             [STR_HA_TITLE]           = "Home Assistant",
+            [STR_LISTEN_TIME]        = "Listening time",
+            [STR_TODAY]              = "Today",
+            [STR_NO_LIMIT]           = "No daily limit set",
+            [STR_REMAINING_FMT]      = "%s left today",
         },
     },
     {
@@ -255,6 +259,10 @@ static const lang_def_t LANGS[] = {
             [STR_TALKIE_LEFT_MEMO]   = "Laissé en mémo",
             [STR_LAMP]               = "Lampe",
             [STR_HA_TITLE]           = "Home Assistant",
+            [STR_LISTEN_TIME]        = "Temps d'écoute",
+            [STR_TODAY]              = "Aujourd'hui",
+            [STR_NO_LIMIT]           = "Pas de limite quotidienne",
+            [STR_REMAINING_FMT]      = "Il reste %s aujourd'hui",
         },
     },
 };

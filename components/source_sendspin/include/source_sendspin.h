@@ -48,6 +48,15 @@ void source_sendspin_progress(uint32_t *pos_ms, uint32_t *dur_ms);
 // its next loop, so it is safe to call from the UI task.
 void source_sendspin_command(sendspin_cmd_t cmd);
 
+// Queue an absolute seek of the Music Assistant session (same task hand-off as
+// the transport commands). Ignored when the server does not offer seek.
+void source_sendspin_seek(uint32_t position_ms);
+
+// Max position (ms) a seek may target for the current track, from the server's
+// controller state. 0 when seek is unavailable (live stream, older server):
+// keep the progress bar read-only then.
+uint32_t source_sendspin_seek_max(void);
+
 #ifdef __cplusplus
 }
 #endif

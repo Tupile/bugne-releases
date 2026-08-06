@@ -3,6 +3,7 @@
 #include "decode.h"
 #include "audio.h"
 #include "tags.h"
+#include "art.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +72,9 @@ void decode_set_start_skip_ms(uint32_t ms)
 // macros keep every call site in this file unchanged (same pattern as
 // config_store's s_config).
 static tags_t s_tags;
+// True once a cover was stored for this track, so a later non-front picture
+// does not replace it (FLAC files can carry several PICTURE blocks).
+static bool s_art_seen;
 #define META_MAX       TAGS_MAX
 #define s_title        s_tags.title
 #define s_artist       s_tags.artist
@@ -84,6 +88,13 @@ static void cb_mp3_meta(void *p, const drmp3_metadata *m)
     (void)p;
     if (m->type == DRMP3_METADATA_TYPE_ID3V2 && m->pRawData && m->rawDataSize >= 10) {
         tags_parse_id3v2(&s_tags, (const uint8_t *)m->pRawData, m->rawDataSize);
+        // dr_mp3 hands us the WHOLE tag, cover included, and frees it as soon
+        // as this returns: decode the embedded JPEG now or lose it. This runs
+        // on the playback worker, never on the LVGL task.
+        size_t aoff = 0, alen = 0;
+        if (tags_find_apic((const uint8_t *)m->pRawData, m->rawDataSize, &aoff, &alen)) {
+            art_set_jpeg((const uint8_t *)m->pRawData + aoff, alen);
+        }
     } else if ((m->type == DRMP3_METADATA_TYPE_XING || m->type == DRMP3_METADATA_TYPE_VBRI) &&
                m->pRawData && m->rawDataSize >= 8) {
         // Xing/Info tag (dr_mp3 posts "Info" under the VBRI label, same layout):
@@ -108,6 +119,24 @@ static void cb_mp3_meta(void *p, const drmp3_metadata *m)
 static void cb_flac_meta(void *p, drflac_metadata *m)
 {
     (void)p;
+    if (m->type == DRFLAC_METADATA_BLOCK_TYPE_PICTURE) {
+        // dr_flac has already read the picture into PSRAM (it frees it right
+        // after this callback), so the cover costs us only the decode. A file
+        // can carry several pictures: the front cover wins, otherwise the
+        // first one. mime is NOT NUL-terminated, it is bounded by mimeLength.
+        const drflac_uint32 n = m->data.picture.mimeLength;
+        const char *mime = m->data.picture.mime;
+        bool jpeg = mime && ((n >= 4 && !strncasecmp(mime + n - 4, "jpeg", 4)) ||
+                             (n >= 3 && !strncasecmp(mime + n - 3, "jpg", 3)));
+        bool front = m->data.picture.type == DRFLAC_PICTURE_TYPE_COVER_FRONT;
+        if (jpeg && m->data.picture.pPictureData && m->data.picture.pictureDataSize > 4 &&
+            (front || !s_art_seen)) {
+            if (art_set_jpeg(m->data.picture.pPictureData, m->data.picture.pictureDataSize)) {
+                s_art_seen = true;
+            }
+        }
+        return;
+    }
     if (m->type != DRFLAC_METADATA_BLOCK_TYPE_VORBIS_COMMENT) return;
     drflac_vorbis_comment_iterator it;
     drflac_init_vorbis_comment_iterator(&it, m->data.vorbis_comment.commentCount,
@@ -140,6 +169,8 @@ void decode_clear_metadata(void)
     s_album[0] = '\0';
     s_album_artist[0] = '\0';
     s_track = 0;
+    s_art_seen = false;
+    art_clear();  // the cover belongs to the track that is ending
 }
 
 // Bridge the dr_* callbacks to decode_source_t. pUserData is the source.

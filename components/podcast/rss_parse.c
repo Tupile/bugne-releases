@@ -97,6 +97,15 @@ static void on_token(rss_parser_t *r, yxml_t *x, yxml_ret_t t)
             set_content_target(r, r->cur.date, sizeof(r->cur.date));
         } else if (r->in_item && strcmp(x->elem, "itunes:duration") == 0) {
             set_content_target(r, r->dur_buf, sizeof(r->dur_buf));
+        } else if (!r->in_item && !r->got_image_url &&
+                   strcmp(x->elem, "itunes:image") == 0) {
+            // Channel artwork, carried by an href attribute (captured below).
+            r->cur_is_itunes_image = true;
+        } else if (!r->in_item && !r->got_image_url && strcmp(x->elem, "url") == 0 &&
+                   r->depth >= 2 && strcmp(r->stack[r->depth - 2], "image") == 0) {
+            // Plain RSS <image><url>: element content, and the only place a
+            // parent check is needed (a bare "url" appears elsewhere too).
+            set_content_target(r, r->image_url, sizeof(r->image_url));
         }
         break;
     case YXML_CONTENT:
@@ -107,6 +116,8 @@ static void on_token(rss_parser_t *r, yxml_t *x, yxml_ret_t t)
         // value (target = NULL) so it cannot bleed into the element content.
         if (r->cur_is_enclosure && strcmp(x->attr, "url") == 0) {
             set_target(r, r->cur.url, sizeof(r->cur.url));
+        } else if (r->cur_is_itunes_image && strcmp(x->attr, "href") == 0) {
+            set_target(r, r->image_url, sizeof(r->image_url));
         } else {
             r->target = NULL;
         }
@@ -133,6 +144,11 @@ static void on_token(rss_parser_t *r, yxml_t *x, yxml_ret_t t)
             r->got_podcast_title = r->podcast_title[0] != '\0';
         } else if (strcmp(closed, "enclosure") == 0) {
             r->cur_is_enclosure = false;
+        } else if (strcmp(closed, "itunes:image") == 0) {
+            r->cur_is_itunes_image = false;
+            r->got_image_url = r->image_url[0] != '\0';  // first one wins
+        } else if (strcmp(closed, "url") == 0 && !r->in_item) {
+            r->got_image_url = r->image_url[0] != '\0';
         } else if (strcmp(closed, "item") == 0) {
             if (r->cur.url[0] && r->emitted < RSS_MAX_EPISODES) {
                 if (r->on_episode) r->on_episode(&r->cur, r->cb_ctx);

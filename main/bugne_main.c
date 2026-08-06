@@ -68,14 +68,18 @@ static void ota_validate_task(void *arg)
 // Periodic memory telemetry, retrievable over /api/logs. Internal RAM is the
 // scarce resource (PSRAM is plentiful): the free and minimum-free numbers are
 // what to watch when judging a memory tuning change during HTTPS streaming.
+// PSRAM is reported too, not because it is tight but because the buffers that
+// live there (cover art bitmaps, browse tables, decoder buffers) are the ones
+// a leak would silently grow, invisible in the internal figures.
 static void heap_log_task(void *arg)
 {
     (void)arg;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(60000));
-        ESP_LOGI(TAG, "internal RAM: %u free, %u min free",
+        ESP_LOGI(TAG, "internal RAM: %u free, %u min free (PSRAM %u free)",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     }
 }
 

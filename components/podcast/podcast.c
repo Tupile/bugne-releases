@@ -111,6 +111,8 @@ static uint32_t path_hash(const char *s)
     return h;
 }
 
+static void download_cover(const char *url, const char *podir);  // defined at the end
+
 static void mw_write_header(manifest_writer_t *w)
 {
     // The SD folder is named after the podcast (config title, else feed title).
@@ -292,6 +294,9 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
         if (rename(tmp_path, final_path) == 0) {
             ret = ESP_OK;
             ESP_LOGI(TAG, "manifest written: %d episodes", w.count);
+            // The feed's artwork, once the manifest is safely in place: it is a
+            // nicety, so it must never be able to cost us the episode list.
+            download_cover(p->image_url, w.podir);
         } else {
             ESP_LOGE(TAG, "cannot rename manifest into place");
             remove(tmp_path);
@@ -611,4 +616,77 @@ size_t podcast_manifest_count(int id)
     free(obj);
     fclose(f);
     return n;
+}
+
+// ---- Channel artwork ----
+
+// Biggest cover we download. Feed images are commonly 1400x1400 JPEGs of a few
+// hundred KB; anything past this is refused rather than filling the card (the
+// URL comes from an untrusted feed, same reasoning as EPISODE_MAX_BYTES).
+#define COVER_MAX_BYTES (1024 * 1024)
+
+void podcast_cover_path(int id, const char *name, char *out, size_t out_size)
+{
+    (void)id;  // the folder is named after the podcast, like the episodes'
+    char podir[80];
+    sanitize_name((name && name[0]) ? name : "podcast", podir, sizeof(podir), "podcast");
+    snprintf(out, out_size, "/sdcard/podcasts/%s/cover.jpg", podir);
+}
+
+// Fetch the feed's cover next to its episodes. Best effort: any failure leaves
+// no file and is not reported, a refresh must still succeed without artwork.
+// Skipped when a cover is already there (feeds rarely change their image, and
+// a refresh runs on every auto-maintenance pass).
+static void download_cover(const char *url, const char *podir)
+{
+    if (!url || !url[0] || !podir || !podir[0]) return;
+
+    char abs_path[PODCAST_PATH_MAX];
+    char rel[PODCAST_PATH_MAX];
+    snprintf(abs_path, sizeof(abs_path), "/sdcard/podcasts/%s/cover.jpg", podir);
+    snprintf(rel, sizeof(rel), "podcasts/%s/cover.jpg.part", podir);
+    struct stat st;
+    if (stat(abs_path, &st) == 0 && st.st_size > 0) return;  // already cached
+
+    char part_abs[PODCAST_PATH_MAX + 8];
+    snprintf(part_abs, sizeof(part_abs), "%s.part", abs_path);
+    FILE *fo = source_sd_create(rel);
+    if (!fo) return;
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .buffer_size = 4096,
+        .buffer_size_tx = 2048,  // feed image URLs are long too
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) { fclose(fo); remove(part_abs); return; }
+
+    bool ok = false;
+    if (http_open_redirect(client) == 200) {
+        char *buf = heap_caps_malloc(HTTP_CHUNK, MALLOC_CAP_SPIRAM);
+        if (buf) {
+            size_t total = 0;
+            ok = true;
+            for (;;) {
+                int n = esp_http_client_read(client, buf, HTTP_CHUNK);
+                if (n < 0) { ok = false; break; }
+                if (n == 0) break;  // done
+                total += (size_t)n;
+                if (total > COVER_MAX_BYTES) { ok = false; break; }
+                if (fwrite(buf, 1, (size_t)n, fo) != (size_t)n) { ok = false; break; }
+            }
+            if (total == 0) ok = false;
+            free(buf);
+        }
+        esp_http_client_close(client);
+    }
+    esp_http_client_cleanup(client);
+    if (fclose(fo) != 0) ok = false;  // the flush is where a full card fails
+    if (ok && rename(part_abs, abs_path) == 0) {
+        ESP_LOGI(TAG, "cover cached: %s", abs_path);
+    } else {
+        remove(part_abs);
+    }
 }

@@ -12,6 +12,7 @@
 #include "source_sendspin.h"
 #include "podcast.h"
 #include "played.h"
+#include "art.h"  // cover art bitmap for the current track
 #include "audio.h"
 #include "audio_arbiter.h"
 #include "decode.h"
@@ -155,6 +156,15 @@ static lv_obj_t *s_ss_time_lbl;
 static lv_obj_t *s_ss_pause_lbl;
 static bool s_ss_prev;  // previous Sendspin session state, for edge detection
 
+// Listening-time screen widgets, refreshed at 1 Hz while the screen is shown
+// (guarded by s_active_builder, same convention as the s_ss_* set above).
+// s_usage_bar doubles as the "limit enabled when built" flag: it is NULL when
+// the screen was built with the daily limit off.
+static lv_obj_t *s_usage_fig;   // today's big figure
+static lv_obj_t *s_usage_bar;   // quota bar (NULL when the limit is off)
+static lv_obj_t *s_usage_sub;   // "used / limit" line under the bar
+static lv_obj_t *s_usage_rem;   // muted remaining-time line
+
 // Current LVGL resolution, follows the display rotation: 240x320 portrait,
 // 320x240 landscape. Layout code must use these, never LCD_HRES/LCD_VRES
 // (those stay native-panel, for the SPI/DMA/touch configs only).
@@ -192,6 +202,19 @@ static lv_obj_t *s_np_icy_lbl;  // web radio ICY "now playing" line on the local
 static lv_obj_t *s_np_prog;     // SD file progress slider (draggable to seek)
 static lv_obj_t *s_np_prog_time;// elapsed/total time label under the progress slider
 static bool      s_np_seeking;  // user is dragging the progress slider
+static bool      s_ss_seeking;  // same, for the Sendspin screen's progress slider
+
+// Cover art of the current track, owned by the LVGL task once taken from the
+// art module (see art.h's ownership rule). The bitmap outlives the screen, so
+// it is freed only when a new cover replaces it or playback ends: an
+// lv_image's source must stay valid as long as the widget exists.
+static uint8_t     *s_art_px;
+static lv_image_dsc_t s_art_dsc;
+static uint32_t     s_art_gen_seen;
+// Cover file the worker should load for the next play (podcast episodes,
+// whose art is a file on the SD card rather than a tag). Written on the LVGL
+// task before req_post, read by the worker when it picks the request up.
+static char         s_art_pending_path[PODCAST_PATH_MAX];
 static uint32_t  s_np_dur_override_ms;  // exact duration (podcasts from RSS); 0 = use decoder's
 static lv_obj_t *s_np_name;     // main title label (SD: tag title, else file name)
 static lv_obj_t *s_np_artist;   // SD: artist from the tag (empty if none)
@@ -1022,6 +1045,26 @@ static void beep_run(void)
     audio_arbiter_release(AUDIO_SOURCE_BEEP);
 }
 
+// Read a cover JPEG off the SD card into PSRAM and hand it to the art module.
+// Worker task only (SD I/O + JPEG decode must never run on the LVGL task).
+// A missing file is the normal case, not an error: most feeds have no cover
+// cached yet, and the screen simply shows no art.
+static void load_cover_file(const char *abs_path)
+{
+    FILE *f = fopen(abs_path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 4 || len > ART_MAX_JPEG) { fclose(f); return; }
+    uint8_t *buf = heap_caps_malloc((size_t)len, MALLOC_CAP_SPIRAM);
+    if (!buf) { fclose(f); return; }
+    size_t got = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    if (got == (size_t)len) art_set_jpeg(buf, got);
+    heap_caps_free(buf);
+}
+
 static void play_task(void *arg)
 {
     (void)arg;
@@ -1091,6 +1134,16 @@ static void play_task(void *arg)
                 continue;
             }
             ESP_LOGI(TAG, "play request: %s (%s)", req.target, req.is_file ? "file" : "stream");
+            // Podcast cover: a JPEG on the SD card, so it is read here on the
+            // worker (internal stack, SD I/O allowed) rather than on the LVGL
+            // task. The path was staged by the LVGL task before req_post; it
+            // is empty for sources whose art comes from the file's own tags.
+            if (s_art_pending_path[0]) {
+                char cover[PODCAST_PATH_MAX];
+                strlcpy(cover, s_art_pending_path, sizeof(cover));
+                s_art_pending_path[0] = '\0';
+                load_cover_file(cover);
+            }
             s_stop_requested = false;  // a fresh play; a later stop re-arms it
             // Clear here too (not only in ui_play): if the previous play failed
             // in the instant between ui_play's clear and its takeover-stop being
@@ -1778,6 +1831,26 @@ static void build_now_playing(lv_obj_t *scr)
     // PLAY_CTX_NONE (web remote, favorites, alarm SD track).
     const bool has_prog = (s_play_ctx != PLAY_CTX_NONE) || s_now_is_file;
 
+    // Cover art: LANDSCAPE ONLY. Portrait is already full (two transport rows)
+    // and stays byte-for-byte as it was. The art slot is a fixed ART_BOX square
+    // on the left, so the text column below has the same geometry whatever the
+    // cover's own size; art_dx shifts every centered row into that column, and
+    // art_narrow is how much width they give up.
+    const bool has_art = ls && s_art_px != NULL;
+    const int art_col_x = 2 * PAD_SIDE + ART_BOX;                    // column left edge
+    const int art_col_w = scr_w() - art_col_x - PAD_SIDE;            // its width
+    const int art_dx = has_art ? art_col_x + art_col_w / 2 - scr_w() / 2 : 0;
+    if (has_art) {
+        lv_obj_t *img = lv_image_create(scr);
+        lv_image_set_src(img, &s_art_dsc);
+        lv_obj_set_style_radius(img, RADIUS_BTN, 0);
+        lv_obj_set_style_clip_corner(img, true, 0);
+        // Centered in the free band (52 under the back button, 170 above the
+        // 60 px pause button): (52 + 170) / 2 = 111, i.e. 9 px above the
+        // screen's own middle. Keeps both clear without moving anything else.
+        lv_obj_align(img, LV_ALIGN_LEFT_MID, PAD_SIDE, -9);
+    }
+
     // Overline: small muted header, the big label below is the track name.
     lv_obj_t *over = lv_label_create(scr);
     muted(over);
@@ -1795,13 +1868,13 @@ static void build_now_playing(lv_obj_t *scr)
     // right, same "underlap" fix as build_settings' title): each button's inset
     // is 8 px with a 44 px diameter, so scr_w() - 112 stays centered in the free
     // gap without needing a horizontal shift (both buttons are symmetric here).
-    lv_obj_set_size(name, scr_w() - 112,
+    lv_obj_set_size(name, has_art ? art_col_w : scr_w() - 112,
                     tlines * lv_font_get_line_height(&bugne_font_20));
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
     // SD files show the tag title when known (falls back to the file name); other
     // sources keep their own title (podcast episode, radio station).
     lv_label_set_text(name, (s_play_ctx == PLAY_CTX_SD && s_meta_title[0]) ? s_meta_title : s_now_title);
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, ls ? 54 : 40);  // clears back button (bottom 52)
+    lv_obj_align(name, LV_ALIGN_TOP_MID, art_dx, ls ? 54 : 40);  // clears back button (bottom 52)
     s_np_name = name;
 
     if (s_play_ctx == PLAY_CTX_SD) {
@@ -1812,11 +1885,11 @@ static void build_now_playing(lv_obj_t *scr)
         // One line: LONG_DOT truncates only once the height is bounded too.
         // Same width as the title: the favorites button sits at the left edge
         // down to y 104, and this row (y 84/94) must clear it (B2).
-        lv_obj_set_size(ar, scr_w() - 112, lv_font_get_line_height(&bugne_font_14));
+        lv_obj_set_size(ar, has_art ? art_col_w : scr_w() - 112, lv_font_get_line_height(&bugne_font_14));
         lv_obj_set_style_text_align(ar, LV_TEXT_ALIGN_CENTER, 0);
         muted(ar);
         lv_label_set_text(ar, s_meta_artist);
-        lv_obj_align(ar, LV_ALIGN_TOP_MID, 0, ls ? 84 : 94);  // under the bounded title block
+        lv_obj_align(ar, LV_ALIGN_TOP_MID, art_dx, ls ? 84 : 94);  // under the bounded title block
         s_np_artist = ar;
     }
 
@@ -1825,10 +1898,10 @@ static void build_now_playing(lv_obj_t *scr)
         // time label. Draggable to seek when the format supports it; streamed
         // episodes keep a read-only bar.
         lv_obj_t *prog = lv_slider_create(scr);
-        lv_obj_set_width(prog, scr_w() - 32);
+        lv_obj_set_width(prog, has_art ? art_col_w : scr_w() - 32);
         lv_slider_set_range(prog, 0, 1000);
         lv_slider_set_value(prog, 0, LV_ANIM_OFF);
-        lv_obj_align(prog, LV_ALIGN_TOP_MID, 0, ls ? 106 : 116);
+        lv_obj_align(prog, LV_ALIGN_TOP_MID, art_dx, ls ? 106 : 116);
         if (now_playing_seekable()) {
             lv_obj_add_event_cb(prog, on_seek_pressed, LV_EVENT_PRESSED, NULL);
             lv_obj_add_event_cb(prog, on_seek_released, LV_EVENT_RELEASED, NULL);
@@ -1842,7 +1915,7 @@ static void build_now_playing(lv_obj_t *scr)
         lv_obj_t *t = lv_label_create(scr);
         muted(t);
         lv_label_set_text(t, "0:00 / 0:00");
-        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, ls ? 124 : 134);
+        lv_obj_align(t, LV_ALIGN_TOP_MID, art_dx, ls ? 124 : 134);
         s_np_prog_time = t;
     } else {
         // Web radio "now playing" (ICY StreamTitle), updated live; empty otherwise.
@@ -1852,26 +1925,26 @@ static void build_now_playing(lv_obj_t *scr)
         lv_obj_set_style_text_font(icyl, &bugne_font_14, 0);
         lv_label_set_long_mode(icyl, LV_LABEL_LONG_DOT);
         // One line: LONG_DOT truncates only once the height is bounded too.
-        lv_obj_set_size(icyl, scr_w() - 2 * PAD_SIDE, lv_font_get_line_height(&bugne_font_14));
+        lv_obj_set_size(icyl, has_art ? art_col_w : scr_w() - 2 * PAD_SIDE, lv_font_get_line_height(&bugne_font_14));
         lv_obj_set_style_text_align(icyl, LV_TEXT_ALIGN_CENTER, 0);
         muted(icyl);
         lv_label_set_text(icyl, icy);
-        lv_obj_align(icyl, LV_ALIGN_TOP_MID, 0, ls ? 108 : 118);  // under the taller radio title
+        lv_obj_align(icyl, LV_ALIGN_TOP_MID, art_dx, ls ? 108 : 118);  // under the taller radio title
         s_np_icy_lbl = icyl;
     }
 
     // Volume: icon plus slider, above the transport cluster.
     const int vy = ls ? 144 : 154;
     lv_obj_t *vol = lv_slider_create(scr);
-    lv_obj_set_width(vol, scr_w() - 60);
+    lv_obj_set_width(vol, has_art ? art_col_w - 28 : scr_w() - 60);
     lv_slider_set_range(vol, 0, audio_get_volume_limit());  // ceiling from config
     lv_slider_set_value(vol, audio_get_volume(), LV_ANIM_OFF);
-    lv_obj_align(vol, LV_ALIGN_TOP_MID, 12, vy);
+    lv_obj_align(vol, LV_ALIGN_TOP_MID, has_art ? art_dx + 14 : 12, vy);
     lv_obj_add_event_cb(vol, on_volume, LV_EVENT_VALUE_CHANGED, NULL);
     s_np_vol = vol;  // so a web volume change can move this slider too
     lv_obj_t *vicon = lv_label_create(scr);
     lv_label_set_text(vicon, LV_SYMBOL_VOLUME_MAX);
-    lv_obj_align(vicon, LV_ALIGN_TOP_LEFT, PAD_SIDE, vy - 2);
+    lv_obj_align(vicon, LV_ALIGN_TOP_LEFT, has_art ? art_col_x : PAD_SIDE, vy - 2);
 
     // Transport: round buttons. Next/previous move through the current list (SD
     // folder or podcast episodes); they are disabled for a single web radio
@@ -1943,12 +2016,43 @@ static void on_ss_stop(lv_event_t *e)
     source_sendspin_command(SENDSPIN_CMD_STOP);  // ends the session; the screen then closes
 }
 
+// Progress slider drag (Sendspin): hold updates while dragging, send a SEEK to
+// Music Assistant on release. Only wired when the server offers seek (the
+// controller state announces it per track; radios and live streams do not).
+static void on_ss_seek_pressed(lv_event_t *e) { (void)e; s_ss_seeking = true; }
+
+static void on_ss_seek_released(lv_event_t *e)
+{
+    lv_obj_t *s = lv_event_get_target(e);
+    uint32_t pos = 0, dur = 0;
+    source_sendspin_progress(&pos, &dur);
+    if (dur > 0 && source_sendspin_seek_max() > 0) {
+        // The slider maps 0..1000 over the displayed duration; the seek bound
+        // is clamped inside source_sendspin_seek.
+        source_sendspin_seek((uint32_t)((uint64_t)lv_slider_get_value(s) * dur / 1000));
+    }
+    s_ss_seeking = false;
+}
+
+// Show or hide the Sendspin progress knob to match the server's seek offer.
+// Same visual convention as the SD slider: knob hidden = read-only.
+static void ss_apply_seekable(lv_obj_t *slider, bool seekable)
+{
+    if (seekable) {
+        lv_obj_add_flag(slider, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(slider, LV_OPA_COVER, LV_PART_KNOB);
+    } else {
+        lv_obj_remove_flag(slider, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(slider, LV_OPA_TRANSP, LV_PART_KNOB);
+    }
+}
+
 static void build_sendspin_playing(lv_obj_t *scr)
 {
     // Mirrors build_now_playing's has_prog layout (SD/podcast/library): same
     // overline + bounded title + muted artist + progress row + volume +
-    // transport cluster. Only the progress widget differs (read-only bar, no
-    // seek events, since Music Assistant is not scrubbable from here).
+    // transport cluster. The progress widget is a slider that is draggable
+    // (seeks the Music Assistant session) only while the server offers seek.
     const bool ls = scr_w() > scr_h();
     add_back_button(scr);  // browse other screens while MA keeps streaming
     add_sleep_button(scr); // sleep timer, top-right (mirrors the back button)
@@ -1986,13 +2090,19 @@ static void build_sendspin_playing(lv_obj_t *scr)
     lv_obj_align(artist, LV_ALIGN_TOP_MID, 0, ls ? 84 : 94);  // under the bounded title block
     s_ss_artist_lbl = artist;
 
-    // Progress bar (read-only, no seek: Music Assistant owns the queue) plus
-    // an elapsed/total time label, same slots as build_now_playing's slider.
-    lv_obj_t *bar = lv_bar_create(scr);
-    lv_obj_set_size(bar, scr_w() - 32, 8);
-    lv_bar_set_range(bar, 0, 1000);
-    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    // Progress slider plus an elapsed/total time label, same slots as
+    // build_now_playing's. Seekability is per track and can change while the
+    // screen is open (MA announces it in the controller state), so the drag
+    // events are always attached and ss_refresh toggles knob + clickability.
+    s_ss_seeking = false;
+    lv_obj_t *bar = lv_slider_create(scr);
+    lv_obj_set_width(bar, scr_w() - 32);
+    lv_slider_set_range(bar, 0, 1000);
+    lv_slider_set_value(bar, 0, LV_ANIM_OFF);
     lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, ls ? 106 : 116);
+    lv_obj_add_event_cb(bar, on_ss_seek_pressed, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(bar, on_ss_seek_released, LV_EVENT_RELEASED, NULL);
+    ss_apply_seekable(bar, source_sendspin_seek_max() > 0);
     s_ss_bar = bar;
 
     lv_obj_t *tm = lv_label_create(scr);
@@ -2061,7 +2171,16 @@ static void ss_refresh(void)
     uint32_t pos = 0, dur = 0;
     source_sendspin_progress(&pos, &dur);
     if (s_ss_bar) {
-        lv_bar_set_value(s_ss_bar, dur ? (int)((uint64_t)pos * 1000 / dur) : 0, LV_ANIM_OFF);
+        // Follow the server's per-track seek offer (edge-triggered on the
+        // clickable flag so the styles are not rewritten every tick).
+        bool seekable = source_sendspin_seek_max() > 0;
+        if (seekable != lv_obj_has_flag(s_ss_bar, LV_OBJ_FLAG_CLICKABLE)) {
+            ss_apply_seekable(s_ss_bar, seekable);
+        }
+        if (!s_ss_seeking) {
+            lv_slider_set_value(s_ss_bar, dur ? (int)((uint64_t)pos * 1000 / dur) : 0,
+                                LV_ANIM_OFF);
+        }
     }
     if (s_ss_time_lbl) {
         char tm[32], cur[12], tot[12];
@@ -2080,6 +2199,15 @@ static void ss_refresh(void)
         const char *want = source_sendspin_active() ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY;
         if (strcmp(lv_label_get_text(s_ss_pause_lbl), want) != 0) {
             lv_label_set_text(s_ss_pause_lbl, want);
+        }
+    }
+    // Music Assistant can change the device volume (on_volume_changed ->
+    // audio_set_volume); keep this screen's slider in sync unless the user is
+    // holding it. The web remote already moves it via ui_remote_apply.
+    if (s_np_vol && !lv_obj_has_state(s_np_vol, LV_STATE_PRESSED)) {
+        int v = audio_get_volume();
+        if (lv_slider_get_value(s_np_vol) != v) {
+            lv_slider_set_value(s_np_vol, v, LV_ANIM_OFF);
         }
     }
 }
@@ -2174,6 +2302,16 @@ static void play_ctx_at_ex(int i, bool show_np)
                 (cached_mp3 ? s_play_podcast_skip_s * 1000 : 0);
             skip_ms = resume_skip > 0 ? resume_skip : 0;
         }
+        // Cover: one JPEG per feed, cached next to its episodes. Staged for
+        // the worker to load (see load_cover_file); it must be set BEFORE
+        // ui_play, which is what posts the request.
+        const config_t *pc = config_store_get();
+        const char *ptitle = NULL;
+        for (size_t k = 0; pc && k < pc->podcast_count; k++) {
+            if (pc->podcasts[k].id == s_play_podcast_id) { ptitle = pc->podcasts[k].title; break; }
+        }
+        podcast_cover_path(s_play_podcast_id, ptitle,
+                           s_art_pending_path, sizeof(s_art_pending_path));
         if (ep->cached) ui_play(true, ep->cache_path, ep->title, skip_ms);
         else            ui_play(false, ep->episode_url, ep->title, skip_ms);
         // Use the exact duration from the RSS feed (the byte-rate estimate drifts
@@ -2415,6 +2553,9 @@ void ui_status(ui_status_t *out)
         strlcpy(out->source, "sendspin", sizeof(out->source));
         source_sendspin_title(out->title, sizeof(out->title));
         source_sendspin_artist(out->artist, sizeof(out->artist));
+        source_sendspin_progress(&out->pos_ms, &out->dur_ms);
+        // seekable stays false: the web seek action drives decode_seek (local
+        // files only); Sendspin seek is on-device only for now.
         return;
     }
     if (!audio_is_active()) {
@@ -4487,7 +4628,7 @@ static void on_open_favorites(lv_event_t *e) { (void)e; show(build_favorites); }
 static void on_open_settings(lv_event_t *e)  { (void)e; show(build_settings); }
 
 // Position of menu button idx on a menu screen of `count` items. Since the
-// 2026-07-03 tile redesign only the 5-item settings screen uses this; the
+// 2026-07-03 tile redesign only the settings screen (6 items) uses this; the
 // count == 4 spacing is kept for a future 4-item menu.
 // Portrait = one column, landscape = a 2-column grid.
 static void menu_pos(int idx, int count, int *x, int *y)
@@ -4495,21 +4636,29 @@ static void menu_pos(int idx, int count, int *x, int *y)
     // The band runs from below the 44 px round back button (bottom edge at
     // 52, so rows start at 56) down to the floating mini bar; the row spacing
     // derives from those two limits. Button heights match add_menu_button's
-    // callers: 38 px on 5-item menus (40 px rows starting at 56 leave no gap
-    // between rows), 50 px on 4-item ones.
+    // callers: menu_h() on 5/6-item menus, 50 px on 4-item ones.
     const int limit = scr_h() - MINI_CLEAR;
-    const int h = (count == 5) ? 38 : 50;
+    const int h = (count >= 5) ? ((count == 6 && scr_h() > scr_w()) ? 32 : 38) : 50;
     if (scr_w() > scr_h()) {
-        // 2x2 grid (4 items, 2 rows) or 2+2+1 with a centered last (5 items, 3 rows).
+        // 2x2 grid (4 items), 2+2+1 with a centered last (5 items, 3 rows),
+        // or a full 3x2 grid (6 items).
         *x = (count == 5 && idx == 4) ? 0 : (idx % 2) ? 80 : -80;
-        const int y0 = (count == 5) ? 56 : 60;
-        const int rows = (count == 5) ? 3 : 2;
+        const int y0 = (count >= 5) ? 56 : 60;
+        const int rows = (count >= 5) ? 3 : 2;
         *y = y0 + (idx / 2) * ((limit - y0 - h) / (rows - 1));
     } else {
         *x = 0;
-        const int y0 = 56;
+        // 6 portrait rows only fit with the thinner 32 px buttons and a
+        // slightly higher start (the title ends well above 52).
+        const int y0 = (count == 6) ? 52 : 56;
         *y = y0 + idx * ((limit - y0 - h) / (count - 1));
     }
+}
+
+// Button height matching menu_pos's spacing for the settings-style menus.
+static int menu_h(int count)
+{
+    return (count == 6 && scr_h() > scr_w()) ? 32 : 38;
 }
 
 static lv_obj_t *add_menu_button(lv_obj_t *scr, const char *text, int x, int y, int h, lv_event_cb_t cb)
@@ -5020,6 +5169,131 @@ static void build_settings_theme(lv_obj_t *scr)
         lv_label_set_text(l, T(ACCENTS[i].name));
         lv_obj_center(l);
         lv_obj_add_event_cb(b, on_theme_accent, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+}
+
+// ---- Listening-time screen (today's usage vs the parental daily limit) ----
+
+// Format seconds as "1 h 24 min" / "45 min" (mirrors the web page's statsHM).
+static void fmt_hm(char *buf, size_t size, int seconds)
+{
+    int m = (seconds + 30) / 60, h = m / 60;
+    m %= 60;
+    if (h > 0) snprintf(buf, size, "%d h %d min", h, m);
+    else snprintf(buf, size, "%d min", m);
+}
+
+// Sub-screen: today's counted usage, plus a quota bar when the daily limit is
+// enabled. Read-only (the limit itself is web-configured) and ungated: a child
+// may check their remaining time. Without valid time usage_today(0) is 0,
+// which is also what the counter accumulates then; no special case.
+static void build_settings_usage(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_settings_back);
+    add_title_wide(scr, T(STR_LISTEN_TIME));
+    const bool ls = scr_w() > scr_h();
+    const config_t *c = config_store_get();
+    const bool limited = c && c->daily_limit.enabled;
+    int used = usage_today(date_today());
+    char buf[64], hm[24];
+
+    lv_obj_t *over = lv_label_create(scr);
+    muted(over);
+    lv_label_set_text(over, T(STR_TODAY));
+    lv_obj_align(over, LV_ALIGN_TOP_MID, 0, ls ? 52 : 64);
+
+    lv_obj_t *fig = lv_label_create(scr);
+    lv_obj_set_style_text_font(fig, &bugne_font_20, 0);
+    fmt_hm(hm, sizeof(hm), used);
+    lv_label_set_text(fig, hm);
+    lv_obj_align(fig, LV_ALIGN_TOP_MID, 0, ls ? 76 : 92);
+    s_usage_fig = fig;
+
+    if (limited) {
+        const int limit_s = c->daily_limit.minutes * 60;
+        lv_obj_t *bar = lv_bar_create(scr);
+        lv_bar_set_range(bar, 0, limit_s);
+        lv_bar_set_value(bar, used > limit_s ? limit_s : used, LV_ANIM_OFF);
+        lv_obj_set_size(bar, scr_w() - 2 * PAD_SIDE - 32, 14);
+        lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, ls ? 122 : 150);
+        s_usage_bar = bar;
+
+        lv_obj_t *sub = lv_label_create(scr);
+        char lim[24];
+        fmt_hm(lim, sizeof(lim), limit_s);
+        snprintf(buf, sizeof(buf), "%s / %s", hm, lim);
+        lv_label_set_text(sub, buf);
+        lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, ls ? 146 : 176);
+        s_usage_sub = sub;
+
+        lv_obj_t *rem = lv_label_create(scr);
+        muted(rem);
+        int left = limit_s - used;
+        fmt_hm(hm, sizeof(hm), left > 0 ? left : 0);
+        snprintf(buf, sizeof(buf), T(STR_REMAINING_FMT), hm);
+        lv_label_set_text(rem, buf);
+        lv_obj_align(rem, LV_ALIGN_TOP_MID, 0, ls ? 172 : 204);
+        s_usage_rem = rem;
+    } else {
+        s_usage_bar = NULL;
+        s_usage_sub = NULL;
+        s_usage_rem = NULL;
+        lv_obj_t *off = lv_label_create(scr);
+        muted(off);
+        lv_label_set_text(off, T(STR_NO_LIMIT));
+        lv_obj_align(off, LV_ALIGN_TOP_MID, 0, ls ? 130 : 160);
+    }
+}
+
+static void on_open_usage(lv_event_t *e)
+{
+    (void)e;
+    show(build_settings_usage);
+}
+
+// 1 Hz refresh of an open listening-time screen. A live web toggle of
+// daily_limit.enabled changes the screen structure, so that edge re-shows the
+// screen instead of patching widgets (same trick as tick_apply_config).
+static void usage_screen_refresh(void)
+{
+    if (s_active_builder != build_settings_usage) {
+        return;
+    }
+    const config_t *c = config_store_get();
+    const bool limited = c && c->daily_limit.enabled;
+    if (limited != (s_usage_bar != NULL)) {
+        show(build_settings_usage);
+        return;
+    }
+    int used = usage_today(date_today());
+    char buf[64], hm[24];
+    fmt_hm(hm, sizeof(hm), used);
+    if (s_usage_fig && strcmp(lv_label_get_text(s_usage_fig), hm) != 0) {
+        lv_label_set_text(s_usage_fig, hm);
+    }
+    if (!limited) {
+        return;
+    }
+    const int limit_s = c->daily_limit.minutes * 60;
+    if (s_usage_bar) {
+        lv_bar_set_range(s_usage_bar, 0, limit_s);  // follows a live minutes change
+        lv_bar_set_value(s_usage_bar, used > limit_s ? limit_s : used, LV_ANIM_OFF);
+    }
+    if (s_usage_sub) {
+        char lim[24];
+        fmt_hm(lim, sizeof(lim), limit_s);
+        snprintf(buf, sizeof(buf), "%s / %s", hm, lim);
+        if (strcmp(lv_label_get_text(s_usage_sub), buf) != 0) {
+            lv_label_set_text(s_usage_sub, buf);
+        }
+    }
+    if (s_usage_rem) {
+        int left = limit_s - used;
+        fmt_hm(hm, sizeof(hm), left > 0 ? left : 0);
+        snprintf(buf, sizeof(buf), T(STR_REMAINING_FMT), hm);
+        if (strcmp(lv_label_get_text(s_usage_rem), buf) != 0) {
+            lv_label_set_text(s_usage_rem, buf);
+        }
     }
 }
 
@@ -5535,16 +5809,19 @@ static void build_settings(lv_obj_t *scr)
     add_back_button(scr);
     add_title_wide(scr, T(STR_SETTINGS));
     int bx, by;
-    menu_pos(0, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_CONFIG_PAGE_QR, bx, by, 38, on_set_web);
-    menu_pos(1, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_SETUP_HOTSPOT_QR, bx, by, 38, on_set_ap);
-    menu_pos(2, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_BELL, STR_ALARM, bx, by, 38, on_open_settings_alarm);
-    menu_pos(3, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_TINT, STR_THEME, bx, by, 38, on_open_theme);
-    menu_pos(4, 5, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_LOOP, STR_ORIENTATION, bx, by, 38, on_toggle_orientation);
+    const int h = menu_h(6);
+    menu_pos(0, 6, &bx, &by);
+    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_CONFIG_PAGE_QR, bx, by, h, on_set_web);
+    menu_pos(1, 6, &bx, &by);
+    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_SETUP_HOTSPOT_QR, bx, by, h, on_set_ap);
+    menu_pos(2, 6, &bx, &by);
+    add_menu_button_t(scr, LV_SYMBOL_BELL, STR_ALARM, bx, by, h, on_open_settings_alarm);
+    menu_pos(3, 6, &bx, &by);
+    add_menu_button_t(scr, LV_SYMBOL_TINT, STR_THEME, bx, by, h, on_open_theme);
+    menu_pos(4, 6, &bx, &by);
+    add_menu_button_t(scr, LV_SYMBOL_LOOP, STR_ORIENTATION, bx, by, h, on_toggle_orientation);
+    menu_pos(5, 6, &bx, &by);
+    add_menu_button_t(scr, LV_SYMBOL_BARS, STR_LISTEN_TIME, bx, by, h, on_open_usage);
 }
 
 // ---- Toast (brief top-layer message, survives screen changes) ----
@@ -5920,6 +6197,7 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "settings_alarm",    build_settings_alarm },
     { "settings_web",      build_settings_web },
     { "settings_ap",       build_settings_ap },
+    { "settings_usage",    build_settings_usage },
     { "setup",             build_setup },
     { "favorites",         build_favorites },
     { "now_playing",       build_now_playing },
@@ -6473,6 +6751,42 @@ static void tick_sendspin(void)
 // or the time line (podcast/SD); cleared by the next play (ui_play). A
 // local-file failure gets its own wording: "check the connection" would
 // point the user at Wi-Fi for a corrupt SD file.
+// Pick up a cover produced by the worker (tag callback or podcast file) and
+// hand it to LVGL. The bitmap is TAKEN, so this task owns it from here on and
+// frees the previous one only once no widget can still point at it: the
+// screen is rebuilt in the same call. Cheap when nothing changed (one
+// counter read), so it rides the 50 ms tick and the cover appears as soon as
+// the decoder reaches the tag.
+static void tick_art(void)
+{
+    uint32_t gen = art_gen();
+    if (gen == s_art_gen_seen) return;
+    s_art_gen_seen = gen;
+
+    uint8_t *px = NULL;
+    uint16_t w = 0, h = 0;
+    bool got = art_take(&px, &w, &h);
+    if (!got && !s_art_px) return;  // cleared and nothing was shown: no rebuild
+
+    bool was_shown = s_art_px != NULL && s_active_builder == build_now_playing;
+    if (s_art_px) { heap_caps_free(s_art_px); s_art_px = NULL; }
+    if (got) {
+        s_art_px = px;
+        s_art_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+        s_art_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+        s_art_dsc.header.w      = w;
+        s_art_dsc.header.h      = h;
+        s_art_dsc.header.stride = (uint32_t)w * 2;
+        s_art_dsc.data          = s_art_px;
+        s_art_dsc.data_size     = (uint32_t)w * h * 2;
+    }
+    // The cover is part of the layout (the text column shifts beside it), so
+    // an arrival or a departure needs a rebuild, not a widget tweak.
+    if ((was_shown || s_art_px) && s_active_builder == build_now_playing) {
+        show(build_now_playing);
+    }
+}
+
 static void tick_now_playing(void)
 {
     if (s_play_failed && s_active_builder == build_now_playing) {
@@ -6990,6 +7304,7 @@ static void tick_1hz(void)
 
     tick_stats_and_usage();
     tick_clock_labels();
+    usage_screen_refresh();  // display only, position in this list not load-bearing
 
     tick_sec_t sec = { .cfg = config_store_get(), .wall = time(NULL) };
     long step = (long)(sec.wall - s_last_wall);
@@ -7090,6 +7405,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_favorites();
     tick_volume_limit();
     tick_sendspin();
+    tick_art();  // before tick_now_playing: a rebuild here re-creates its labels
     tick_now_playing();
     tick_remote();
     tick_advance();

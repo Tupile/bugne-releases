@@ -371,6 +371,138 @@ static void test_utf8_trim_partial(void)
     CHECK_STR(s, "ok", "stray continuation byte after ascii");
 }
 
+
+// ---- APIC (embedded cover) ---------------------------------------------------
+
+// One v2.3/v2.4 APIC frame: 4-char id, size, flags, then the picture payload
+// (encoding, MIME + NUL, picture type, description + NUL, image bytes).
+static size_t id3_apic(uint8_t *b, bool v24, const char *mime, uint8_t pic_type,
+                       const char *desc, const void *img, size_t ilen)
+{
+    size_t mlen = strlen(mime), dlen = strlen(desc);
+    uint32_t fsize = (uint32_t)(1 + mlen + 1 + 1 + dlen + 1 + ilen);
+    memcpy(b, "APIC", 4);
+    if (v24) {
+        b[4] = (fsize >> 21) & 0x7F; b[5] = (fsize >> 14) & 0x7F;
+        b[6] = (fsize >> 7) & 0x7F;  b[7] = fsize & 0x7F;
+    } else {
+        b[4] = fsize >> 24; b[5] = fsize >> 16; b[6] = fsize >> 8; b[7] = fsize;
+    }
+    b[8] = b[9] = 0;
+    size_t o = 10;
+    b[o++] = 0;                                   // encoding: Latin-1
+    memcpy(b + o, mime, mlen); o += mlen; b[o++] = 0;
+    b[o++] = pic_type;
+    memcpy(b + o, desc, dlen); o += dlen; b[o++] = 0;
+    memcpy(b + o, img, ilen); o += ilen;
+    return o;
+}
+
+// A stand-in for JPEG bytes: only the SOI marker is inspected.
+static const uint8_t JPG[] = { 0xFF, 0xD8, 0xFF, 0xE0, 0x11, 0x22, 0x33 };
+
+static void test_apic_basic(void)
+{
+    uint8_t b[512];
+    size_t n = id3_header(b, false, 0);
+    n += id3_apic(b + n, false, "image/jpeg", 3, "cover", JPG, sizeof(JPG));
+    size_t off = 0, len = 0;
+    CHECK(tags_find_apic(b, n, &off, &len), "apic: not found");
+    CHECK(len == sizeof(JPG), "apic: len %zu != %zu", len, sizeof(JPG));
+    CHECK(off + len <= n, "apic: past the buffer");
+    CHECK(memcmp(b + off, JPG, sizeof(JPG)) == 0, "apic: wrong bytes");
+}
+
+static void test_apic_front_cover_wins(void)
+{
+    // A back cover (type 4) first, then the front (type 3): the front wins
+    // even though it comes later.
+    static const uint8_t BACK[] = { 0xFF, 0xD8, 0xAA, 0xAA, 0xAA };
+    uint8_t b[512];
+    size_t n = id3_header(b, false, 0);
+    n += id3_apic(b + n, false, "image/jpeg", 4, "back", BACK, sizeof(BACK));
+    n += id3_apic(b + n, false, "image/jpeg", 3, "front", JPG, sizeof(JPG));
+    size_t off = 0, len = 0;
+    CHECK(tags_find_apic(b, n, &off, &len), "apic front: not found");
+    CHECK(len == sizeof(JPG) && memcmp(b + off, JPG, sizeof(JPG)) == 0,
+          "apic front: picked the wrong picture");
+}
+
+static void test_apic_v22(void)
+{
+    // v2.2 PIC: 3-char id, 3-byte size, and a 3-char format instead of a MIME.
+    uint8_t b[256];
+    size_t n = id3_header(b, false, 0);
+    b[3] = 2;  // make it a v2.2 tag
+    size_t body = 1 + 3 + 1 + 1 + sizeof(JPG);  // enc + "JPG" + type + desc NUL + img
+    memcpy(b + n, "PIC", 3);
+    b[n + 3] = (uint8_t)(body >> 16); b[n + 4] = (uint8_t)(body >> 8); b[n + 5] = (uint8_t)body;
+    size_t o = n + 6;
+    b[o++] = 0;
+    memcpy(b + o, "JPG", 3); o += 3;
+    b[o++] = 3;
+    b[o++] = 0;  // empty description
+    memcpy(b + o, JPG, sizeof(JPG)); o += sizeof(JPG);
+    size_t off = 0, len = 0;
+    CHECK(tags_find_apic(b, o, &off, &len), "apic v22: not found");
+    CHECK(len == sizeof(JPG) && memcmp(b + off, JPG, sizeof(JPG)) == 0,
+          "apic v22: wrong bytes");
+}
+
+static void test_apic_utf16_description(void)
+{
+    // Encoding 1 (UTF-16): the description ends on a 00 00 pair, not one NUL.
+    uint8_t b[256];
+    size_t n = id3_header(b, false, 0);
+    const uint8_t desc16[] = { 0xFF, 0xFE, 'c', 0, 'v', 0, 0, 0 };  // BOM + "cv" + NUL NUL
+    const char *mime = "image/jpeg";
+    size_t mlen = strlen(mime);
+    uint32_t fsize = (uint32_t)(1 + mlen + 1 + 1 + sizeof(desc16) + sizeof(JPG));
+    memcpy(b + n, "APIC", 4);
+    b[n + 4] = fsize >> 24; b[n + 5] = fsize >> 16; b[n + 6] = fsize >> 8; b[n + 7] = fsize;
+    b[n + 8] = b[n + 9] = 0;
+    size_t o = n + 10;
+    b[o++] = 1;
+    memcpy(b + o, mime, mlen); o += mlen; b[o++] = 0;
+    b[o++] = 3;
+    memcpy(b + o, desc16, sizeof(desc16)); o += sizeof(desc16);
+    memcpy(b + o, JPG, sizeof(JPG)); o += sizeof(JPG);
+    size_t off = 0, len = 0;
+    CHECK(tags_find_apic(b, o, &off, &len), "apic utf16: not found");
+    CHECK(len == sizeof(JPG) && memcmp(b + off, JPG, sizeof(JPG)) == 0,
+          "apic utf16: wrong bytes");
+}
+
+static void test_apic_rejects_non_jpeg(void)
+{
+    static const uint8_t PNG[] = { 0x89, 'P', 'N', 'G', 0x0D };
+    uint8_t b[256];
+    size_t n = id3_header(b, false, 0);
+    n += id3_apic(b + n, false, "image/png", 3, "", PNG, sizeof(PNG));
+    size_t off = 0, len = 0;
+    CHECK(!tags_find_apic(b, n, &off, &len), "apic: PNG must be refused");
+
+    // A JPEG MIME whose payload is not actually a JPEG is refused too.
+    n = id3_header(b, false, 0);
+    n += id3_apic(b + n, false, "image/jpeg", 3, "", PNG, sizeof(PNG));
+    CHECK(!tags_find_apic(b, n, &off, &len), "apic: bad payload must be refused");
+}
+
+static void test_apic_truncates(void)
+{
+    // Every truncation of a valid tag must be refused or answer in bounds,
+    // never read past the buffer (house pattern, see the wrap tests).
+    uint8_t b[512];
+    size_t n = id3_header(b, false, 0);
+    n += id3_apic(b + n, false, "image/jpeg", 3, "cover", JPG, sizeof(JPG));
+    for (size_t cut = 0; cut < n; cut++) {
+        size_t off = 0, len = 0;
+        if (tags_find_apic(b, cut, &off, &len)) {
+            CHECK(off + len <= cut, "apic truncated at %zu: reported past the end", cut);
+        }
+    }
+}
+
 int main(void)
 {
     test_id3v23_basic();
@@ -385,6 +517,12 @@ int main(void)
     test_vorbis_wrap_lengths();
     test_vorbis_truncates();
     test_utf8_trim_partial();
+    test_apic_basic();
+    test_apic_front_cover_wins();
+    test_apic_v22();
+    test_apic_utf16_description();
+    test_apic_rejects_non_jpeg();
+    test_apic_truncates();
 
     if (g_fail) {
         printf("test_tags: %d FAILURE(S)\n", g_fail);

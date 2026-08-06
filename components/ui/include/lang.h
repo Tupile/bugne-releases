@@ -131,6 +131,10 @@ typedef enum {
     STR_TALKIE_LEFT_MEMO,   // toast: peer not in talkie mode, stored as a memo
     STR_LAMP,               // home tile + lamp screen title
     STR_HA_TITLE,           // home assistant section title
+    STR_LISTEN_TIME,        // settings menu row + usage screen title
+    STR_TODAY,              // usage screen: overline above today's figure
+    STR_NO_LIMIT,           // usage screen: daily limit disabled
+    STR_REMAINING_FMT,      // usage screen: printf with one %s (formatted duration left)
     STR__COUNT
 } str_id_t;
 
