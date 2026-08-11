@@ -1,17 +1,21 @@
 # Releasing an update on GitHub
 
-Devices can install the latest GitHub release from their web page
-(Firmware tab: check, then one-click install). Publish workflow:
+A device installs the latest GitHub release from its own web page. Open the
+Settings tab, check for a release, then install it with one click.
 
-1. Bump `version.txt` (the app version embedded in the image) and commit.
-2. Build, then create a GitHub release on the public releases repo
-   (Tupile/bugne-releases, see GH_OTA_URL in web_config.c), tag it the same
-   version (e.g. `v1.0.1`) and attach `build/bugne.bin` as an asset named
-   exactly `bugne.bin`. Also attach the first-flash bundle as a second
-   asset named exactly `bugne-flash.zip`: a zip of `bootloader.bin`,
-   `partition-table.bin`, `ota_data_initial.bin`, `bugne.bin` (from
-   `build/`) and `tools/flash.sh` (as `flash.sh`), all at the zip root.
+Publish a release in two steps:
 
-The device compares the release binary's embedded version with its own:
-any difference offers the update (so publishing an older version offers a
-deliberate downgrade). A crash-looping image is rolled back automatically.
+1. Bump `version.txt`, which carries the app version embedded in the image, and
+   commit it.
+2. Build, then create a GitHub release on the public releases repository
+   (Tupile/bugne-releases, see `GH_OTA_URL` in `web_config.c`). Tag it with the
+   same version, `v1.0.1` for example. Attach `build/bugne.bin` as an asset
+   named exactly `bugne.bin`. Attach the first-flash bundle as a second asset
+   named exactly `bugne-flash.zip`. That zip holds `bootloader.bin`,
+   `partition-table.bin`, `ota_data_initial.bin` and `bugne.bin` from `build/`,
+   plus `tools/flash.sh` renamed to `flash.sh`, all at the root of the zip.
+
+The device compares the version embedded in the release binary with its own
+version. Any difference offers the update, so an older version published on
+purpose offers a downgrade. The bootloader reverts an image that crashes at
+boot.

@@ -1,11 +1,11 @@
 # Third-party notices
 
-Bugne is MIT licensed (see [LICENSE](../LICENSE)), but the firmware binary
+Bugne is MIT licensed, see [LICENSE](../LICENSE). The firmware binary also
 links the third-party components below. Their license texts ship with their
-sources: vendored files keep the license in their header, managed components
-are fetched by the IDF component manager with their LICENSE file. When
-distributing prebuilt binaries (for example the bugne-releases repository),
-link or copy this file next to them.
+sources. A vendored file keeps its license in its header. A managed component
+arrives from the IDF component manager with its LICENSE file. When you
+distribute a prebuilt binary, for example on the bugne-releases repository,
+copy this file next to it or link to it.
 
 ## Vendored in this repository
 
@@ -24,6 +24,7 @@ link or copy this file next to them.
 | LVGL (includes QR-Code-generator by Project Nayuki, MIT) | LVGL Kft | MIT | https://lvgl.io |
 | esp_lvgl_port, esp_lcd_ili9341, esp_lcd_touch, esp_lcd_touch_ft5x06 | Espressif | Apache-2.0 | https://components.espressif.com |
 | esp_codec_dev, mdns, esp_websocket_client, cmake_utilities | Espressif | Apache-2.0 | https://components.espressif.com |
+| esp_jpeg (JPEG decoder for the cover art) | Espressif | Apache-2.0 | https://components.espressif.com |
 | esp_audio_codec | Espressif | Espressif Modified MIT | https://components.espressif.com |
 | littlefs IDF port | Brian Pugh | MIT | https://github.com/joltwallet/esp_littlefs |
 | littlefs core | Arm Limited, Christopher Haster | BSD-3-Clause | https://github.com/littlefs-project/littlefs |

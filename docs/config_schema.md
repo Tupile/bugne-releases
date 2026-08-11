@@ -1,11 +1,17 @@
 # Config schema
 
-This is a contract the rest of the firmware depends on. Stored in internal
-flash (LittleFS) at `/littlefs/config.json`. It is always present and works
-without an SD card.
+This file is a contract. The rest of the firmware depends on it. The device
+stores it in internal flash (LittleFS), at `/littlefs/config.json`. It is
+always present, and it works without an SD card.
 
-Secrets are never in this file. Wi-Fi credentials and the hashed config-page
-password live in NVS, written by the config web page.
+This file holds no secret. NVS holds the Wi-Fi credentials, the hashed web page
+password and the Home Assistant token. NVS also holds the state that is not
+configuration:
+
+- the usage counter of the day (`use_day` and `use_sec`),
+- the best score of the game and its Leitner levels (`leitner`, 100 bytes),
+- the resume position of the last episode,
+- the pending download job.
 
 ## Location
 
@@ -89,7 +95,7 @@ password live in NVS, written by the config web page.
 | `ui.accent` | int | Button/accent color, 0 to 4: 0 Blue (default), 1 Ocean, 2 Pink, 3 Forest, 4 Orange. |
 | `ui.game` | int | Times-tables game on the home screen: 1 shown (default), 0 hidden. |
 | `ui.tuner` | int | Instrument tuner on the home screen (experimental feature): 1 shown (default), 0 hidden. |
-| `ui.memo_rx` | int | Accept voice memos from other Bugnes: 1 yes (default), 0 refuse. The receive endpoint (`POST /api/memo?from=<name>`) is unauthenticated on the LAN but bounded: content length required and capped at 2 MB, at most 20 stored memos (own + received, further memos are refused, never purged), WAV format checked (PCM 16-bit mono 16 kHz), sender name sanitized, storage path chosen by the receiver (`/sdcard/memos/`). |
+| `ui.memo_rx` | int | Accept voice memos from other Bugnes: 1 yes (default), 0 refuse. The receive route `POST /api/memo?from=<name>` needs no authentication on the LAN, because a peer does not know the password. It is bounded instead: the content length is required and capped at 2 MB, the device stores 20 memos at most (own plus received, and it refuses the next ones instead of deleting any), it checks the WAV format (PCM 16-bit mono 16 kHz), it sanitizes the sender name, and it chooses the storage path itself (`/sdcard/memos/`). |
 | `ui.tz` | string | POSIX TZ string, used for the wall clock and the alarm. Default `CET-1CEST,M3.5.0,M10.5.0/3` (Paris). Set from the web Settings page, live-applied (no reboot). |
 | `alarms[]` | array | Up to 3 alarms (`CFG_MAX_ALARMS`), e.g. weekday / weekend / free use. Each entry has the fields below. A legacy single `alarm` object (pre-B3 firmware) is still read forever and maps to `alarms[0]`; it is parsed BEFORE `alarms`, so if a config carries both, the array wins. Only `alarms` is written back. |
 | `alarms[].enabled` | int | 0 (default) or 1. |
@@ -113,57 +119,65 @@ password live in NVS, written by the config web page.
 | `favorites[].path` | string | SD path relative to the SD root (type 1). Required for type 1, empty otherwise. |
 | `favorites[].title` | string | Display title. |
 
-The alarm engine (ui.c, 1 Hz tick) checks all 3 alarms every second. When
-several are due on the same minute, the lowest index fires (the others wait
-for their next scheduled day); only one alarm can ring or be snoozed at a
-time (`s_alarm_active_idx` records which). Firing: wakes the screen, plays
-the configured source (or a generated beep if the source cannot play), ramps
-the volume up over 60 s, and shows a dedicated ringing screen with Stop and
-Snooze (+10 min). Snooze is RAM-only (an epoch timestamp, forgotten on
-reboot). There is no catch-up firing: a missed alarm during a reboot, or
-while ringing or snoozed, is not replayed; the next scheduled day fires
-normally.
+The alarm engine (ui.c, 1 Hz tick) checks the 3 alarms every second. When
+several alarms are due in the same minute, the lowest index fires. The others
+wait for their next scheduled day. Only one alarm rings or is snoozed at a
+time, and `s_alarm_active_idx` records which one. To fire, the engine wakes the
+screen and plays the configured source. It then raises the volume over 60 s and
+shows the ringing screen, with Stop and Snooze (+10 min). It plays a generated
+beep when the source cannot play. Snooze lives in RAM only: it is an epoch timestamp, and
+a reboot forgets it. The engine never catches up. It does not replay an alarm
+missed during a reboot, or missed while another alarm rings or is snoozed. The
+next scheduled day fires normally.
 
-Sunrise light: during the `sunrise` minutes before an alarm fires, if the
-screen is asleep and nothing is playing, the device turns the panel back on
-with a minimal dark clock screen and ramps the backlight (LEDC PWM)
-linearly from 5% to 100% until the fire time, when the ringing screen takes
-over. A touch cancels the ramp (normal wake to home; the same occurrence
-does not re-enter). Disabling the alarm mid-ramp restores the sleeping
-screen; playback starting mid-ramp also cancels. Quiet hours never block it
-(the alarm exemption applies).
+Sunrise light: during the `sunrise` minutes before an alarm fires, the device
+lights the panel again with a minimal dark clock screen. It then ramps the
+backlight (LEDC PWM) linearly from 5% to 100%, until the fire time. The ringing
+screen then takes over. The ramp starts only when the screen sleeps and nothing
+plays. A touch cancels the ramp: the device wakes to the home screen and the
+same occurrence does not start again. Disabling the alarm during the ramp
+restores the sleeping screen. A playback that starts during the ramp also
+cancels it. Quiet hours never block the ramp, because the alarm exemption
+applies.
 
-Quiet hours are up to 2 parental no-playback windows. A window is half-open:
-it blocks from the start time up to, but not including, the end time. A
-window that crosses midnight (start later than end) belongs to its start
-day: the part after midnight checks the previous day's bit, not the current
-day's. A window where start equals end is off. Before the first SNTP sync
-nothing is blocked, since there is no reliable time yet. The alarm and its
-beep fallback always sound, even during a quiet window. Podcast downloads
-and auto-maintenance keep running during quiet hours. Quiet hours are
-configured on the web page only, the device never writes this object.
+Quiet hours are up to 2 parental no-playback windows. A window is half-open: it
+blocks from the start time, up to but not including the end time. A window that
+crosses midnight (start later than end) belongs to its start day. Its part
+after midnight reads the bit of the previous day, not the bit of the current
+day. A window where start equals end is off. Nothing is blocked before the
+first SNTP sync, because the time is not reliable yet. The alarm and its beep
+fallback always sound, also during a quiet window. Podcast downloads and
+auto-maintenance also continue during a quiet window. The web page is the only
+writer of this object: the device never writes it.
 
-The daily usage limit caps how long the child can use the device per local
-day. A second of usage is counted while audio is audibly playing (SD, web
-radio, podcast, Music Assistant; not paused, not the alarm or its beep, not
-the tuner) or while the game screen is open with the display awake. When the
-configured minutes are used up, playback and the game are blocked exactly
-like quiet hours (tiles greyed, toast) until local midnight; a toast warns
-the child 5 minutes before. The alarm always rings and never consumes the
-quota. The consumed counter is not in this file: it persists in NVS
-(`use_day`/`use_sec`, written about once per minute of usage) so a power
-cycle cannot reset it. Before the first SNTP sync nothing is counted or
-blocked. Like quiet hours, this object is configured on the web page only.
+The daily usage limit caps the time the child uses the device per local day.
+The device counts one second of usage in two cases. The first is audio that
+plays audibly: SD card, web radio, podcast or Music Assistant. The second is
+the game screen open with the display awake. The device counts nothing while
+the audio pauses, during the alarm and its beep, and during the tuner. At the
+end of the configured minutes it blocks the playback and the game until local
+midnight, exactly like quiet hours. The tiles turn grey and a message explains
+the refusal. Another message warns the child 5 minutes before that point. The
+alarm always rings and never consumes the quota. The child reads the counted
+time and the time left on the device, under Settings, then "Listening time".
+This file does not hold the counter. NVS holds it, in `use_day` and `use_sec`,
+written about once per minute of usage, so a power cut cannot reset it. The
+device counts and blocks nothing before the first SNTP sync. Like quiet hours,
+the web page is the only writer of this object.
 
-Favorites are up to 12 quick-play entries shown behind a Favorites home tile
-(the tile is hidden when the list is empty). The device adds and removes the
-currently playing content through the star button on the now-playing screen
-(`config_store_favorite_add`/`config_store_favorite_remove`); the web Play
+Favorites are up to 12 quick-play entries, behind a Favorites home tile. The
+tile is hidden while the list is empty. The device adds and removes the content
+that plays through the star button of the now-playing screen
+(`config_store_favorite_add` and `config_store_favorite_remove`). The web Play
 tab lists, reorders and deletes them through the full-config save.
 
 ## Rules
 
-- The config web page and the firmware both read and write this file.
-- Validate on read: missing optional fields fall back to defaults, an unknown
-  `schema_version` is rejected.
-- Bound all string lengths and list sizes when parsing.
+- The web page and the firmware both read and write this file.
+- Validate on read. A missing optional field falls back to its default. An
+  unknown `schema_version` is rejected.
+- Bound every string length and every list size at parse time.
+- A field that the parser reads must also go into the serializer. A device-side
+  setter rewrites the whole file from memory. So the next tap on the device
+  drops a field that only the parser knows.
+  `test/host/check_config_parity.py` checks this.

@@ -1,9 +1,9 @@
 # Hardware: LCDWIKI ES3C28P
 
-ESP32-S3, 8MB PSRAM, 16MB flash. The pin map below is fixed, confirmed from
-vendor docs and on real hardware. Do not change it. Note: the vendor doc swaps
-the two I2S data pins; the values below (DOUT = IO8, DIN = IO6) are the
-hardware-confirmed ones.
+ESP32-S3, 8MB PSRAM, 16MB flash. The pin map below is fixed. It comes from the
+vendor documents and it is confirmed on real hardware. Do not change it. Note:
+the vendor document swaps the two I2S data pins. The values below are the
+confirmed ones: DOUT is IO8 and DIN is IO6.
 
 ## GPIO map
 
@@ -44,15 +44,16 @@ Free expansion pins: IO2, IO14, IO21. IO3 is a strapping pin, avoid it.
 
 The ES8311 codec (0x18) and the FT6336G touch (0x38) share one I2C bus on
 IO16 (SDA) and IO15 (SCL). Create a single `i2c_master_bus` in the `board`
-component and pass that one handle to both the codec driver and the touch
-driver. Initialising the bus twice is the most common crash cause on this board.
+component. Pass that one handle to the codec driver and to the touch driver.
+Do not initialize the bus twice: that is the most common crash cause on this
+board.
 
 ## Battery sense
 
-LiPo 1S 3.7V, charged by an onboard TP4054, on a JST 1.25mm 2-pin BAT port.
-Battery voltage is read on an ADC pin through a 1:1 divider, so multiply the
-reading by 2 to get the real voltage. The exact ADC pin is not confirmed yet.
-Keep it as a TODO constant in the `board` component until verified on hardware.
+LiPo 1S 3.7V, charged by an onboard TP4054, on a JST 1.25mm 2-pin BAT port. An
+ADC pin reads the battery voltage through a 1:1 divider. Multiply the reading
+by 2 to get the real voltage. The exact ADC pin is not confirmed yet. Keep it
+as a TODO constant in the `board` component until you verify it on hardware.
 
 ## Power note
 

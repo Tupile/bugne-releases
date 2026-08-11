@@ -1,13 +1,19 @@
 # Podcast manifest schema
 
-This is a contract. The manifest is identical whether written by the on-device
-yxml parser or by a future Python companion script. The player only ever reads
-the manifest, never the raw RSS.
+This file is a contract. The manifest is the same whether the on-device yxml
+parser writes it, or a future Python companion script writes it. The player
+reads the manifest only. It never reads the raw RSS.
 
 ## Location
 
-- One manifest per podcast on the SD card: `/sdcard/podcasts/<id>/manifest.json`,
-  where `<id>` is the podcast `id` from the config (see config_schema.md).
+- One manifest per podcast, in internal flash:
+  `/littlefs/podcasts/<id>.json`, where `<id>` is the podcast `id` from the
+  config (see config_schema.md). The manifest is in flash, not on the SD card,
+  so the podcast list works without an SD card.
+- One optional cover image per podcast, on the SD card:
+  `/sdcard/podcasts/<folder>/cover.jpg`, where `<folder>` is the sanitized
+  podcast title. The device downloads it after a refresh writes the manifest.
+  The manifest does not name that file: the reader builds the path.
 
 ## Schema (version 1)
 
@@ -37,21 +43,24 @@ the manifest, never the raw RSS.
 | `schema_version` | int | Schema version. Currently 1. |
 | `podcast_title` | string | Podcast title from the feed. |
 | `rss_url` | string | Source feed URL. |
-| `generated_at` | string | ISO 8601 UTC timestamp of when the manifest was written. |
-| `episodes` | array | At most 30, newest first. |
+| `generated_at` | string | ISO 8601 UTC timestamp. It records when the writer wrote the manifest. |
+| `episodes` | array | Newest first. The writer emits one episode at a time and the reader parses one at a time, so the list is not bounded by RAM. `PODCAST_MAX_EPISODES` (300) is a safety cap against a pathological feed. |
 | `episodes[].title` | string | Episode title. |
 | `episodes[].date` | string | ISO 8601 publication date. |
-| `episodes[].duration_seconds` | int | Duration in seconds, 0 if unknown. |
-| `episodes[].episode_url` | string | Remote audio URL, streamed over HTTPS if not cached. |
-| `episodes[].cache_path` | string | Local SD path used when the episode is cached: `/sdcard/podcasts/<podcast title>/<episode title>.<ext>`. Both name parts are sanitized for FAT (illegal characters dropped, length bounded). |
-| `episodes[].cached` | bool | Always written `false`. The reader ignores it and re-derives it from whether `cache_path` exists on the SD card, so it stays correct after a refresh rewrites the manifest. |
+| `episodes[].duration_seconds` | int | Duration in seconds. 0 means unknown. |
+| `episodes[].episode_url` | string | Remote audio URL. The device streams it over HTTPS when the episode is not cached. |
+| `episodes[].cache_path` | string | Local SD path of the cached episode: `/sdcard/podcasts/<podcast title>/<episode title>.<ext>`. The writer sanitizes both name parts for FAT: it drops the illegal characters and bounds the length. |
+| `episodes[].cached` | bool | The writer always writes `false`. The reader ignores this field and derives the answer from a `stat()` of `cache_path`, so a refresh that rewrites the manifest cannot make it wrong. |
 
 ## Rules
 
-- Cap at the 30 most recent episodes.
-- All RSS text is untrusted input: bound every string length and escape before
-  storing or displaying.
-- Playback prefers the cached SD file. If `cached` is false or the SD is absent,
-  stream `episode_url` over HTTPS.
-- Caching to SD is an explicit, user-triggered, occasional operation. It never
-  runs in the background during playback.
+- All RSS text is untrusted input. Bound every string length, and escape the
+  text before you store it or show it.
+- Playback prefers the cached SD file. It streams `episode_url` over HTTPS when
+  the file is absent, or when there is no SD card.
+- A download to the SD card never runs during playback. The download engine
+  starts only after the device stays idle, and it stops as soon as a play
+  starts. The web page starts a download job, and the idle auto-maintenance
+  starts one too.
+- The cover download is best effort. A failure there must never cost the
+  episode list.

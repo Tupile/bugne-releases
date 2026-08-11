@@ -2,18 +2,20 @@
 
 # Bugne
 
-Bugne is an open-source children's audio player firmware for the ESP32-S3.
-It runs on the LCDWIKI ES3C28P board and plays audio from three sources, all
-mixed through one shared output:
+Bugne is open-source firmware for a children's audio player. It runs on the
+ESP32-S3, on the LCDWIKI ES3C28P board. It plays audio from three sources
+through one shared output:
 
-- Local music on a microSD card (MP3, FLAC, AAC/.m4a, Ogg Opus/Vorbis).
-- Web radio and podcasts streamed over HTTP and HTTPS.
+- Local music on a microSD card: MP3, FLAC, AAC (.m4a) and Ogg Opus/Vorbis.
+- Web radio and podcasts, streamed over HTTP and HTTPS.
 - Sendspin, the native playback protocol of Music Assistant.
 
-It has a touch screen UI (LVGL), a self-hosted Wi-Fi setup flow with a captive
-portal, and an embedded web page to manage Wi-Fi, web radios and podcast feeds.
+The device has a touch screen with an LVGL interface. For the first setup it
+raises its own Wi-Fi hotspot with a captive portal. After that it serves a web
+page where a parent manages the Wi-Fi networks, the web radios and the podcast
+feeds.
 
-To get from purchase to the first radio, follow the
+To go from purchase to the first web radio, follow the
 [quick start](docs/quickstart.md) ([français](docs/quickstart_fr.md)).
 
 <p>
@@ -26,86 +28,128 @@ The firmware was developed with substantial help from AI coding assistants.
 
 ## Status
 
-Feature-complete and validated on real hardware (display, touch, audio, SD,
-Wi-Fi, Sendspin sync, OTA including rollback). Builds with ESP-IDF 5.5. The
-implemented feature set:
+Version 1.9.0. Feature-complete and validated on real hardware: display, touch,
+audio, SD card, Wi-Fi, Sendspin sync, and firmware update with rollback. It
+builds with ESP-IDF 5.5. The implemented feature set:
 
-- Config in flash: NVS (Wi-Fi credentials, hashed config password) and LittleFS
-  (config.json). Works with or without an SD card.
-- Shared audio output (ES8311 + I2S) with a single-active-source arbiter.
-- Three sources: SD files, HTTP/HTTPS web radio and podcasts, and a Sendspin
-  player auto-discovered by Music Assistant over mDNS.
-- Per-radio pre-roll ad skip: an optional decoy connection absorbs the ad some
-  stations (e.g. OUI FM) inject at connect time, so the real connection joins
-  the live stream directly.
-- MP3 (dr_mp3), FLAC (dr_flac), AAC-LC (esp_audio_codec + minimp4 for .m4a) and
-  Ogg Opus/Vorbis (esp_audio_codec simple decoder) decoding shared by the SD and
-  stream sources.
-- SD music library: browse by artist and album, tags, auto-advance playlists.
-- On-device podcast RSS parsing (yxml) to a fixed-schema manifest, unlimited
-  episodes, per-podcast intro skip. You can find podcast RSS feeds by searching
-  on [podcastindex.org](https://podcastindex.org) and clicking "Copy RSS".
-- Episode download to SD: background engine that runs only when idle, survives
-  reboots, plus idle auto-maintenance (refresh feeds, download new, rescan).
-- Podcast playback resume: the last interrupted episode's position is saved to
-  NVS as it plays and offered again on the next reboot (survives power loss).
-- Home-grown Wi-Fi manager: AP provisioning with a captive portal, station mode
-  with strongest-first selection and roaming, mDNS hostname.
-- Embedded config web page behind a login: responsive (phone and desktop,
-  light/dark), bilingual EN/FR. Wi-Fi, radios, podcasts, playback control,
-  music library browsing and playback, SD file manager, config backup/restore,
-  logs, and OTA firmware update with automatic rollback of a crash-looping
-  image. Updates install from a local .bin upload or straight from the latest
-  GitHub release (check + one-click install in Settings).
-- Times-tables practice game (1 to 10): on-screen keypad, 10/5 points per
-  first/second try, endless play, persistent high score.
-- Instrument tuner (experimental): microphone-based pitch detection on device.
-- Voice memos: record a message with the onboard mic (up to 60 s,
-  level-normalized), keep it on the SD card or send it to another Bugne
-  discovered on the same network; the receiver shows a discreet red-dot
-  alert on its home screen and plays the memo from the Memos screen.
-  Parents can turn off receiving from the web page.
-- Walkie-talkie mode: hold-to-talk voice messages between two Bugnes on
-  the same network, auto-played when both devices are on the talkie
-  screen (stored as a regular memo otherwise, never lost); ephemeral by
-  design, with a volume slider on the memo and talkie screens.
-- LVGL touch UI, kid-friendly "playful tiles" design: home screen of large
-  rounded tiles, round transport buttons, floating mini player bar, card list
-  rows, now-playing with big bold titles, two setup QR codes, screen sleep,
-  selectable UI language (English/French), selectable portrait or landscape
-  orientation, and a theme picker (light or dark mode plus 5 accent colors);
-  orientation and theme switch from the on-device Settings or the web page,
-  applied live, no reboot.
-- Alarm clock: up to 3 alarms, weekday schedule, each plays a configured web
-  radio or SD track with a gentle 60 s volume ramp, snooze (+10 min) or stop on
-  the ringing screen, and an always-sounds beep fallback if the source cannot
-  play. Home screen shows the current time (SNTP, configurable timezone) when
-  idle.
-- Quiet hours (parental): up to 2 time windows (start, end, weekdays) during
-  which all playback (local, streaming, Music Assistant) and the game are
-  blocked on the device; home tiles grey out and a toast explains the refusal.
-  The alarm still rings. Configured on the web Settings tab only.
-- Listening statistics (parental): minutes listened per day per source (radio,
-  podcast, SD, Music Assistant) and the most-listened titles, shown as a
-  last-7-days chart on the web Settings tab. The data stays on the device only
-  (never sent anywhere), keeps the last 30 days, and is resettable at any time
-  from the web page.
-- Remote screen capture for debugging: GET /api/screenshot returns the live
-  screen as a BMP (tools/screenshot.py fetches and converts to PNG), and
-  POST /api/debug/nav navigates the UI to a named screen.
-- Home Assistant ready: the device advertises an `_bugne._tcp` mDNS service
-  (TXT: id, version, name) for discovery, exposes a GET /api/status snapshot
-  (version, uptime, RSSI, free RAM, SD usage) and POST /api/reboot, and the
-  whole API accepts stateless HTTP Basic auth. The device can also act as a
-  client to toggle a Home Assistant light directly from a home screen tile
-  (experimental, configured with a Long-Lived Access Token).
+**Storage**
+
+- NVS holds the Wi-Fi credentials and the hashed web page password.
+- LittleFS holds `config.json`.
+- The device works with or without an SD card. The SD card holds bulk content
+  only: music, cached episodes and manifests.
+
+**Audio**
+
+- One shared output: the ES8311 codec and the I2S driver. An arbiter keeps one
+  source active at a time.
+- The SD card source and the stream source share the same decoders. The
+  decoders are MP3 (dr_mp3), FLAC (dr_flac), AAC-LC (esp_audio_codec, with
+  minimp4 for `.m4a`) and Ogg Opus/Vorbis (esp_audio_codec).
+- SD music library: browse by artist and by album, read the tags, play a folder
+  with auto-advance.
+- Cover art on the now-playing screen, in landscape only. The device reads the
+  picture from the MP3 or the FLAC file. Each podcast feed keeps one cover
+  image on the SD card.
+- Per-radio pre-roll ad skip. Some stations send an advertisement when a player
+  connects, OUI FM for example. A decoy connection absorbs that advertisement,
+  so the real connection joins the live audio directly.
+
+**Podcasts**
+
+- The device parses the RSS feed itself with yxml and writes a fixed-schema
+  manifest. The number of episodes is not limited. Each feed can skip its own
+  intro.
+- Search for a feed on [podcastindex.org](https://podcastindex.org) and click
+  "Copy RSS" to get its address.
+- The device downloads episodes to the SD card. The download engine runs only
+  when nothing plays, and continues after a reboot. When the device stays idle
+  it also refreshes the feeds, downloads the new episodes and rescans the SD
+  card.
+- The device saves the position of the episode as it plays. After a power cut
+  it offers to continue from that position.
+
+**Network and web page**
+
+- This project has its own Wi-Fi manager. It provisions through its own access
+  point and a captive portal. In station mode it joins the strongest known
+  network and roams between networks. It publishes an mDNS host name.
+- The firmware embeds the web page, and a login protects it. The page works on
+  a phone and on a desktop, in light and dark mode, in English and in French.
+- From that page a parent manages the Wi-Fi networks, the web radios and the
+  podcast feeds. A parent also controls the playback, browses the music library
+  and the files on the SD card, and reads the logs. The page saves and restores
+  the configuration, and it installs a firmware update.
+- A firmware update installs from a local `.bin` file, or directly from the
+  latest GitHub release. The bootloader reverts an image that crashes at boot.
+- Crash report: the device writes a coredump to flash. The web page then shows
+  the failed task, the program counter, the cause and the backtrace.
+
+**On the device**
+
+- The interface uses large rounded tiles, round transport buttons, a floating
+  mini player bar and card list rows. Two QR codes help with the setup.
+- The screen sleeps while the audio plays.
+- The parent selects the language (English or French), the orientation
+  (portrait or landscape), light or dark mode, and one of 5 accent colors. The
+  device applies each change at once, with no reboot.
+- Alarm clock: up to 3 alarms with a weekday schedule. An alarm plays a web
+  radio or a track from the SD card and raises the volume over 60 s. It can
+  also light the screen before it rings. The child snoozes it for 10 min or
+  stops it on the ringing screen. A beep sounds if the source cannot play.
+- The home screen shows the time when nothing plays. The time comes from SNTP,
+  with a configurable time zone.
+- Times-tables game, 1 to 10. The child answers on a keypad and scores 10 or 5
+  points. The device keeps the best score.
+- The game also has a review mode, built on a Leitner system. The device asks
+  more often about the facts the child knows less well. It counts the mastered
+  facts out of 100. "Express 20" starts a session of 20 questions.
+- Instrument tuner (experimental): the microphone detects the pitch on the
+  device.
+- Voice memos: the child records a message with the microphone, up to 60 s. The
+  device keeps it on the SD card, or sends it to another Bugne on the same
+  network. The receiver shows a small red dot on its home screen and plays the
+  memo from the Memos screen. A parent stops the reception from the web page.
+- Walkie-talkie mode: the child holds a button to talk to another Bugne. The
+  message plays at once if both devices show the talkie screen. If not, the
+  device stores it as a normal memo, so it loses no message. The device deletes
+  these messages after playback.
+- Listening time screen: the child reads the time counted today and the time
+  that remains before the daily limit.
+
+**Parental controls**
+
+- Quiet hours: up to 2 windows with a start, an end and a weekday selection.
+  During a window the device refuses every playback, local, streamed or from
+  Music Assistant, and refuses the game. The home tiles turn grey and a message
+  explains the refusal. The alarm still rings.
+- Daily limit: a maximum listening time per day. The counter survives a reboot.
+  The device warns the child 5 min before the limit.
+- Listening statistics: minutes per day and per source (radio, podcast, SD
+  card, Music Assistant) plus the most played titles, as a 7-day chart. The
+  data stays on the device, covers the last 30 days, and the parent erases it
+  at any time.
+- Maximum volume, and two switches that hide the game tile or the tuner tile.
+- The parent sets all of these on the web Settings tab.
+
+**Music Assistant and Home Assistant**
+
+- Music Assistant finds the device over mDNS as a Sendspin player. The
+  now-playing screen shows the title, the artist and the progress. A drag on
+  the progress bar seeks the session when the server offers seek.
+- The device publishes an `_bugne._tcp` mDNS service with the TXT records `id`,
+  `version` and `name`.
+- The whole HTTP API accepts stateless HTTP Basic authentication, so Home
+  Assistant calls it without a login step.
+- The device can switch a Home Assistant light from a home screen tile
+  (experimental). It needs a long-lived access token.
 
 ## Hardware
 
 Board: **LCDWIKI ES3C28P**, an ESP32-S3 board (16MB flash, 8MB PSRAM) with a
 2.8 inch ILI9341V display, FT6336G capacitive touch, ES8311 audio codec,
-microphone, microSD slot and USB port. Buy it under that exact reference; the
-speaker ships with the board. The full pin map and board notes live in
+microphone, microSD slot and USB port. Buy it under that exact reference. The
+speaker ships with the board. The full pin map and the board notes are in
 [docs/hardware.md](docs/hardware.md).
 
 If you wish to support this project at no extra cost, you can order the board via this
@@ -115,42 +159,41 @@ unavailable). Make sure to select the touch model "ES3C28P". For users in France
 you can also use this [Amazon affiliate link](https://amzn.to/3RrzKT1).
 
 The board also carries a TP4054 charger and a JST 1.25mm port for a 1S 3.7V
-LiPo battery. Battery operation is untested by this project so far: possible
-in principle, not recommended yet. Power the device over USB.
+LiPo battery. This project did not test battery operation. It is possible in
+principle, but not recommended yet. Power the device over USB.
 
 ## 3D-printed case
 
-[case/](case) holds ready-to-print designs plus the CadQuery scripts that
-generate them (edit a script and rerun it to customize). You can also find
-them ready for BambuLab printers on
+[case/](case) holds ready-to-print designs and the CadQuery scripts that
+generate them. Edit a script and run it again to customize a design. The same
+designs are ready for BambuLab printers on
 [MakerWorld](https://makerworld.com/en/models/3073793-bugne-open-source-internet-radio-podcast-player):
 
 - Plain two-piece case (`es3c28p_boitier_facade.stl` +
-  `es3c28p_boitier_fond.stl`): portrait, sound exits through a grid in the
-  back. Closes with 4x M3 20mm screws entering from the back (heads recessed
-  in the back panel, no visible screws on the front).
+  `es3c28p_boitier_fond.stl`): portrait, the sound exits through a grid in the
+  back. It closes with 4x M3 20mm screws that enter from the back. The heads
+  are recessed in the back panel, so no screw shows on the front.
 - Vintage radio cabinet (`es3c28p_radio_*.stl`): landscape, vertical front,
   sloped back, screwed rear cover.
 - Seventies cabinet (`es3c28p_seventies_*.stl`, a 1970s-inspired look):
   landscape, perforated speaker plate.
   This is the recommended design.
 
-The radio and seventies cabinets print face down (front on the bed) with no
-supports. Their `*_corps+grille.step` files combine body and grille so a
-multi-color printer can put the grille plate in a second color; a single
-color works too. Assembly needs 4x M3 6mm screws to mount the board to the
-case, and 4x M3 10mm screws to close the case cover.
+Print the radio cabinet and the seventies cabinet face down, front on the bed,
+with no supports. Their `*_corps+grille.step` files combine the body and the
+grille, so a multi-color printer can print the grille plate in a second color.
+A single color works too. Assembly needs 4x M3 6mm screws for the board and 4x
+M3 10mm screws for the cover.
 
-If you don't have a 3D printer, services like PCBWay or Craftcloud can print
-and deliver the case to you. For the seventies model, you should order
-`es3c28p_seventies_corps+grille.step` and `es3c28p_seventies_capot.stl`
-printed in PLA.
+If you do not have a 3D printer, a service such as PCBWay or Craftcloud prints
+the case and delivers it. For the seventies model, order
+`es3c28p_seventies_corps+grille.step` and `es3c28p_seventies_capot.stl` in PLA.
 
 <img src="case/preview_seventies_face.png" alt="Seventies cabinet" height="220">
 
 ## Build
 
-Requires ESP-IDF v5.5 or newer.
+The build needs ESP-IDF v5.5 or newer.
 
 ```
 idf.py set-target esp32s3
@@ -160,39 +203,90 @@ idf.py -p <PORT> flash monitor
 
 ## First flash (new board)
 
-A brand-new board needs one full flash over USB: bootloader, partition
-table, OTA data and app. The `bugne.bin` release asset alone is an OTA app
-image; it updates a running Bugne but cannot bootstrap a blank chip.
+A new board needs one full flash over USB: bootloader, partition table, OTA
+data and app. The `bugne.bin` release asset is an OTA app image only. It
+updates a running device, but it cannot start a blank chip.
 
-The easiest way to flash a new board is via the browser (Chrome, Edge, Opera):
-1. Connect the board to your computer over USB (press and hold the BOOT button while plugging in the cable to enter bootloader mode).
+The easiest way is the browser (Chrome, Edge, Opera):
+1. Connect the board to your computer over USB. Hold the BOOT button while you
+   plug the cable in, to enter bootloader mode.
 2. Open the [Web Flasher](https://tupile.github.io/bugne-releases/tools/web-flasher/) page.
-3. Click "Installer", select your board's COM port, and wait for completion.
+3. Click "Installer", select the COM port of the board, and wait for the end of
+   the installation.
 
-For offline use or advanced troubleshooting, you can still flash via the CLI using the release bundle:
+For offline use, or for troubleshooting, flash from the command line with the
+release bundle:
 1. Download `bugne-flash.zip` from the
    [latest release](https://github.com/Tupile/bugne-releases/releases/latest)
    and unzip it.
 2. Install esptool: `pip install esptool`.
-3. Plug the board in over USB and run `./flash.sh [PORT] [--erase]`.
-   `--erase` wipes the whole flash first (recommended for a clean first
-   install). If no serial port shows up, hold the BOOT button while
-   plugging in the cable to enter download mode, then retry.
+3. Connect the board over USB and run `./flash.sh [PORT] [--erase]`. `--erase`
+   clears the whole flash first. Use it for a first install. If no serial port
+   shows up, hold the BOOT button while you plug the cable in, then try again.
 
-On Windows without the script, run the `esptool write_flash` command spelled out in `flash.sh`
-(same four binaries, offsets 0x0 / 0x8000 / 0xf000 / 0x20000).
+On Windows without the script, run the `esptool write_flash` command written in
+`flash.sh`. It uses the same four binaries, at the offsets 0x0, 0x8000, 0xf000
+and 0x20000.
 
-With ESP-IDF installed, `idf.py -p <PORT> flash` from a source build (see
-Build above) does the same in one step.
+With ESP-IDF installed, `idf.py -p <PORT> flash` from a source build does the
+same in one step. See Build above.
 
-After flashing, the device boots into Bugne and, with no Wi-Fi stored,
-raises its `Bugne-Setup-XXXX` hotspot: the
-[quick start](docs/quickstart.md) walks through the setup.
+After the flash the device starts Bugne. With no Wi-Fi stored it raises its
+`Bugne-Setup-XXXX` hotspot. The [quick start](docs/quickstart.md) goes through
+the setup.
+
+## HTTP API
+
+The device serves this API on port 80. Every route needs the web page login or
+an `Authorization: Basic` header. `POST /api/memo` is the only exception. A
+peer device does not know the password, so that route stays open on the local
+network. A parent can switch it off.
+
+`POST /api/config` is a full replace. Read the configuration with
+`GET /api/config`, change it, then post the whole object back.
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/` | GET | The web page, or the login page |
+| `/login` | POST | Open a session |
+| `/api/config` | GET, POST | Read or replace `config.json` |
+| `/api/wifi` | GET, POST | Read or write the saved Wi-Fi networks |
+| `/api/scan` | GET | Scan for the Wi-Fi networks in range |
+| `/api/password` | POST | Change the web page password |
+| `/api/playback` | GET, POST | Read the playback state, or play, pause, stop, set the volume, seek |
+| `/api/library` | GET | Browse the SD music library |
+| `/api/library/scan` | POST | Rescan the SD music library |
+| `/api/sd/list` | GET | List a folder on the SD card |
+| `/api/sd/download` | GET | Download a file from the SD card |
+| `/api/sd/upload` | POST | Upload a file to the SD card |
+| `/api/sd/mkdir` | POST | Create a folder on the SD card |
+| `/api/sd/delete` | POST | Delete a file or a folder on the SD card |
+| `/api/podcasts/refresh` | GET, POST | Start a feed refresh, or read its progress |
+| `/api/podcasts/download` | GET, POST | Start an episode download, or read its progress |
+| `/api/podcasts/download/cancel` | POST | Cancel the download job |
+| `/api/memo` | POST | Receive a voice memo from another device |
+| `/api/stats` | GET | Read the listening statistics |
+| `/api/stats/reset` | POST | Erase the listening statistics |
+| `/api/status` | GET | Snapshot: id, name, version, uptime, free RAM, RSSI, IP, SD card usage, reset reason, crash flag |
+| `/api/logs` | GET | Read the recent log lines |
+| `/api/coredump` | GET | Read the crash report |
+| `/api/coredump/erase` | POST | Erase the crash report |
+| `/api/ota` | POST | Install an uploaded firmware image |
+| `/api/ghota/check` | GET | Compare the running version with the latest GitHub release |
+| `/api/ghota` | POST | Install the latest GitHub release |
+| `/api/ghota/status` | GET | Read the progress of that installation |
+| `/api/reboot` | POST | Stop the playback and restart the device |
+| `/api/screenshot` | GET | Capture the live screen as a BMP file |
+| `/api/debug/nav` | POST | Open a named screen |
+
+`tools/screenshot.py <ip> <out.png>` fetches a screenshot and converts it to
+PNG. `tools/manual_shots.py` uses `/api/debug/nav` and `/api/screenshot` to
+regenerate the manual images.
 
 ## Documentation
 
 - [docs/quickstart.md](docs/quickstart.md): quick start, from purchase to the
-  first radio ([français](docs/quickstart_fr.md)).
+  first web radio ([français](docs/quickstart_fr.md)).
 - [docs/manual/en.md](docs/manual/en.md): user manual, with screenshots.
 - [docs/manual/fr.md](docs/manual/fr.md): mode d'emploi en français.
 - [docs/hardware.md](docs/hardware.md): GPIO map and board notes.
@@ -203,5 +297,5 @@ raises its `Bugne-Setup-XXXX` hotspot: the
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Third-party components and their licenses are
+MIT. See [LICENSE](LICENSE). The third-party components and their licenses are
 listed in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).
