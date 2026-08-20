@@ -2788,6 +2788,7 @@ static void show_resume_modal(void)
     lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(modal, 12, 0);
+    lv_obj_set_style_text_font(modal, &bugne_font_14, 0);
 
     // Title
     lv_obj_t *title = lv_label_create(modal);
@@ -2818,6 +2819,7 @@ static void show_resume_modal(void)
 
     lv_obj_t *lbl_resume = lv_label_create(btn_resume);
     lv_label_set_text(lbl_resume, T(STR_RESUME_ACTION));
+    lv_obj_set_style_text_font(lbl_resume, &bugne_font_14, 0);
     lv_obj_center(lbl_resume);
 
     // Depuis le début Button
@@ -2834,6 +2836,7 @@ static void show_resume_modal(void)
 
     lv_obj_t *lbl_start = lv_label_create(btn_start);
     lv_label_set_text(lbl_start, T(STR_RESUME_FROM_START));
+    lv_obj_set_style_text_font(lbl_start, &bugne_font_14, 0);
     lv_obj_set_style_text_color(lbl_start, th_dark() ? lv_color_white() : lv_color_black(), 0);
     lv_obj_center(lbl_start);
 
