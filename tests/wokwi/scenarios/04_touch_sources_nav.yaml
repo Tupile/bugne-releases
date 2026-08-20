@@ -1,0 +1,48 @@
+name: "Touch Sources Navigation Test"
+version: 1
+author: "Bugne"
+steps:
+  - wait-serial: "Bugne booting"
+  - delay: 3500ms
+  # Tap Web Radio tile (top-left)
+  - touch:
+      part-id: lcd
+      x: 60
+      y: 110
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Back
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Podcasts tile (top-right)
+  - touch:
+      part-id: lcd
+      x: 180
+      y: 110
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Back
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Memos tile (bottom-right)
+  - touch:
+      part-id: lcd
+      x: 180
+      y: 190
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Back
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms

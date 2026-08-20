@@ -1,0 +1,62 @@
+name: "Full UI Touch Regression Suite"
+version: 1
+author: "Bugne"
+steps:
+  - wait-serial: "Bugne booting"
+  - delay: 3500ms
+  # 1. Open Settings
+  - touch:
+      part-id: lcd
+      x: 218
+      y: 26
+      duration: 120ms
+  - delay: 1500ms
+  # 2. Back to Home
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms
+  # 3. Open Web Radios
+  - touch:
+      part-id: lcd
+      x: 60
+      y: 110
+      duration: 120ms
+  - delay: 1500ms
+  # 4. Back to Home
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms
+  # 5. Open Podcasts
+  - touch:
+      part-id: lcd
+      x: 180
+      y: 110
+      duration: 120ms
+  - delay: 1500ms
+  # 6. Back to Home
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms
+  # 7. Open Memos
+  - touch:
+      part-id: lcd
+      x: 180
+      y: 190
+      duration: 120ms
+  - delay: 1500ms
+  # 8. Back to Home
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms

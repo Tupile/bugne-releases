@@ -30,11 +30,13 @@ static void test_set_language(void)
     lang_set_code("fr");
     CHECK_STR(lang_code(), "fr", "set lang code fr");
     CHECK_STR(T(STR_NOW_PLAYING), "Lecture en cours", "fr translation for STR_NOW_PLAYING");
+    CHECK_STR(T(STR_RESUME_PROMPT), "Reprendre la lecture ?", "fr translation for STR_RESUME_PROMPT");
 
     // Switch back
     lang_set_code("en");
     CHECK_STR(lang_code(), "en", "set lang code en");
     CHECK_STR(T(STR_NOW_PLAYING), "Now playing", "en translation for STR_NOW_PLAYING");
+    CHECK_STR(T(STR_RESUME_PROMPT), "Resume playback?", "en translation for STR_RESUME_PROMPT");
 }
 
 static void test_invalid_language(void)

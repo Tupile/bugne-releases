@@ -1,0 +1,6 @@
+name: "Boot & Home Screen Test"
+version: 1
+author: "Bugne"
+steps:
+  - wait-serial: "Bugne booting"
+  - delay: 3500ms

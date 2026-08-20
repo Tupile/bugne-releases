@@ -24,6 +24,7 @@
 #include "pitch.h"
 #include "memo.h"
 #include "ha_client.h"
+#include "podcast_resume.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -371,6 +372,18 @@ static config_resume_t s_resume;
 static uint32_t s_resume_last_pos_ms;
 static int64_t  s_resume_last_write_us;
 #define RESUME_WRITE_INTERVAL_US (12LL * 1000000)  // throttle NVS writes during playback
+
+static uint32_t s_generic_resume_last_pos_ms;
+static int64_t  s_generic_resume_last_write_us;
+
+typedef struct {
+    play_ctx_t play_ctx;
+    int index;
+    char path_or_url[256];
+    uint32_t pos_ms;
+} resume_dialog_ctx_t;
+
+static resume_dialog_ctx_t s_resume_dlg;
 // Set when the user presses Stop. The audio layer takes a moment to actually tear
 // down (a source can hold seconds of buffered PCM), so the mini bar would linger.
 // This hides it at once; it self-clears once playback has really gone idle.
@@ -471,6 +484,29 @@ static size_t s_lib_track_count;
 static char (*s_play_lib_titles)[LIB_NAME_MAX];  // PSRAM: playing album snapshot
 static char (*s_play_lib_paths)[LIB_PATH_MAX];   // PSRAM
 static size_t s_play_lib_count;
+
+static bool get_current_playing_path_or_url(char *out_path, size_t max_len)
+{
+    if (s_play_ctx == PLAY_CTX_SD) {
+        if (!s_play_sd_names || s_play_index < 0 || (size_t)s_play_index >= s_play_sd_count) return false;
+        char tmp[16 + SD_DIR_MAX + SOURCE_SD_NAME_MAX];
+        if (s_play_sd_dir[0]) {
+            snprintf(tmp, sizeof(tmp), "/sdcard/%s/%s", s_play_sd_dir, s_play_sd_names[s_play_index]);
+        } else {
+            snprintf(tmp, sizeof(tmp), "/sdcard/%s", s_play_sd_names[s_play_index]);
+        }
+        strlcpy(out_path, tmp, max_len);
+        return true;
+    } else if (s_play_ctx == PLAY_CTX_PODCAST) {
+        if (!s_play_eps || s_play_index < 0 || (size_t)s_play_index >= s_play_ep_count) return false;
+        const podcast_episode_t *ep = &s_play_eps[s_play_index];
+        const char *p = ep->cached ? ep->cache_path : ep->episode_url;
+        if (!p || p[0] == '\0') return false;
+        strlcpy(out_path, p, max_len);
+        return true;
+    }
+    return false;
+}
 
 // ---- Backlight (LEDC PWM) ----
 // The backlight pin used to be a plain GPIO; it is driven by LEDC PWM so the
@@ -1160,6 +1196,7 @@ static void play_task(void *arg)
                 if ((s_play_ctx == PLAY_CTX_SD || s_play_ctx == PLAY_CTX_PODCAST) &&
                     source_sd_completed()) {
                     s_advance = true;
+                    podcast_resume_clear(req.target);
                     // The episode finished on its own: no resume point to keep.
                     if (s_play_ctx == PLAY_CTX_PODCAST && s_resume.active) {
                         s_resume.active = false;
@@ -1197,6 +1234,7 @@ static void play_task(void *arg)
                     // stays put.
                     if (s_play_ctx == PLAY_CTX_PODCAST && source_stream_completed()) {
                         s_advance = true;
+                        podcast_resume_clear(req.target);
                         if (s_resume.active) {
                             s_resume.active = false;
                             resume_persist();
@@ -1394,6 +1432,18 @@ static void ui_stop(void)
     audio_output_off();       // mute now so playback stops instantly, not after buffers drain
     audio_set_paused(false);  // release a paused decode loop so it can unwind
     sleep_clear();            // a stop always disarms the sleep timer
+
+    if (s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) {
+        char path_or_url[256];
+        if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
+            uint32_t pos = 0, dur = 0;
+            decode_progress(&pos, &dur);
+            uint32_t total_dur = (s_play_ctx == PLAY_CTX_PODCAST && s_np_dur_override_ms > 0)
+                                 ? s_np_dur_override_ms : dur;
+            podcast_resume_set(path_or_url, pos, total_dur);
+        }
+    }
+
     source_sd_stop();
     source_stream_stop();
     // Deliberate stop: forget the resume point (only an interruption resumes).
@@ -2268,7 +2318,7 @@ static void build_webradios(lv_obj_t *scr)
 // show_np is true also open the now-playing screen; auto-advance passes false
 // to leave the user on whatever screen they browsed to. Out-of-range indices
 // are ignored (list edges).
-static void play_ctx_at_ex(int i, bool show_np)
+static void play_ctx_at_ex_skip(int i, bool show_np, int skip_override_ms)
 {
     if (play_denied()) return;
     if (s_play_ctx == PLAY_CTX_SD) {
@@ -2280,7 +2330,8 @@ static void play_ctx_at_ex(int i, bool show_np)
         } else {
             snprintf(path, sizeof(path), "/sdcard/%s", s_play_sd_names[i]);
         }
-        ui_play(true, path, s_play_sd_names[i], 0);
+        int skip_ms = (skip_override_ms >= 0) ? skip_override_ms : 0;
+        ui_play(true, path, s_play_sd_names[i], skip_ms);
         s_np_dur_override_ms = 0;  // SD: use the decoder's duration
     } else if (s_play_ctx == PLAY_CTX_PODCAST) {
         // Navigate the playing podcast's own snapshot, not the browse buffer.
@@ -2291,16 +2342,21 @@ static void play_ctx_at_ex(int i, bool show_np)
         // trimmed) skips the intro at playback.
         size_t cpl = strlen(ep->cache_path);
         bool cached_mp3 = ep->cached && cpl >= 4 && strcasecmp(ep->cache_path + cpl - 4, ".mp3") == 0;
-        int skip_ms = cached_mp3 ? 0 : s_play_podcast_skip_s * 1000;
-        // Resume: if this is the episode interrupted (by a power loss) last
-        // session, start from the saved position instead of the intro skip.
-        // pos_ms is on the intro-inclusive timeline; a trimmed cached MP3's own
-        // timeline already starts skip_seconds in, so subtract that back out.
-        if (s_resume.active && s_resume.podcast_id == s_play_podcast_id &&
-            strcmp(s_resume.episode_url, ep->episode_url) == 0) {
-            int32_t resume_skip = (int32_t)s_resume.pos_ms -
-                (cached_mp3 ? s_play_podcast_skip_s * 1000 : 0);
-            skip_ms = resume_skip > 0 ? resume_skip : 0;
+        int skip_ms;
+        if (skip_override_ms >= 0) {
+            skip_ms = skip_override_ms;
+        } else {
+            skip_ms = cached_mp3 ? 0 : s_play_podcast_skip_s * 1000;
+            // Resume: if this is the episode interrupted (by a power loss) last
+            // session, start from the saved position instead of the intro skip.
+            // pos_ms is on the intro-inclusive timeline; a trimmed cached MP3's own
+            // timeline already starts skip_seconds in, so subtract that back out.
+            if (s_resume.active && s_resume.podcast_id == s_play_podcast_id &&
+                strcmp(s_resume.episode_url, ep->episode_url) == 0) {
+                int32_t resume_skip = (int32_t)s_resume.pos_ms -
+                    (cached_mp3 ? s_play_podcast_skip_s * 1000 : 0);
+                skip_ms = resume_skip > 0 ? resume_skip : 0;
+            }
         }
         // Cover: one JPEG per feed, cached next to its episodes. Staged for
         // the worker to load (see load_cover_file); it must be set BEFORE
@@ -2333,13 +2389,19 @@ static void play_ctx_at_ex(int i, bool show_np)
         if (!s_play_lib_paths || i < 0 || (size_t)i >= s_play_lib_count) return;
         char path[16 + LIB_PATH_MAX];
         snprintf(path, sizeof(path), "/sdcard/%s", s_play_lib_paths[i]);
-        ui_play(true, path, s_play_lib_titles[i], 0);
+        int skip_ms = (skip_override_ms >= 0) ? skip_override_ms : 0;
+        ui_play(true, path, s_play_lib_titles[i], skip_ms);
         s_np_dur_override_ms = 0;
     } else {
         return;
     }
     s_play_index = i;
     if (show_np) show(build_now_playing);
+}
+
+static void play_ctx_at_ex(int i, bool show_np)
+{
+    play_ctx_at_ex_skip(i, show_np, -1);
 }
 
 static void play_ctx_at(int i) { play_ctx_at_ex(i, true); }
@@ -2649,22 +2711,183 @@ static void sd_dir_pop(void)
     else       s_sd_dir[0] = '\0';
 }
 
+static void on_resume_dlg_reprendre(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *backdrop = lv_obj_get_user_data(btn);
+    s_play_ctx = s_resume_dlg.play_ctx;
+    play_ctx_at_ex_skip(s_resume_dlg.index, true, (int)s_resume_dlg.pos_ms);
+    if (backdrop) {
+        lv_obj_delete(backdrop);
+    }
+}
+
+static void on_resume_dlg_debut(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *backdrop = lv_obj_get_user_data(btn);
+    podcast_resume_clear(s_resume_dlg.path_or_url);
+    s_play_ctx = s_resume_dlg.play_ctx;
+    play_ctx_at_ex_skip(s_resume_dlg.index, true, 0);
+    if (backdrop) {
+        lv_obj_delete(backdrop);
+    }
+}
+
+static void on_resume_dlg_close(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *backdrop = lv_obj_get_user_data(btn);
+    if (backdrop) {
+        lv_obj_delete(backdrop);
+    }
+}
+
+static void on_backdrop_clicked(lv_event_t *e)
+{
+    lv_obj_t *backdrop = lv_event_get_current_target(e);
+    lv_obj_t *target = lv_event_get_target(e);
+    if (target == backdrop) {
+        lv_obj_delete(backdrop);
+    }
+}
+
+static void show_resume_modal(void)
+{
+    lv_obj_t *backdrop = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(backdrop, scr_w(), scr_h());
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+    lv_obj_set_style_radius(backdrop, 0, 0);
+    lv_obj_align(backdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(backdrop, on_backdrop_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *modal = lv_obj_create(backdrop);
+    lv_obj_set_width(modal, scr_w() - 40);
+    lv_obj_set_height(modal, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(modal, col_surface(), 0);
+    lv_obj_set_style_border_width(modal, 0, 0);
+    lv_obj_set_style_radius(modal, RADIUS_BTN, 0);
+    lv_obj_set_style_pad_all(modal, 16, 0);
+    lv_obj_align(modal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(modal, 12, 0);
+
+    // Title
+    lv_obj_t *title = lv_label_create(modal);
+    lv_label_set_text(title, T(STR_RESUME_PROMPT));
+    lv_obj_set_style_text_font(title, &bugne_font_20, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(title, LV_PCT(100));
+
+    // Time Label
+    char time_buf[64];
+    int min = (int)((s_resume_dlg.pos_ms / 1000) / 60);
+    int sec = (int)((s_resume_dlg.pos_ms / 1000) % 60);
+    snprintf(time_buf, sizeof(time_buf), T(STR_RESUME_AT_FMT), min, sec);
+
+    lv_obj_t *time_lbl = lv_label_create(modal);
+    lv_label_set_text(time_lbl, time_buf);
+    lv_obj_set_style_text_font(time_lbl, &bugne_font_14, 0);
+    muted(time_lbl);
+    lv_obj_set_style_text_align(time_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(time_lbl, LV_PCT(100));
+
+    // Reprendre Button
+    lv_obj_t *btn_resume = lv_button_create(modal);
+    lv_obj_set_width(btn_resume, LV_PCT(100));
+    lv_obj_set_height(btn_resume, 40);
+    lv_obj_set_user_data(btn_resume, backdrop);
+    lv_obj_add_event_cb(btn_resume, on_resume_dlg_reprendre, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *lbl_resume = lv_label_create(btn_resume);
+    lv_label_set_text(lbl_resume, T(STR_RESUME_ACTION));
+    lv_obj_center(lbl_resume);
+
+    // Depuis le début Button
+    lv_obj_t *btn_start = lv_button_create(modal);
+    lv_obj_set_width(btn_start, LV_PCT(100));
+    lv_obj_set_height(btn_start, 40);
+    lv_obj_set_user_data(btn_start, backdrop);
+    lv_obj_add_event_cb(btn_start, on_resume_dlg_debut, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_set_style_bg_color(btn_start, col_surface(), 0);
+    lv_obj_set_style_bg_color(btn_start, col_surface_pr(), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn_start, 1, 0);
+    lv_obj_set_style_border_color(btn_start, col_hairline(), 0);
+
+    lv_obj_t *lbl_start = lv_label_create(btn_start);
+    lv_label_set_text(lbl_start, T(STR_RESUME_FROM_START));
+    lv_obj_set_style_text_color(lbl_start, th_dark() ? lv_color_white() : lv_color_black(), 0);
+    lv_obj_center(lbl_start);
+
+    // Close button (X) in top right
+    lv_obj_t *close_btn = lv_button_create(modal);
+    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -4, 4);
+    lv_obj_set_size(close_btn, 24, 24);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(close_btn, 0, 0);
+    lv_obj_set_style_shadow_width(close_btn, 0, 0);
+    lv_obj_set_user_data(close_btn, backdrop);
+    lv_obj_add_event_cb(close_btn, on_resume_dlg_close, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(close_lbl, col_muted(), 0);
+    lv_obj_center(close_lbl);
+}
+
 static void on_sd_file(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
     int i = (int)(intptr_t)lv_obj_get_user_data(btn);
-    s_play_ctx = PLAY_CTX_SD;
-    // Snapshot the current folder + its playable files so navigation later stays
-    // on this folder even if the user browses elsewhere.
-    if (!s_play_sd_names) {
-        s_play_sd_names = heap_caps_malloc(sizeof(*s_play_sd_names) * SD_LIST_MAX, MALLOC_CAP_SPIRAM);
+    
+    char path[16 + SD_DIR_MAX + SOURCE_SD_NAME_MAX];
+    if (s_sd_dir[0]) {
+        snprintf(path, sizeof(path), "/sdcard/%s/%s", s_sd_dir, s_sd_names[i]);
+    } else {
+        snprintf(path, sizeof(path), "/sdcard/%s", s_sd_names[i]);
     }
-    if (s_play_sd_names) {
-        memcpy(s_play_sd_names, s_sd_names, sizeof(*s_play_sd_names) * s_sd_count);
-        s_play_sd_count = s_sd_count;
-        strlcpy(s_play_sd_dir, s_sd_dir, sizeof(s_play_sd_dir));
+
+    uint32_t dur = 0;
+    uint32_t pos_ms = podcast_resume_get(path, &dur);
+
+    if (pos_ms >= 5000 && (dur == 0 || pos_ms < dur - 5000)) {
+        s_play_ctx = PLAY_CTX_SD;
+        if (!s_play_sd_names) {
+            s_play_sd_names = heap_caps_malloc(sizeof(*s_play_sd_names) * SD_LIST_MAX, MALLOC_CAP_SPIRAM);
+        }
+        if (s_play_sd_names) {
+            memcpy(s_play_sd_names, s_sd_names, sizeof(*s_play_sd_names) * s_sd_count);
+            s_play_sd_count = s_sd_count;
+            strlcpy(s_play_sd_dir, s_sd_dir, sizeof(s_play_sd_dir));
+        }
+
+        s_resume_dlg.play_ctx = PLAY_CTX_SD;
+        s_resume_dlg.index = i;
+        strlcpy(s_resume_dlg.path_or_url, path, sizeof(s_resume_dlg.path_or_url));
+        s_resume_dlg.pos_ms = pos_ms;
+
+        show_resume_modal();
+    } else {
+        s_play_ctx = PLAY_CTX_SD;
+        if (!s_play_sd_names) {
+            s_play_sd_names = heap_caps_malloc(sizeof(*s_play_sd_names) * SD_LIST_MAX, MALLOC_CAP_SPIRAM);
+        }
+        if (s_play_sd_names) {
+            memcpy(s_play_sd_names, s_sd_names, sizeof(*s_play_sd_names) * s_sd_count);
+            s_play_sd_count = s_sd_count;
+            strlcpy(s_play_sd_dir, s_sd_dir, sizeof(s_play_sd_dir));
+        }
+        play_ctx_at(i);
     }
-    play_ctx_at(i);
 }
 
 static void on_sd_dir(lv_event_t *e)
@@ -2934,21 +3157,47 @@ static void on_episode(lv_event_t *e)
         if (s_ep_msg) lv_label_set_text(s_ep_msg, T(STR_WAITING_WIFI));
         return;
     }
-    s_play_ctx = PLAY_CTX_PODCAST;
-    // Snapshot the episode list shown here (the podcast being opened) so later
-    // navigation stays on this podcast even if the user browses elsewhere.
-    if (ensure_eps(&s_play_eps, &s_play_eps_cap, s_ep_count)) {
-        memcpy(s_play_eps, s_episodes, sizeof(*s_play_eps) * s_ep_count);
-        s_play_ep_count = s_ep_count;
+
+    const char *path_or_url = s_episodes[i].cached ? s_episodes[i].cache_path : s_episodes[i].episode_url;
+    uint32_t dur = 0;
+    uint32_t pos_ms = podcast_resume_get(path_or_url, &dur);
+
+    if (pos_ms >= 5000 && (dur == 0 || pos_ms < dur - 5000)) {
+        s_play_ctx = PLAY_CTX_PODCAST;
+        if (ensure_eps(&s_play_eps, &s_play_eps_cap, s_ep_count)) {
+            memcpy(s_play_eps, s_episodes, sizeof(*s_play_eps) * s_ep_count);
+            s_play_ep_count = s_ep_count;
+        }
+        s_play_podcast_skip_s = 0;
+        const config_t *c = config_store_get();
+        for (size_t k = 0; c && k < c->podcast_count; k++) {
+            if (c->podcasts[k].id == s_nav_podcast_id) { s_play_podcast_skip_s = c->podcasts[k].skip_seconds; break; }
+        }
+        s_play_podcast_id = s_nav_podcast_id;
+
+        s_resume_dlg.play_ctx = PLAY_CTX_PODCAST;
+        s_resume_dlg.index = i;
+        strlcpy(s_resume_dlg.path_or_url, path_or_url, sizeof(s_resume_dlg.path_or_url));
+        s_resume_dlg.pos_ms = pos_ms;
+
+        show_resume_modal();
+    } else {
+        s_play_ctx = PLAY_CTX_PODCAST;
+        // Snapshot the episode list shown here (the podcast being opened) so later
+        // navigation stays on this podcast even if the user browses elsewhere.
+        if (ensure_eps(&s_play_eps, &s_play_eps_cap, s_ep_count)) {
+            memcpy(s_play_eps, s_episodes, sizeof(*s_play_eps) * s_ep_count);
+            s_play_ep_count = s_ep_count;
+        }
+        // Remember this podcast's intro skip so streamed episodes skip it at playback.
+        s_play_podcast_skip_s = 0;
+        const config_t *c = config_store_get();
+        for (size_t k = 0; c && k < c->podcast_count; k++) {
+            if (c->podcasts[k].id == s_nav_podcast_id) { s_play_podcast_skip_s = c->podcasts[k].skip_seconds; break; }
+        }
+        s_play_podcast_id = s_nav_podcast_id;  // for the resume record and its lookup
+        play_ctx_at(i);
     }
-    // Remember this podcast's intro skip so streamed episodes skip it at playback.
-    s_play_podcast_skip_s = 0;
-    const config_t *c = config_store_get();
-    for (size_t k = 0; c && k < c->podcast_count; k++) {
-        if (c->podcasts[k].id == s_nav_podcast_id) { s_play_podcast_skip_s = c->podcasts[k].skip_seconds; break; }
-    }
-    s_play_podcast_id = s_nav_podcast_id;  // for the resume record and its lookup
-    play_ctx_at(i);
 }
 
 // Fetch + parse the RSS feed on the worker task. The episodes screen reloads
@@ -6862,6 +7111,24 @@ static void tick_now_playing(void)
                 if (s_play_eps && s_play_index >= 0 && (size_t)s_play_index < s_play_ep_count) {
                     played_mark(s_play_eps[s_play_index].episode_url);
                 }
+            }
+        }
+    }
+
+    // Persist the generic/podcast/SD resume position periodically to the generic
+    // resume store so it can be resumed across sessions when browsing SD files/podcasts.
+    if ((s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) && audio_is_active()) {
+        char path_or_url[256];
+        if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
+            uint32_t pos = 0, dur = 0;
+            decode_progress(&pos, &dur);
+            uint32_t total_dur = (s_play_ctx == PLAY_CTX_PODCAST && s_np_dur_override_ms > 0)
+                                 ? s_np_dur_override_ms : dur;
+            int64_t now = esp_timer_get_time();
+            if (pos != s_generic_resume_last_pos_ms && now - s_generic_resume_last_write_us >= RESUME_WRITE_INTERVAL_US) {
+                podcast_resume_set(path_or_url, pos, total_dur);
+                s_generic_resume_last_pos_ms = pos;
+                s_generic_resume_last_write_us = now;
             }
         }
     }

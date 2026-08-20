@@ -1,0 +1,34 @@
+name: "Touch Theme & Orientation Test"
+version: 1
+author: "Bugne"
+steps:
+  - wait-serial: "Bugne booting"
+  - delay: 3500ms
+  # Open Settings (gear icon top-right)
+  - touch:
+      part-id: lcd
+      x: 218
+      y: 26
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Theme/Tint button
+  - touch:
+      part-id: lcd
+      x: 180
+      y: 20
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Accent swatch / Dark toggle
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 160
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Back
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms

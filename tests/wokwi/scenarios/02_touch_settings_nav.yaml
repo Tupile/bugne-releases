@@ -1,0 +1,20 @@
+name: "Touch Settings Navigation Test"
+version: 1
+author: "Bugne"
+steps:
+  - wait-serial: "Bugne booting"
+  - delay: 3500ms
+  # Tap Settings button (top-right gear icon)
+  - touch:
+      part-id: lcd
+      x: 218
+      y: 26
+      duration: 120ms
+  - delay: 1500ms
+  # Tap Back button (top-left arrow)
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms

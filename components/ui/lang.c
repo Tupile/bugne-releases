@@ -136,6 +136,10 @@ static const lang_def_t LANGS[] = {
             [STR_TODAY]              = "Today",
             [STR_NO_LIMIT]           = "No daily limit set",
             [STR_REMAINING_FMT]      = "%s left today",
+            [STR_RESUME_PROMPT]      = "Resume playback?",
+            [STR_RESUME_AT_FMT]      = "Resume at %02d:%02d",
+            [STR_RESUME_ACTION]      = "Resume",
+            [STR_RESUME_FROM_START]  = "From start",
         },
     },
     {
@@ -263,6 +267,10 @@ static const lang_def_t LANGS[] = {
             [STR_TODAY]              = "Aujourd'hui",
             [STR_NO_LIMIT]           = "Pas de limite quotidienne",
             [STR_REMAINING_FMT]      = "Il reste %s aujourd'hui",
+            [STR_RESUME_PROMPT]      = "Reprendre la lecture ?",
+            [STR_RESUME_AT_FMT]      = "Reprendre à %02d:%02d",
+            [STR_RESUME_ACTION]      = "Reprendre",
+            [STR_RESUME_FROM_START]  = "Depuis le début",
         },
     },
 };

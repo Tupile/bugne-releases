@@ -135,6 +135,10 @@ typedef enum {
     STR_TODAY,              // usage screen: overline above today's figure
     STR_NO_LIMIT,           // usage screen: daily limit disabled
     STR_REMAINING_FMT,      // usage screen: printf with one %s (formatted duration left)
+    STR_RESUME_PROMPT,
+    STR_RESUME_AT_FMT,
+    STR_RESUME_ACTION,
+    STR_RESUME_FROM_START,
     STR__COUNT
 } str_id_t;
 

@@ -27,6 +27,7 @@
 #include "played.h"
 #include "stats.h"
 #include "memo.h"
+#include "podcast_resume.h"
 
 static const char *TAG = "bugne";
 
@@ -113,6 +114,7 @@ static void bg_init_task(void *arg)
         ESP_LOGE(TAG, "web_config_start() failed: %s", esp_err_to_name(wc_err));
     }
     TRY(source_sd_init());
+    podcast_resume_init();
     memo_clean_parts();  // drop memo temporaries left by a power cut mid-record/receive
     memo_clean_talkie(); // drop ephemeral walkie-talkie files left by a power cut
     library_load();  // load the SD music index if present (best-effort, no card = no-op)

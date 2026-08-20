@@ -141,6 +141,17 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_played"
 
+echo "=== building podcast_resume host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -DPODCAST_RESUME_DIR='"/tmp/bugne-resume-test"' \
+    -I stubs \
+    -I ../../components/podcast/include \
+    -o "$OUT/test_podcast_resume" \
+    test_podcast_resume.c ../../components/podcast/podcast_resume.c
+
+echo "=== running ==="
+"$OUT/test_podcast_resume"
+
 echo "=== building logstore host tests ==="
 # Single-TU build: the test includes logstore.c to drive its vprintf hook.
 gcc -std=c11 -Wall -Wextra -g \
