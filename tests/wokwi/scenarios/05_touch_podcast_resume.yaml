@@ -1,0 +1,34 @@
+name: "Touch Podcast SD Resume Test"
+version: 1
+author: "Bugne"
+steps:
+  - wait-serial: "Bugne booting"
+  - delay: 3500ms
+  # Tap Podcasts tile on Home (top-right)
+  - touch:
+      part-id: lcd
+      x: 180
+      y: 110
+      duration: 120ms
+  - delay: 1500ms
+  # Tap first podcast ("Les P'tits Bateaux") in the podcast list
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 80
+      duration: 120ms
+  - delay: 1500ms
+  # Tap first episode ("Pourquoi la mer est salée ?") in the episode table
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 80
+      duration: 120ms
+  - delay: 1500ms
+  # Tap "Reprendre" button in the resume modal (centered primary button)
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 165
+      duration: 120ms
+  - delay: 2000ms

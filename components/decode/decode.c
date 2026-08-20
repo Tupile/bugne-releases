@@ -297,20 +297,40 @@ static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
         if (mp3->totalPCMFrameCount != DRMP3_UINT64_MAX && mp3->totalPCMFrameCount > 0) {
             s_dur_ms = (uint32_t)(mp3->totalPCMFrameCount * 1000 / rate);
             dur_locked = true;
+        } else if (src->seek) {
+            uint64_t total_audio =
+                (mp3->streamLength != DRMP3_UINT64_MAX && mp3->streamLength > mp3->streamStartOffset)
+                    ? mp3->streamLength - mp3->streamStartOffset
+                    : (uint64_t)(src->total_bytes > 0 ? src->total_bytes : 0);
+            uint32_t kbps = (mp3->pData && mp3->dataSize >= 4) ? drmp3_hdr_bitrate_kbps(mp3->pData) : 128;
+            if (kbps == 0) kbps = 128;
+            if (total_audio > 0) {
+                s_dur_ms = (uint32_t)(total_audio * 8 / kbps);
+                dur_locked = true;
+            }
         }
         uint64_t cur = 0;
-        // Skip a podcast intro by decoding and discarding the leading frames
-        // (a byte seek needs the duration, unknown this early for files without
-        // a Xing header). Used only when streaming; a downloaded MP3 is already
-        // trimmed on disk.
+        // Skip a podcast intro or resume offset.
+        // For seekable sources (SD), fast byte seek is instant; for live streams,
+        // decode and discard leading frames.
         if (skip_ms > 0) {
-            uint64_t target = (uint64_t)skip_ms * rate / 1000;
-            while (cur < target) {
-                drmp3_uint64 got = drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm);
-                if (got == 0) break;  // file shorter than the skip
-                cur += got;
+            if (src->seek && s_dur_ms > 0) {
+                uint32_t target = (uint32_t)skip_ms > s_dur_ms ? s_dur_ms : (uint32_t)skip_ms;
+                uint64_t off = mp3_seek_byte_for_ms(mp3, src, target, s_dur_ms);
+                if (drmp3__on_seek_64(mp3, off, DRMP3_SEEK_SET)) {
+                    drmp3_reset(mp3);  // flush input buffer + decoder state, clears atEnd
+                    cur = (uint64_t)target * rate / 1000;
+                    s_pos_ms = target;
+                }
+            } else {
+                uint64_t target = (uint64_t)skip_ms * rate / 1000;
+                while (cur < target) {
+                    drmp3_uint64 got = drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm);
+                    if (got == 0) break;  // file shorter than the skip
+                    cur += got;
+                }
+                s_pos_ms = (uint32_t)(cur * 1000 / rate);
             }
-            s_pos_ms = (uint32_t)(cur * 1000 / rate);
         }
         for (;;) {
             // One-shot seek request from the UI: map the target time to a byte

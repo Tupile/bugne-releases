@@ -30,5 +30,11 @@ device_build.log
 # Local flash bundles (built artifacts, not source)
 bugne-flash-*.tar.gz
 
+# Local tokens and simulation artifacts
+.*_token
+*.token
+wokwi.toml
+diagram.json
+
 # Original kickoff prompt (project meta, not part of the firmware)
 bugne_kickoff_prompt-1.md

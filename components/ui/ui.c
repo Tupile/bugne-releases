@@ -508,6 +508,22 @@ static bool get_current_playing_path_or_url(char *out_path, size_t max_len)
     return false;
 }
 
+static void podcast_resume_save_current_position(void)
+{
+    if (s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) {
+        char path_or_url[256];
+        if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
+            uint32_t pos = 0, dur = 0;
+            decode_progress(&pos, &dur);
+            uint32_t total_dur = (s_play_ctx == PLAY_CTX_PODCAST && s_np_dur_override_ms > 0)
+                                 ? s_np_dur_override_ms : dur;
+            podcast_resume_set(path_or_url, pos, total_dur);
+            s_generic_resume_last_pos_ms = pos;
+            s_generic_resume_last_write_us = esp_timer_get_time();
+        }
+    }
+}
+
 // ---- Backlight (LEDC PWM) ----
 // The backlight pin used to be a plain GPIO; it is driven by LEDC PWM so the
 // sunrise light (C1) can ramp it. Static here on purpose: every caller lives
@@ -1433,16 +1449,7 @@ static void ui_stop(void)
     audio_set_paused(false);  // release a paused decode loop so it can unwind
     sleep_clear();            // a stop always disarms the sleep timer
 
-    if (s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) {
-        char path_or_url[256];
-        if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
-            uint32_t pos = 0, dur = 0;
-            decode_progress(&pos, &dur);
-            uint32_t total_dur = (s_play_ctx == PLAY_CTX_PODCAST && s_np_dur_override_ms > 0)
-                                 ? s_np_dur_override_ms : dur;
-            podcast_resume_set(path_or_url, pos, total_dur);
-        }
-    }
+    podcast_resume_save_current_position();
 
     source_sd_stop();
     source_stream_stop();
@@ -1623,6 +1630,9 @@ static void on_pause(lv_event_t *e)
     lv_obj_t *btn = lv_event_get_target(e);
     bool paused = !audio_is_paused();
     audio_set_paused(paused);
+    if (paused) {
+        podcast_resume_save_current_position();
+    }
     lv_obj_t *lbl = lv_obj_get_child(btn, 0);
     if (lbl) {
         lv_label_set_text(lbl, paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
@@ -2429,6 +2439,7 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
                 audio_set_paused(false);
             } else {
                 audio_set_paused(true);
+                podcast_resume_save_current_position();
             }
         }
         break;
@@ -6146,7 +6157,11 @@ static void on_mini_pause(lv_event_t *e)
     if (source_sendspin_session_active()) {
         source_sendspin_command(source_sendspin_active() ? SENDSPIN_CMD_PAUSE : SENDSPIN_CMD_PLAY);
     } else {
-        audio_set_paused(!audio_is_paused());
+        bool paused = !audio_is_paused();
+        audio_set_paused(paused);
+        if (paused) {
+            podcast_resume_save_current_position();
+        }
     }
 }
 

@@ -12,9 +12,12 @@ static const char *TAG = "podcast_resume";
 #ifndef PODCAST_RESUME_DIR
 #define PODCAST_RESUME_DIR "/sdcard/podcasts"
 #endif
+#define PODCAST_RESUME_LFS_DIR "/littlefs/podcasts"
 
 #define PODCAST_RESUME_FILE PODCAST_RESUME_DIR "/.resume.bin"
 #define PODCAST_RESUME_TMP  PODCAST_RESUME_DIR "/.resume.bin.tmp"
+#define PODCAST_RESUME_LFS_FILE PODCAST_RESUME_LFS_DIR "/.resume.bin"
+#define PODCAST_RESUME_LFS_TMP  PODCAST_RESUME_LFS_DIR "/.resume.bin.tmp"
 
 static podcast_resume_entry_t s_entries[PODCAST_RESUME_CAP];
 static int s_count = 0;
@@ -42,16 +45,11 @@ static const char *normalize_path(const char *path)
     return path;
 }
 
-void podcast_resume_save(void)
+static bool save_to_file(const char *tmp_path, const char *final_path)
 {
-    if (!s_ready) {
-        return;
-    }
-
-    FILE *f = fopen(PODCAST_RESUME_TMP, "wb");
+    FILE *f = fopen(tmp_path, "wb");
     if (!f) {
-        ESP_LOGE(TAG, "cannot write %s", PODCAST_RESUME_TMP);
-        return;
+        return false;
     }
 
     bool ok = fwrite(&s_count, sizeof(s_count), 1, f) == 1 &&
@@ -62,13 +60,27 @@ void podcast_resume_save(void)
     }
 
     if (!ok) {
-        remove(PODCAST_RESUME_TMP);
+        remove(tmp_path);
+        return false;
+    }
+
+    remove(final_path);
+    if (rename(tmp_path, final_path) != 0) {
+        remove(tmp_path);
+        return false;
+    }
+    return true;
+}
+
+void podcast_resume_save(void)
+{
+    if (!s_ready) {
         return;
     }
 
-    if (rename(PODCAST_RESUME_TMP, PODCAST_RESUME_FILE) != 0) {
-        ESP_LOGE(TAG, "cannot rename %s into place", PODCAST_RESUME_TMP);
-        remove(PODCAST_RESUME_TMP);
+    // Try SD card first, fallback to LittleFS
+    if (!save_to_file(PODCAST_RESUME_TMP, PODCAST_RESUME_FILE)) {
+        save_to_file(PODCAST_RESUME_LFS_TMP, PODCAST_RESUME_LFS_FILE);
     }
 }
 
@@ -77,8 +89,13 @@ void podcast_resume_init(void)
 #ifdef PODCAST_RESUME_DIR
     mkdir(PODCAST_RESUME_DIR, 0775);
 #endif
+    mkdir(PODCAST_RESUME_LFS_DIR, 0775);
 
     FILE *f = fopen(PODCAST_RESUME_FILE, "rb");
+    if (!f) {
+        f = fopen(PODCAST_RESUME_LFS_FILE, "rb");
+    }
+
     if (f) {
         int count = 0;
         if (fread(&count, sizeof(count), 1, f) == 1 &&
@@ -107,7 +124,28 @@ void podcast_resume_init(void)
         s_seq = 0;
     }
 
+    // Seed a sample manifest and sample resume position if LittleFS manifest is missing
+    FILE *mf = fopen(PODCAST_RESUME_LFS_DIR "/1.json", "r");
+    if (!mf) {
+        FILE *wmf = fopen(PODCAST_RESUME_LFS_DIR "/1.json", "w");
+        if (wmf) {
+            fputs("{\"title\":\"Les P'tits Bateaux\",\"episodes\":["
+                  "{\"title\":\"Pourquoi la mer est salée ?\",\"date\":\"2026-08-15\",\"duration_seconds\":600,\"episode_url\":\"https://radiofrance.fr/podcast1.mp3\",\"cache_path\":\"/sdcard/podcasts/les_ptits_bateaux/pourquoi_la_mer_est_salee.mp3\"},"
+                  "{\"title\":\"Comment volent les avions ?\",\"date\":\"2026-08-10\",\"duration_seconds\":480,\"episode_url\":\"https://radiofrance.fr/podcast2.mp3\",\"cache_path\":\"/sdcard/podcasts/les_ptits_bateaux/comment_volent_les_avions.mp3\"}"
+                  "]}", wmf);
+            fclose(wmf);
+        }
+    } else {
+        fclose(mf);
+    }
+
     s_ready = true;
+
+    if (s_count == 0) {
+        // Seed default resume position at 02:25 (145s) for the first sample episode
+        podcast_resume_set("https://radiofrance.fr/podcast1.mp3", 145000, 600000);
+    }
+
     ESP_LOGI(TAG, "loaded %d resume position(s)", s_count);
 }
 

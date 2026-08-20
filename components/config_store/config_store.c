@@ -47,7 +47,11 @@ static void set_defaults(config_t *c)
     c->ha.url[0] = '\0';
     c->ha.entity_id[0] = '\0';
     c->webradio_count = 0;
-    c->podcast_count = 0;
+    c->podcast_count = 1;
+    c->podcasts[0].id = 1;
+    strlcpy(c->podcasts[0].title, "Les P'tits Bateaux", sizeof(c->podcasts[0].title));
+    strlcpy(c->podcasts[0].rss_url, "https://radiofrance-podcast.net/podcast09/rss_10019.xml", sizeof(c->podcasts[0].rss_url));
+    c->podcasts[0].skip_seconds = 0;
     c->ui.volume = 60;
     c->ui.volume_max = 100;
     c->ui.screen_sleep_seconds = 30;
