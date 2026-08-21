@@ -23,7 +23,7 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error=dangling-reference" APPEND)
 # and AGENTS.md.
 set(_ss_dir "${CMAKE_CURRENT_LIST_DIR}/managed_components/sendspin__sendspin-cpp")
 set(_ss_ws "${_ss_dir}/src/esp/ws_server.cpp")
-set(_ss_patch "${CMAKE_CURRENT_LIST_DIR}/patches/sendspin-cpp-0.7.0-esp-httpd-stack.patch")
+set(_ss_patch "${CMAKE_CURRENT_LIST_DIR}/patches/sendspin-cpp-0.7.2-esp-httpd-stack.patch")
 if(EXISTS "${_ss_ws}")
     file(READ "${_ss_ws}" _ss_ws_src)
     string(FIND "${_ss_ws_src}" "config.stack_size = 8192" _ss_marker)

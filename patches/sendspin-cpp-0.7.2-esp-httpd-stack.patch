@@ -1,4 +1,4 @@
-Bugne build-time patch for sendspin-cpp 0.7.0, applied by the top-level
+Bugne build-time patch for sendspin-cpp 0.7.2, applied by the top-level
 CMakeLists.txt at configure time (managed_components is gitignored and
 re-fetched on clean builds).
 
