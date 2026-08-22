@@ -37,17 +37,18 @@ typedef struct {
 // Blocks on the network fetch; call from a worker task, not the UI task.
 esp_err_t podcast_refresh(int id, const char *name, const char *rss_url);
 
-// Read the manifest for podcast `id` into eps (up to `max` entries). Sets
-// *count. Returns ESP_ERR_NOT_FOUND if no manifest exists. Each episode's
-// `cached` flag reflects whether its file actually exists on the SD card.
-esp_err_t podcast_read_manifest(int id, podcast_episode_t *eps, size_t max, size_t *count);
+// Read the manifest for podcast `id` into the PSRAM array *eps, growing it as
+// needed with heap_caps_realloc (*cap updated), so no sizing pass over the file
+// is required first; *eps may be NULL/*cap 0 on entry. Sets *count. Returns
+// ESP_ERR_NOT_FOUND if no manifest exists; ESP_ERR_NO_MEM if a grow fails
+// (*eps may then hold a partial list, free it). Each episode's `cached` flag
+// reflects whether its file actually exists on the SD card: one directory scan
+// per call, plus a stat() only where the file name is actually present.
+esp_err_t podcast_read_manifest(int id, podcast_episode_t **eps, size_t *cap, size_t *count);
 
-// Number of episodes in podcast `id`'s manifest (0 if none). Streams the file, so
-// it does not load the whole manifest into RAM. Use it to size the read buffer.
+// Number of episodes in podcast `id`'s manifest (0 if none). Streams the file,
+// so it does not load the whole manifest into RAM.
 size_t podcast_manifest_count(int id);
-
-// True if the episode's cache_path file exists on the SD card (non-empty).
-bool podcast_episode_cached(const podcast_episode_t *ep);
 
 // Download an episode's audio to its cache_path on SD for offline playback.
 // HTTP(S) GET following redirects, written atomically (a .part temp then

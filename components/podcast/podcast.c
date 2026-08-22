@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>  // strncasecmp
 #include <time.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 #include "esp_log.h"
@@ -420,12 +421,6 @@ static esp_err_t mp3_trim_file(const char *in, const char *out, int skip_seconds
     return ret;
 }
 
-bool podcast_episode_cached(const podcast_episode_t *ep)
-{
-    struct stat st;
-    return ep->cache_path[0] != '\0' && stat(ep->cache_path, &st) == 0 && st.st_size > 0;
-}
-
 esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds, volatile bool *cancel)
 {
     // cache_path is absolute ("/sdcard/..."); source_sd_create wants it relative
@@ -567,20 +562,113 @@ static int manifest_next_object(FILE *f, char *buf, size_t bufsz)
     return -1;  // truncated object
 }
 
-esp_err_t podcast_read_manifest(int id, podcast_episode_t *eps, size_t max, size_t *count)
+static bool eps_grow(podcast_episode_t **eps, size_t *cap, size_t need)
+{
+    if (*eps && *cap >= need) return true;
+    size_t nc = *cap ? *cap * 2 : 16;
+    if (nc < need) nc = need;
+    podcast_episode_t *ne = heap_caps_realloc(*eps, sizeof(**eps) * nc, MALLOC_CAP_SPIRAM);
+    if (!ne) return false;
+    *eps = ne;
+    *cap = nc;
+    return true;
+}
+
+// One readdir of the feed's cache folder replaces one stat() per episode.
+// Reading the manifest runs on the LVGL task (build_episodes), where hundreds
+// of SD round trips stalled rendering for a visible fraction of a second on
+// large feeds. File names are matched by FNV-1a hash against the listing; an
+// episode whose name IS present still gets its real stat() once, so "cached"
+// keeps meaning "exists with a non-zero size". Episodes living outside the
+// scanned folder (legacy manifests, changed feed title) fall back to their own
+// stat(). The scan state is per-call: read_manifest can run on the UI task and
+// on the download worker concurrently.
+#define CACHE_NAMES_MAX 512
+
+typedef struct {
+    char     dir[PODCAST_PATH_MAX];  // folder that was scanned ("" = none)
+    uint64_t *names;                 // FNV-1a of each entry name (PSRAM)
+    int      n;
+} cache_scan_t;
+
+static uint64_t fnv1a64(const char *s)
+{
+    uint64_t h = 1469598103934665603ULL;  // FNV-1a 64-bit offset basis
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 1099511628211ULL;  // FNV prime
+    }
+    return h;
+}
+
+static void cache_scan_start(cache_scan_t *cs, const char *dir)
+{
+    memset(cs, 0, sizeof(*cs));
+    if (dir[0] == '\0') return;
+    cs->names = heap_caps_malloc(sizeof(*cs->names) * CACHE_NAMES_MAX, MALLOC_CAP_SPIRAM);
+    if (!cs->names) return;
+    DIR *d = opendir(dir);
+    if (!d) {
+        free(cs->names);  // no SD or no folder: every episode falls back to stat()
+        cs->names = NULL;
+        return;
+    }
+    strlcpy(cs->dir, dir, sizeof(cs->dir));
+    struct dirent *e;
+    while (cs->n < CACHE_NAMES_MAX && (e = readdir(d)) != NULL) {
+        cs->names[cs->n++] = fnv1a64(e->d_name);
+    }
+    closedir(d);
+}
+
+static void cache_scan_done(cache_scan_t *cs)
+{
+    free(cs->names);
+    cs->names = NULL;
+}
+
+static bool cache_scan_has(const cache_scan_t *cs, const char *name)
+{
+    uint64_t h = fnv1a64(name);
+    for (int i = 0; i < cs->n; i++) {
+        if (cs->names[i] == h) return true;
+    }
+    return false;
+}
+
+// Cached iff the file exists non-empty (same semantics as before). Fast path:
+// the name is absent from the one-shot directory scan, so no SD round trip.
+static bool ep_is_cached(const cache_scan_t *cs, const podcast_episode_t *ep)
+{
+    if (ep->cache_path[0] == '\0') return false;
+    if (cs->names) {
+        size_t dl = strlen(cs->dir);
+        bool in_dir = strncmp(ep->cache_path, cs->dir, dl) == 0 && ep->cache_path[dl] == '/';
+        if (in_dir) {
+            const char *slash = strrchr(ep->cache_path, '/');
+            if (!cache_scan_has(cs, slash ? slash + 1 : ep->cache_path)) return false;
+        }
+    }
+    struct stat st;
+    return stat(ep->cache_path, &st) == 0 && st.st_size > 0;
+}
+
+esp_err_t podcast_read_manifest(int id, podcast_episode_t **eps, size_t *cap, size_t *count)
 {
     *count = 0;
     FILE *f = manifest_open_array(id);
     if (!f) return ESP_ERR_NOT_FOUND;
-    char *obj = malloc(PODCAST_OBJ_MAX);
+    char *obj = heap_caps_malloc(PODCAST_OBJ_MAX, MALLOC_CAP_SPIRAM);
     if (!obj) { fclose(f); return ESP_ERR_NO_MEM; }
 
+    esp_err_t err = ESP_OK;
     size_t n = 0;
     int r;
-    while (n < max && (r = manifest_next_object(f, obj, PODCAST_OBJ_MAX)) == 1) {
+    while ((r = manifest_next_object(f, obj, PODCAST_OBJ_MAX)) == 1) {
+        if (!eps_grow(eps, cap, n + 1)) { err = ESP_ERR_NO_MEM; break; }
         cJSON *e = cJSON_Parse(obj);
         if (!e) continue;  // skip a malformed object
-        podcast_episode_t *out = &eps[n];
+        podcast_episode_t *out = &(*eps)[n];
         memset(out, 0, sizeof(*out));
         const cJSON *v;
         if ((v = cJSON_GetObjectItemCaseSensitive(e, "title")) && cJSON_IsString(v))
@@ -593,23 +681,40 @@ esp_err_t podcast_read_manifest(int id, podcast_episode_t *eps, size_t max, size
             strlcpy(out->episode_url, v->valuestring, sizeof(out->episode_url));
         if ((v = cJSON_GetObjectItemCaseSensitive(e, "cache_path")) && cJSON_IsString(v))
             strlcpy(out->cache_path, v->valuestring, sizeof(out->cache_path));
-        // Trust the filesystem, not the stored flag: the file is present iff it
-        // was downloaded. This survives manifest rewrites by a refresh.
-        out->cached = podcast_episode_cached(out);
         cJSON_Delete(e);
         n++;
     }
     free(obj);
     fclose(f);
+
+    // Trust the filesystem, not any stored flag: the file is present iff it was
+    // downloaded. This survives manifest rewrites by a refresh. The scanned
+    // folder comes from the first episode's cache_path: the writer puts every
+    // episode of a feed in one folder (/sdcard/podcasts/<feed>/).
+    cache_scan_t cs;
+    char dir[PODCAST_PATH_MAX] = "";
+    if (n > 0 && (*eps)[0].cache_path[0] != '\0') {
+        const char *slash = strrchr((*eps)[0].cache_path, '/');
+        if (slash) {
+            snprintf(dir, sizeof(dir), "%.*s", (int)(slash - (*eps)[0].cache_path),
+                     (*eps)[0].cache_path);
+        }
+    }
+    cache_scan_start(&cs, dir);
+    for (size_t i = 0; i < n; i++) {
+        (*eps)[i].cached = ep_is_cached(&cs, &(*eps)[i]);
+    }
+    cache_scan_done(&cs);
+
     *count = n;
-    return ESP_OK;
+    return err;
 }
 
 size_t podcast_manifest_count(int id)
 {
     FILE *f = manifest_open_array(id);
     if (!f) return 0;
-    char *obj = malloc(PODCAST_OBJ_MAX);
+    char *obj = heap_caps_malloc(PODCAST_OBJ_MAX, MALLOC_CAP_SPIRAM);
     if (!obj) { fclose(f); return 0; }
     size_t n = 0;
     while (manifest_next_object(f, obj, PODCAST_OBJ_MAX) == 1) n++;

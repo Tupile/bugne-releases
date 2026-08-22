@@ -914,7 +914,10 @@ static esp_err_t sd_list_get(httpd_req_t *req)
     }
     cJSON *arr = cJSON_AddArrayToObject(o, "entries");
     if (source_sd_present() && arr) {
-        source_sd_entry_t *ents = malloc(sizeof(source_sd_entry_t) * WEB_SD_BROWSE_MAX);
+        // Explicit PSRAM: 256 entries are ~18 KB, which must not sit in
+        // internal RAM next to an active HTTPS stream (2026-07-18 class).
+        source_sd_entry_t *ents = heap_caps_malloc(sizeof(source_sd_entry_t) * WEB_SD_BROWSE_MAX,
+                                                   MALLOC_CAP_SPIRAM);
         if (ents) {
             size_t n = 0;
             if (source_sd_browse(path, ents, WEB_SD_BROWSE_MAX, &n, true) == ESP_OK) {

@@ -7,6 +7,9 @@
 #include <sys/stat.h>
 
 #include "esp_log.h"
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+#endif
 
 static const char *TAG = "played";
 
@@ -17,7 +20,13 @@ static const char *TAG = "played";
 #define PLAYED_FILE PLAYED_DIR "/played.bin"
 #define PLAYED_TMP  PLAYED_DIR "/played.bin.tmp"
 
+#ifdef ESP_PLATFORM
+// PSRAM: 2 KB of internal-RAM budget for plain data (same rule as the stats
+// ring). Allocated once in played_init; host tests keep the static array.
+static uint64_t *s_hashes;
+#else
 static uint64_t s_hashes[PLAYED_CAP];
+#endif
 static int  s_count;   // number of valid entries in s_hashes
 static int  s_next;    // ring index the next mark will overwrite
 // played_init() runs once on bg_init_task, before the UI can reach the
@@ -69,6 +78,17 @@ static void save(void)
 
 void played_init(void)
 {
+#ifdef ESP_PLATFORM
+    if (!s_hashes) {
+        s_hashes = heap_caps_malloc(sizeof(uint64_t) * PLAYED_CAP, MALLOC_CAP_SPIRAM);
+        if (!s_hashes) {
+            // Without the ring, markers are a no-op: s_ready stays false so
+            // played_mark/played_contains never touch a NULL table.
+            ESP_LOGE(TAG, "no memory for the played ring");
+            return;
+        }
+    }
+#endif
     mkdir(PLAYED_DIR, 0775);  // may already exist (podcast manifests)
     FILE *f = fopen(PLAYED_FILE, "rb");
     if (f) {

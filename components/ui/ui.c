@@ -987,11 +987,12 @@ static void worker_run_job(void)
             if (!started) { if (p->id == resume_pod) started = true; else continue; }
             size_t start_ep = (p->id == resume_pod) ? (size_t)resume_ep : 0;
 
-            size_t n = podcast_manifest_count(p->id);
-            podcast_episode_t *eps = heap_caps_malloc(sizeof(*eps) * (n ? n : 1), MALLOC_CAP_SPIRAM);
-            if (!eps) { s_downloading = false; return; }
-            size_t got = 0;
-            podcast_read_manifest(p->id, eps, n, &got);
+            podcast_episode_t *eps = NULL;
+            size_t eps_cap = 0, got = 0;
+            if (podcast_read_manifest(p->id, &eps, &eps_cap, &got) == ESP_ERR_NO_MEM) {
+                free(eps);  // the partial list, if any
+                s_downloading = false; return;
+            }
             int skip_s = p->skip_seconds;
             s_dljob.cur_pod_id = p->id;
             s_dljob.cur_ep_idx = (int)start_ep;
@@ -3321,9 +3322,10 @@ static void build_episodes(lv_obj_t *scr)
     }
 
     s_ep_count = 0;
-    size_t total = podcast_manifest_count(s_nav_podcast_id);
-    if (total && ensure_eps(&s_episodes, &s_episodes_cap, total)) {
-        podcast_read_manifest(s_nav_podcast_id, s_episodes, s_episodes_cap, &s_ep_count);
+    // Single pass: the grow API sizes the array itself, so no count pass over
+    // the manifest file runs on this (LVGL) task.
+    if (ensure_eps(&s_episodes, &s_episodes_cap, 16)) {
+        podcast_read_manifest(s_nav_podcast_id, &s_episodes, &s_episodes_cap, &s_ep_count);
     }
     if (s_ep_count == 0) {
         empty_state_label(scr, STR_NO_EPISODES);
@@ -7130,8 +7132,11 @@ static void tick_now_playing(void)
         }
     }
 
-    // Live-update the SD file progress slider/time (unless the user is dragging).
-    if (!s_play_failed && s_active_builder == build_now_playing && s_np_prog && !s_np_seeking) {
+    // Live-update the SD file progress slider/time (unless the user is dragging,
+    // or the screen is asleep: LVGL would re-render and SPI-flush the strip every
+    // second into the powered-off panel; on wake the next tick repaints).
+    if (!s_asleep && !s_play_failed && s_active_builder == build_now_playing &&
+        s_np_prog && !s_np_seeking) {
         uint32_t pos = 0, dur = 0;
         decode_progress(&pos, &dur);
         if (s_np_dur_override_ms > 0) {

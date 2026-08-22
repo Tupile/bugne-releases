@@ -1,6 +1,10 @@
 #include "pitch.h"
 #include <math.h>
 
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+#endif
+
 // Integration window of the YIN difference function: the tail PITCH_TAU_MAX
 // samples of the buffer are only ever read as x[i + tau].
 #define PITCH_WIN (PITCH_BUF_SAMPLES - PITCH_TAU_MAX)
@@ -35,7 +39,20 @@ bool pitch_detect(const int16_t *pcm, float fs, float *freq_hz, float *rms)
     }
 
     // Cumulative mean normalized difference d'(tau). d'(0) = 1 by definition.
+#ifdef ESP_PLATFORM
+    // 2 KB out of .bss: internal RAM is the budget, PSRAM is not. Only the
+    // tuner task calls pitch_detect (single caller, ui.c), so no locking. On
+    // the unrealistic allocation failure the tuner just reports silence.
+    static float *dp;
+    if (!dp) {
+        dp = heap_caps_malloc(sizeof(float) * (PITCH_TAU_MAX + 1), MALLOC_CAP_SPIRAM);
+        if (!dp) {
+            return false;
+        }
+    }
+#else
     static float dp[PITCH_TAU_MAX + 1];
+#endif
     dp[0] = 1.0f;
     int64_t dsum = 0;
     for (int tau = 1; tau <= PITCH_TAU_MAX; tau++) {
