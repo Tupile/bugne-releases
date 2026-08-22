@@ -92,7 +92,9 @@ void played_init(void)
 
 void played_mark(const char *episode_url)
 {
-    if (!episode_url || !episode_url[0]) return;
+    // Same ready guard as played_contains: a mark racing played_init (the UI
+    // task can run first) would save a 1-entry ring over the loaded one.
+    if (!s_ready || !episode_url || !episode_url[0]) return;
     uint64_t h = fnv1a64(episode_url);
     if (contains_hash(h)) return;  // already marked: nothing to add or persist
     if (s_count < PLAYED_CAP) {

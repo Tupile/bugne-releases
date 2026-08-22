@@ -161,7 +161,9 @@ void stats_flush(void)
         remove(STATS_TMP);
         return;
     }
-    remove(STATS_FILE);
+    // No remove() first: this file is on LittleFS, whose rename replaces the
+    // target atomically. Removing first opened a power-loss window with no
+    // stats file at all (the rule played.c records).
     if (rename(STATS_TMP, STATS_FILE) != 0) {
         ESP_LOGE(TAG, "rename to %s failed", STATS_FILE);
         remove(STATS_TMP);

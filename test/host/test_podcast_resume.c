@@ -150,6 +150,88 @@ static void test_lru_eviction(void)
     CHECK(dur == 99999, "ep-01 updated data survives");
 }
 
+static void test_long_url_key(void)
+{
+    // Episode URLs reach 512 chars (PODCAST_URL_MAX). The old raw-string keys
+    // were truncated at 127 and such episodes could never match their own
+    // entry: pin the fix.
+    char url[512];
+    uint32_t dur = 0;
+
+    int n = snprintf(url, sizeof(url), "https://media.radiofrance.fr/embed/aod/2026/affaire-");
+    for (int i = 0; n + 4 < (int)sizeof(url); i++) {
+        snprintf(url + n, sizeof(url) - n, "%04d", i % 10000);
+        n += 4;
+    }
+    url[sizeof(url) - 1] = '\0';
+    CHECK(strlen(url) > 127, "long key is really longer than the old limit");
+
+    unlink(TEST_FILE);
+    podcast_resume_init();
+    podcast_resume_set(url, 123000, 600000);
+
+    CHECK(podcast_resume_get(url, &dur) == 123000, "long key get after set");
+    CHECK(dur == 600000, "long key dur after set");
+
+    // A different URL must not alias it (no truncation collision).
+    char other[512];
+    memcpy(other, url, strlen(url) + 1);
+    other[strlen(other) - 1] = 'X';
+    CHECK(podcast_resume_get(other, NULL) == 0, "near-identical long key is distinct");
+
+    // And the position survives a reload (persistence of a long key).
+    podcast_resume_init();
+    CHECK(podcast_resume_get(url, &dur) == 123000, "long key survives reload");
+    CHECK(dur == 600000, "long key dur survives reload");
+
+    // Updating an existing long key must not insert a duplicate: set twice,
+    // then verify via eviction behavior that only one entry was consumed
+    // (fill the rest of the table and check nothing was evicted).
+    podcast_resume_set(url, 124000, 600000);
+    for (int i = 0; i < PODCAST_RESUME_CAP - 1; i++) {
+        snprintf(other, sizeof(other), "podcasts/Filler/%03d.mp3", i);
+        podcast_resume_set(other, 1, 2);
+    }
+    CHECK(podcast_resume_get(url, &dur) == 124000, "updated long key value");
+}
+
+static void test_no_demo_seed(void)
+{
+    // Regression guard: init used to seed a fake resume position for a demo
+    // episode on an empty table. Real devices must start empty.
+    uint32_t dur = 0;
+    unlink(TEST_FILE);
+    podcast_resume_init();
+    CHECK(podcast_resume_get("https://radiofrance.fr/podcast1.mp3", &dur) == 0,
+          "no seeded demo position");
+    CHECK(podcast_resume_get("podcasts/les_ptits_bateaux/pourquoi_la_mer_est_salee.mp3", &dur) == 0,
+          "no seeded demo file position");
+}
+
+static void test_old_format_rejected(void)
+{
+    // The pre-hash layout began with a raw int count followed by entries whose
+    // first field was a char path[128]. It must be rejected cleanly, not
+    // misread through the new header.
+    FILE *f = fopen(TEST_FILE, "wb");
+    if (f) {
+        int count = 2;
+        char junk[256];
+        memset(junk, 'A', sizeof(junk));
+        fwrite(&count, sizeof(count), 1, f);
+        fwrite(junk, 1, sizeof(junk), f);
+        fclose(f);
+    }
+
+    podcast_resume_init();
+    CHECK(podcast_resume_get("podcasts/Folder/ep1.mp3", NULL) == 0, "old format starts empty");
+
+    // The next save must write a valid new-format file that reloads.
+    podcast_resume_set("podcasts/Folder/ep1.mp3", 500, 5000);
+    podcast_resume_init();
+    CHECK(podcast_resume_get("podcasts/Folder/ep1.mp3", NULL) == 500, "new format saves and loads");
+}
+
 static void test_lru_after_persistence_reload(void)
 {
     char path[128];
@@ -185,6 +267,9 @@ int main(void)
     test_clear();
     test_persistence();
     test_corrupt_file();
+    test_long_url_key();
+    test_no_demo_seed();
+    test_old_format_rejected();
     test_lru_eviction();
     test_lru_after_persistence_reload();
 

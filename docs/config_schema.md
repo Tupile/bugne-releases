@@ -76,7 +76,7 @@ configuration:
 | --- | --- | --- |
 | `schema_version` | int | Schema version. Currently 1. Bump on breaking changes. |
 | `device.name` | string | Friendly display name. The unique device ID is derived from the MAC, not stored here. |
-| `ha.url` | string | Home Assistant base URL (e.g., `http://homeassistant.local:8123`). The Long-Lived Access Token is stored securely in NVS, not in this file. |
+| `ha.url` | string | Home Assistant base URL. Prefer `https://homeassistant.local:8123`: the Long-Lived Access Token (stored in NVS, not in this file) is sent as a Bearer header on every lamp call, so plain `http://` puts it on the wire unencrypted (the device logs a warning). |
 | `ha.entity_id` | string | Home Assistant entity ID to toggle (e.g., `light.ceiling`). The Lamp tile appears if this and the URL are set (experimental feature). |
 | `webradios[].id` | int | Stable small integer, unique within the list. |
 | `webradios[].name` | string | Display name. |

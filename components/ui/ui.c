@@ -342,7 +342,14 @@ static volatile bool s_stop_requested;
 // only when audio has been idle >5 min and Wi-Fi is up, and pauses the moment the
 // user plays something. s_downloading = worker running now; s_dl_cancel = stop the
 // worker (PAUSE keeps the job, user CANCEL clears it).
+// Ownership (closes the old peek/overwrite TOCTOU where req_abandoned could
+// clear s_downloading for a job the worker had just started serving):
+//  - s_dl_queued: LVGL task only. Set when REQ_DOWNLOAD_JOB is posted, cleared
+//    on drop (req_abandoned) -- both happen on this task.
+//  - s_downloading: WORKER task only. Set right before worker_run_job, cleared
+//    by every exit path. LVGL reads it to pause/cancel; it never writes it.
 static volatile bool s_downloading;
+static volatile bool s_dl_queued;
 static volatile bool s_dl_cancel;
 static volatile int  s_dl_done;       // episodes handled so far this job
 static volatile int  s_dl_total;      // episodes in scope this job
@@ -379,7 +386,9 @@ static int64_t  s_generic_resume_last_write_us;
 typedef struct {
     play_ctx_t play_ctx;
     int index;
-    char path_or_url[256];
+    // Full PODCAST_URL_MAX+1: this key must match what the tick writer hashed,
+    // and episode URLs reach 512 chars.
+    char path_or_url[PODCAST_URL_MAX + 1];
     uint32_t pos_ms;
 } resume_dialog_ctx_t;
 
@@ -511,7 +520,7 @@ static bool get_current_playing_path_or_url(char *out_path, size_t max_len)
 static void podcast_resume_save_current_position(void)
 {
     if (s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) {
-        char path_or_url[256];
+        char path_or_url[PODCAST_URL_MAX + 1];  // full-length: the reader hashes the same string
         if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
             uint32_t pos = 0, dur = 0;
             decode_progress(&pos, &dur);
@@ -933,6 +942,14 @@ static void worker_run_job(void)
     const config_t *c = config_store_get();
     if (!c) { s_downloading = false; return; }
 
+    // The job may have sat queued while playback started (s_downloading only
+    // turns on here, so the scheduler could not pause it in time): bail out at
+    // once and let the scheduler reschedule when idle again.
+    if (s_dl_cancel || audio_is_active()) {
+        s_downloading = false;
+        return;
+    }
+
     // Phase 1+2: refresh feeds (new mode) then download episodes. Skipped on resume
     // once downloads_done, so an interrupted library scan does not redo downloads.
     if (!s_dljob.downloads_done) {
@@ -1153,6 +1170,9 @@ static void play_task(void *arg)
                 continue;
             }
             if (req.kind == REQ_DOWNLOAD_JOB) {
+                // The worker owns s_downloading: producers only queue.
+                s_dl_queued = false;
+                s_downloading = true;
                 worker_run_job();
                 continue;
             }
@@ -1354,7 +1374,10 @@ static void req_abandoned(req_kind_t kind)
         s_refresh_done = true;
         break;
     case REQ_DOWNLOAD_JOB:
-        s_downloading = false;  // the job stays active and is rescheduled when idle
+        // The job request was dropped before the worker served it. Only the
+        // "queued" marker is cleared here (same task, so no race); the running
+        // flag belongs to the worker and must never be touched from this task.
+        s_dl_queued = false;
         break;
     case REQ_MEMO_PEERS:
         s_memo_peer_count = 0;  // no longer browsing (-1 means "running")
@@ -1422,6 +1445,11 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
     // the play request can be served. Ask it to stop (the job stays active and
     // resumes once idle again) and start the 5-min resume debounce now.
     if (s_downloading) s_dl_cancel = true;
+    // An explicit new play invalidates a stale "track ended naturally" flag:
+    // tick_remote runs BEFORE tick_advance, so without this a web play landing
+    // in the same tick as an end could double-fire (skip an episode and mark
+    // the wrong one played).
+    s_advance = false;
     s_audio_idle_since_us = esp_timer_get_time();
     play_req_t req = { .kind = REQ_PLAY, .is_file = is_file, .skip_ms = skip_ms };
     strlcpy(req.target, target, sizeof(req.target));
@@ -2497,7 +2525,7 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         // ask it to stop so the new job takes over.
         bool all = (cmd == UI_REMOTE_DOWNLOAD_ALL || cmd == UI_REMOTE_REDOWNLOAD_ALL);
         bool force = (cmd == UI_REMOTE_REDOWNLOAD_PODCAST || cmd == UI_REMOTE_REDOWNLOAD_ALL);
-        if (s_downloading) s_dl_cancel = true;
+        if (s_downloading || s_dl_queued) s_dl_cancel = true;
         memset(&s_dljob, 0, sizeof(s_dljob));
         s_dljob.active = true;
         s_dljob.scope_all = all;
@@ -4288,6 +4316,9 @@ static void memo_request(req_kind_t kind, const char *path)
     }
     tuner_stop_sync();
     s_memo_stop = false;  // ui_stop just set it; this is a fresh memo operation
+    // Same worker-yield as ui_play: a memo record/send shares the one worker
+    // task, so a running download must yield or the screen sticks in RECORDING.
+    if (s_downloading) s_dl_cancel = true;
     play_req_t req = { .kind = kind };
     if (path) strlcpy(req.target, path, sizeof(req.target));
     req_post(&req);
@@ -6304,6 +6335,11 @@ static void beep_start(void)
     if (source_sendspin_session_active()) {
         source_sendspin_command(SENDSPIN_CMD_STOP);
     }
+    // Same worker-yield as ui_play: REQ_BEEP shares the one worker task, so a
+    // running episode download must be asked to stop or the beep waits behind
+    // it for minutes (the alarm must always sound).
+    if (s_downloading) s_dl_cancel = true;
+    s_advance = false;  // same stale-end rule as ui_play
     play_req_t req = { .kind = REQ_BEEP };
     req_post(&req);
 }
@@ -6656,10 +6692,12 @@ static void tick_download_scheduler(void)
         if (audio_is_active()) { s_audio_idle_since_us = now; s_played_since_maint = true; }
         bool idle_5min = (now - s_audio_idle_since_us) >= DL_IDLE_RESUME_US;
         bool net_ok = !s_refreshing && source_sd_present() && net_state() == NET_STATE_CONNECTED;
-        if (s_downloading) {
-            if (audio_is_active()) s_dl_cancel = true;  // pause: worker saves cursor and exits
+        if (s_downloading || s_dl_queued) {
+            // Running or queued: pause it the moment audio plays (a queued job
+            // picks the cancel up in worker_run_job's early guard).
+            if (audio_is_active()) s_dl_cancel = true;
         } else if (s_dljob.active && net_ok && idle_5min) {
-            s_downloading = true;
+            s_dl_queued = true;
             s_dl_cancel = false;
             play_req_t req = { .kind = REQ_DOWNLOAD_JOB };
             req_post(&req);
@@ -6943,6 +6981,13 @@ static void tick_memo_talkie(void)
 // and unread badge) keys off it. The SD browser handles its own message.
 static void tick_sd_presence(void)
 {
+    // Hot insert/remove probe. Only when nothing can hold the card busy: the
+    // poll's unmount-on-vanish path must never race an open FILE*. Radio
+    // playback touches no SD file, so it does not block the probe.
+    if (!audio_is_active() && !s_downloading && !s_refreshing &&
+        s_memo_state == MEMO_UI_IDLE) {
+        source_sd_poll();
+    }
     static int s_sd_present_applied = -1;
     if ((int)source_sd_present() != s_sd_present_applied) {
         bool first = (s_sd_present_applied == -1);
@@ -7136,7 +7181,7 @@ static void tick_now_playing(void)
     // Persist the generic/podcast/SD resume position periodically to the generic
     // resume store so it can be resumed across sessions when browsing SD files/podcasts.
     if ((s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) && audio_is_active()) {
-        char path_or_url[256];
+        char path_or_url[PODCAST_URL_MAX + 1];  // full-length: the reader hashes the same string
         if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
             uint32_t pos = 0, dur = 0;
             decode_progress(&pos, &dur);

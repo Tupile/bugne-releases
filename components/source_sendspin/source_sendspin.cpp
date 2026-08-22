@@ -357,8 +357,13 @@ extern "C" esp_err_t source_sendspin_init(void)
     // 8 KB stack: loop() builds and sends the client/hello (JSON serialization)
     // on this task; 4 KB overflowed. The stack lives in PSRAM to keep internal
     // RAM free for HTTPS streaming (TLS reads fail with only a few KB internal).
+    // A failed create must fail init: without the task there is no client->loop(),
+    // no command drain and no mDNS advert, which would be silent feature death.
     static TaskHandle_t s_task;
-    xTaskCreateWithCaps(sendspin_task, "sendspin", 8192, nullptr, 4, &s_task, MALLOC_CAP_SPIRAM);
+    if (xTaskCreateWithCaps(sendspin_task, "sendspin", 8192, nullptr, 4, &s_task, MALLOC_CAP_SPIRAM) != pdPASS) {
+        ESP_LOGE(TAG, "sendspin task create failed");
+        return ESP_FAIL;
+    }
     ESP_LOGI(TAG, "sendspin player '%s' started", g_name.c_str());
     return ESP_OK;
 }

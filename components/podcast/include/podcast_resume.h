@@ -4,6 +4,15 @@
 // and total duration (dur_ms) of podcast episodes (either cached files on SD
 // or live stream URLs).
 //
+// Entries are keyed by a 64-bit FNV-1a hash of the normalized path/URL, so
+// callers may pass full-length paths or URLs of any size (episode URLs reach
+// 512 chars; the previous raw-string keys were truncated at 127 and long-URL
+// episodes could never match their own entry).
+//
+// The persisted .resume.bin carries a magic header. Files from the older
+// string-keyed layout (or garbage) fail the header read and start empty:
+// resume positions are disposable cache data, rebuilt as listening happens.
+//
 // LRU replacement is performed using a monotonic updated_at field when the
 // table is full.
 //
@@ -17,13 +26,15 @@
 #define PODCAST_RESUME_CAP 32
 
 typedef struct {
-    char path[128];
+    uint64_t key_hash;  // FNV-1a 64 of the normalized key
+    char tag[16];       // leading bytes of the key, debug aid in hex dumps only
     uint32_t pos_ms;
     uint32_t dur_ms;
     uint32_t updated_at;
 } podcast_resume_entry_t;
 
-// Initialize the resume table. Loads persisted positions from SD card.
+// Initialize the resume table. Loads persisted positions from SD card, falling
+// back to the LittleFS copy.
 void podcast_resume_init(void);
 
 // Retrieve the saved playback position (in ms) for an episode.

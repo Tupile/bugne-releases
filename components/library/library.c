@@ -20,6 +20,7 @@ static const char *TAG = "library";
 
 #define SD_MOUNT    "/sdcard"
 #define INDEX_PATH  "/sdcard/.bugne_library.tsv"
+#define INDEX_TMP   "/sdcard/.bugne_library.tsv.tmp"
 #define LIB_MAX_TRACKS 4000   // PSRAM model cap (~1.8 MB)
 #define LIB_MAX_DEPTH  12     // recursion bound: each scan_dir frame is ~1 KB of
                               // stack, so a pathological deep tree on the card
@@ -134,7 +135,11 @@ static void sanitize(char *s)  // TSV-safe: no tab/newline in a field
 
 static void write_index(void)
 {
-    FILE *f = fopen(INDEX_PATH, "wb");
+    // Temp file + rename: the index is on FatFs (SD), so the rename needs the
+    // old file removed first. Writing INDEX_PATH in place left a truncated TSV
+    // after a power cut, which library_load() then served as a silently
+    // partial library until the next full scan.
+    FILE *f = fopen(INDEX_TMP, "wb");
     if (!f) {
         ESP_LOGW(TAG, "cannot write index");
         return;
@@ -148,11 +153,15 @@ static void write_index(void)
         }
     }
     if (fclose(f) != 0) ok = false;
-    // A half-written index would load as a partial library on the next boot.
-    // Drop it instead: no index means "rescan", which self-heals.
     if (!ok) {
         ESP_LOGW(TAG, "index write failed, removing it");
-        remove(INDEX_PATH);
+        remove(INDEX_TMP);
+        return;
+    }
+    remove(INDEX_PATH);  // FatFs: rename fails with FR_EXIST otherwise
+    if (rename(INDEX_TMP, INDEX_PATH) != 0) {
+        ESP_LOGW(TAG, "index rename failed");
+        remove(INDEX_TMP);
     }
 }
 

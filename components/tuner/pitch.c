@@ -16,11 +16,17 @@
 
 bool pitch_detect(const int16_t *pcm, float fs, float *freq_hz, float *rms)
 {
-    double energy = 0.0;
+    // All accumulation is integer (int64). The ESP32-S3 FPU is single-precision
+    // only, so the previous double loops ran as libgcc soft-float calls and the
+    // YIN pass monopolized the CPU for most of each tuner cycle (starving LVGL
+    // and dropping mic DMA samples). int64 cannot overflow here: worst-case
+    // dsum is ~3.4e15 against a 9.2e18 limit. What remains in floating point
+    // is one divide per tau and the RMS, both negligible.
+    int64_t energy = 0;
     for (int i = 0; i < PITCH_BUF_SAMPLES; i++) {
-        energy += (double)pcm[i] * pcm[i];
+        energy += (int32_t)pcm[i] * pcm[i];
     }
-    float level = (float)sqrt(energy / PITCH_BUF_SAMPLES);
+    float level = sqrtf((float)((double)energy / PITCH_BUF_SAMPLES));
     if (rms) {
         *rms = level;
     }
@@ -31,15 +37,15 @@ bool pitch_detect(const int16_t *pcm, float fs, float *freq_hz, float *rms)
     // Cumulative mean normalized difference d'(tau). d'(0) = 1 by definition.
     static float dp[PITCH_TAU_MAX + 1];
     dp[0] = 1.0f;
-    double dsum = 0.0;
+    int64_t dsum = 0;
     for (int tau = 1; tau <= PITCH_TAU_MAX; tau++) {
-        double d = 0.0;
+        int64_t d = 0;
         for (int i = 0; i < PITCH_WIN; i++) {
-            double diff = (double)pcm[i] - pcm[i + tau];
-            d += diff * diff;
+            int32_t diff = pcm[i] - pcm[i + tau];
+            d += (int64_t)diff * diff;
         }
         dsum += d;
-        dp[tau] = (dsum > 0.0) ? (float)(d * tau / dsum) : 1.0f;
+        dp[tau] = (dsum > 0) ? (float)((double)d * tau / (double)dsum) : 1.0f;
     }
 
     // First dip below the threshold, extended to its local minimum. Taking

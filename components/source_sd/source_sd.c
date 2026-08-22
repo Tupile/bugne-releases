@@ -15,6 +15,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "tags.h"  // tags_utf8_trim_partial
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -88,6 +89,39 @@ esp_err_t source_sd_init(void)
 bool source_sd_present(void)
 {
     return s_present;
+}
+
+void source_sd_poll(void)
+{
+    // Rate limits: a fresh mount attempt is only worth trying every ~30 s, and
+    // the presence check (one root-directory read) runs every ~60 s.
+    static int64_t s_next_probe_us = 0;
+    int64_t now = esp_timer_get_time();
+    if (now < s_next_probe_us) {
+        return;
+    }
+    s_next_probe_us = now + 60 * 1000000LL;
+
+    if (!s_present) {
+        s_next_probe_us = now + 30 * 1000000LL;
+        source_sd_init();  // hot insert: same mount logic as boot
+        return;
+    }
+
+    DIR *d = opendir(SD_MOUNT_POINT);  // cheap: one sector, not a FAT scan
+    if (d) {
+        closedir(d);
+        return;
+    }
+    // The card stopped answering (pulled or dead). Unmount cleanly so the
+    // hot-insert path above can bring it back once it is reinserted; if the
+    // unmount itself fails, leave everything mounted and try again later.
+    ESP_LOGW(TAG, "SD unreachable, unmounting");
+    s_next_probe_us = now + 30 * 1000000LL;
+    if (esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_card) == ESP_OK) {
+        s_card = NULL;
+        s_present = false;
+    }
 }
 
 bool source_sd_usage(uint64_t *total_bytes, uint64_t *free_bytes)
@@ -207,7 +241,10 @@ esp_err_t source_sd_play(const char *path)
     err = decode_run(fmt, &src);
     // A clean decode that was not interrupted by source_sd_stop() means the file
     // reached its end, so the caller can move to the next track in the folder.
-    s_completed = (err == ESP_OK) && !s_stop;
+    // A read fault must NOT count as completion: file_read returns 0 both at EOF
+    // and on fread error, so without the ferror check one transient SD read
+    // failure (marginal card, hot pull) silently skips to the next track.
+    s_completed = (err == ESP_OK) && !s_stop && !ferror(f);
 
     audio_arbiter_release(AUDIO_SOURCE_SD);
     fclose(f);       // flushes/detaches the stdio buffer before we free it

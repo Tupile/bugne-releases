@@ -55,10 +55,35 @@ static bool s_has_session;
 
 // Cache of the last GitHub release check (web_config_gh_check), read by
 // GET /api/ghota/status. RAM only, no NVS: a reboot just re-checks later.
+// Written from TWO tasks (the httpd handler and ui's daily auto-check through
+// the web_config_gh_check function pointer), so every access goes through the
+// lock below; without it a reader could catch a torn version string.
+static portMUX_TYPE s_gh_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_gh_latest[32];
 static bool s_gh_update;
 static bool s_gh_checked;
 static int64_t s_gh_check_time_us;
+
+static void gh_cache_store(const char *latest, bool update)
+{
+    portENTER_CRITICAL(&s_gh_lock);
+    strlcpy(s_gh_latest, latest, sizeof(s_gh_latest));
+    s_gh_update = update;
+    s_gh_checked = true;
+    s_gh_check_time_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_gh_lock);
+}
+
+static void gh_cache_read(char *latest, size_t cap, bool *update, bool *checked,
+                          long long *checked_age_s)
+{
+    portENTER_CRITICAL(&s_gh_lock);
+    strlcpy(latest, s_gh_latest, cap);
+    *update = s_gh_update;
+    *checked = s_gh_checked;
+    *checked_age_s = *checked ? (long long)((esp_timer_get_time() - s_gh_check_time_us) / 1000000) : -1;
+    portEXIT_CRITICAL(&s_gh_lock);
+}
 
 // The config page and login HTML live in www/*.html and are embedded via
 // EMBED_FILES (see CMakeLists.txt). EMBED_FILES blobs are NOT null-terminated,
@@ -398,7 +423,10 @@ static esp_err_t coredump_erase_post(httpd_req_t *req)
 static esp_err_t logs_get(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
-    char *buf = malloc(LOGSTORE_SIZE + 1);
+    // Explicit PSRAM: plain malloc(16385) only lands in PSRAM because it sits
+    // one byte over CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL; keep that guaranteed
+    // (log fetches coincide with HTTPS streaming, where internal RAM matters).
+    char *buf = heap_caps_malloc(LOGSTORE_SIZE + 1, MALLOC_CAP_SPIRAM);
     if (!buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_FAIL;
@@ -487,7 +515,16 @@ static esp_err_t ota_post(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_FAIL;
     }
-    int remaining = req->content_len;
+    // Bound and de-wrap the body like sd_upload_post: content_len is unsigned,
+    // so an int copy wrapped negative over 2 GB and skipped the loop entirely
+    // (esp_ota_end then failed on an empty image). A chunked request has
+    // content_len 0 and is rejected by the same check. The cap is the target
+    // partition's size, so it stays correct if the layout changes.
+    if (req->content_len == 0 || req->content_len > part->size) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad firmware size");
+        return ESP_FAIL;
+    }
+    int remaining = (int)req->content_len;
     esp_err_t err = ESP_OK;
     while (remaining > 0) {
         int r = httpd_req_recv(req, buf, remaining < 4096 ? remaining : 4096);
@@ -569,10 +606,7 @@ esp_err_t web_config_gh_check(char *latest, size_t cap, bool *update)
     if (update) {
         *update = upd;
     }
-    strlcpy(s_gh_latest, img.version, sizeof(s_gh_latest));
-    s_gh_update = upd;
-    s_gh_checked = true;
-    s_gh_check_time_us = esp_timer_get_time();
+    gh_cache_store(img.version, upd);
     return ESP_OK;
 }
 
@@ -608,13 +642,16 @@ static esp_err_t ghota_status_get(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
     const esp_app_desc_t *cur = esp_app_get_description();
-    long long age_s = s_gh_checked ? (long long)((esp_timer_get_time() - s_gh_check_time_us) / 1000000) : -1;
+    char latest[32];
+    bool update = false, checked = false;
+    long long age_s = -1;
+    gh_cache_read(latest, sizeof(latest), &update, &checked, &age_s);
     char resp[224];
     httpd_resp_set_type(req, "application/json");
     snprintf(resp, sizeof(resp),
              "{\"current\":\"%s\",\"latest\":\"%s\",\"update\":%s,\"age_s\":%lld}",
-             cur->version, s_gh_checked ? s_gh_latest : "",
-             s_gh_update ? "true" : "false", age_s);
+             cur->version, checked ? latest : "",
+             update ? "true" : "false", age_s);
     return httpd_resp_sendstr(req, resp);
 }
 
@@ -1094,7 +1131,7 @@ static esp_err_t memo_post(httpd_req_t *req)
     if (full) {
         httpd_resp_set_status(req, "507 Insufficient Storage");
         httpd_resp_sendstr(req, "memo box full");
-        return ESP_OK;
+        return ESP_FAIL;  // body never read: close the socket (REQUIRE_AUTH rule)
     }
 
     char final_abs[96], part_abs[104];
@@ -1103,7 +1140,7 @@ static esp_err_t memo_post(httpd_req_t *req)
             : memo_rx_create(from, final_abs, sizeof(final_abs), part_abs, sizeof(part_abs));
     if (!f) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot create file");
-        return ESP_OK;
+        return ESP_FAIL;  // body never read
     }
     // PSRAM buffer: receives can coincide with auto-maintenance HTTPS, and the
     // bench cap-loop test drove internal RAM down to ~500 B free with heavier
@@ -1113,7 +1150,7 @@ static esp_err_t memo_post(httpd_req_t *req)
         fclose(f);
         remove(part_abs);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
-        return ESP_OK;
+        return ESP_FAIL;  // body never read
     }
     // The first 512 bytes are stashed and format-checked as soon as they are
     // complete, so a non-WAV body is refused without writing megabytes first.
@@ -1147,9 +1184,12 @@ static esp_err_t memo_post(httpd_req_t *req)
     if (ok && rename(part_abs, final_abs) != 0) ok = false;
     if (!ok) {
         remove(part_abs);
+        // The body was not fully consumed (format refused early, or the receive
+        // failed mid-transfer): answer with the error, then ESP_FAIL so httpd
+        // closes instead of parsing leftover bytes as the next request.
         if (bad_format) httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a memo wav");
         else httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "receive failed");
-        return ESP_OK;
+        return ESP_FAIL;
     }
     ESP_LOGI(TAG, "memo received from %s (%u bytes%s)", from, (unsigned)total,
              ephemeral ? ", talkie" : "");
@@ -1204,7 +1244,7 @@ static esp_err_t playback_post(httpd_req_t *req)
     char body[512];  // "path" carries a library path up to LIB_PATH_MAX chars
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_OK;
+        return ESP_FAIL;  // body not consumed: close instead of parsing leftovers
     }
     cJSON *root = cJSON_Parse(body);
     const cJSON *action = root ? cJSON_GetObjectItemCaseSensitive(root, "action") : NULL;
@@ -1283,7 +1323,7 @@ static esp_err_t podcasts_download_post(httpd_req_t *req)
     char body[64];
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_OK;
+        return ESP_FAIL;  // body not consumed: close instead of parsing leftovers
     }
     cJSON *root = cJSON_Parse(body);
     const cJSON *id = root ? cJSON_GetObjectItemCaseSensitive(root, "id") : NULL;
@@ -1469,7 +1509,7 @@ static esp_err_t debug_nav_post(httpd_req_t *req)
     char body[128];
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_OK;
+        return ESP_FAIL;  // body not consumed: close instead of parsing leftovers
     }
     cJSON *root = cJSON_Parse(body);
     const cJSON *screen = root ? cJSON_GetObjectItemCaseSensitive(root, "screen") : NULL;

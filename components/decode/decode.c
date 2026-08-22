@@ -294,9 +294,11 @@ static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
         //  - otherwise estimate once from the decoder's own byte cursor after a
         //    short warmup, then lock it so the displayed total stops moving.
         bool dur_locked = false;
+        bool dur_exact = false;  // true only when a Xing/Info/VBRI frame count was present
         if (mp3->totalPCMFrameCount != DRMP3_UINT64_MAX && mp3->totalPCMFrameCount > 0) {
             s_dur_ms = (uint32_t)(mp3->totalPCMFrameCount * 1000 / rate);
             dur_locked = true;
+            dur_exact = true;
         } else if (src->seek) {
             uint64_t total_audio =
                 (mp3->streamLength != DRMP3_UINT64_MAX && mp3->streamLength > mp3->streamStartOffset)
@@ -305,6 +307,9 @@ static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
             uint32_t kbps = (mp3->pData && mp3->dataSize >= 4) ? drmp3_hdr_bitrate_kbps(mp3->pData) : 128;
             if (kbps == 0) kbps = 128;
             if (total_audio > 0) {
+                // Estimate from the FIRST frame's bitrate. On VBR files whose
+                // opener encodes high this can badly understate the real length,
+                // which is why skip below refuses to trust it past its end.
                 s_dur_ms = (uint32_t)(total_audio * 8 / kbps);
                 dur_locked = true;
             }
@@ -312,9 +317,12 @@ static esp_err_t run_mp3(const decode_source_t *src, uint32_t skip_ms)
         uint64_t cur = 0;
         // Skip a podcast intro or resume offset.
         // For seekable sources (SD), fast byte seek is instant; for live streams,
-        // decode and discard leading frames.
+        // decode and discard leading frames. On a seekable source whose duration
+        // is only ESTIMATED (no Xing), a skip at or past the estimate must not
+        // byte-seek: the clamp would land near EOF and the episode would end
+        // instantly instead of resuming. Fall back to decode-and-discard.
         if (skip_ms > 0) {
-            if (src->seek && s_dur_ms > 0) {
+            if (src->seek && s_dur_ms > 0 && (dur_exact || skip_ms < s_dur_ms)) {
                 uint32_t target = (uint32_t)skip_ms > s_dur_ms ? s_dur_ms : (uint32_t)skip_ms;
                 uint64_t off = mp3_seek_byte_for_ms(mp3, src, target, s_dur_ms);
                 if (drmp3__on_seek_64(mp3, off, DRMP3_SEEK_SET)) {
@@ -530,6 +538,9 @@ static esp_err_t run_aac_mp4(const decode_source_t *src, uint32_t skip_ms)
         unsigned fbytes = 0, tstamp = 0, dur = 0;
         MP4D_file_offset_t off = MP4D_frame_offset(&mp4, trk, ns, &fbytes, &tstamp, &dur);
         if (fbytes == 0) continue;
+        // Same bound as mp4_read_cb: a sample past 2 GB would wrap negative in
+        // the int cast below and fail every seek with an opaque stop.
+        if (off < 0 || off > INT32_MAX) break;
         if (fbytes > in_cap) {
             uint8_t *nb = heap_caps_realloc(inbuf, fbytes, MALLOC_CAP_SPIRAM);
             if (!nb) break;
@@ -931,8 +942,11 @@ static void scan_id3v2(const decode_source_t *s)
         uint32_t ext = (ver == 4)
             ? (((uint32_t)(e[0] & 0x7F) << 21) | ((e[1] & 0x7F) << 14) | ((e[2] & 0x7F) << 7) | (e[3] & 0x7F))
             : (((uint32_t)e[0] << 24) | ((uint32_t)e[1] << 16) | ((uint32_t)e[2] << 8) | e[3]);
-        if (!src_skip(s, ext)) return;
-        pos += ext;
+        // v2.3's size field excludes itself; v2.4's counts the whole extended
+        // header, so the 4 bytes consumed above come out of it.
+        uint32_t rest = (ver == 4 && ext >= 4) ? ext - 4 : ext;
+        if (!src_skip(s, rest)) return;
+        pos += rest;
     }
     size_t hdrlen = v22 ? 6 : 10;
     while (pos + hdrlen <= tagsize) {

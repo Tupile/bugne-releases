@@ -147,16 +147,18 @@ static void dedup_ids(int *ids, size_t n)
     }
 }
 
-// Overlay parsed JSON onto the already-defaulted s_config. Missing fields keep
+// Overlay parsed JSON onto an already-defaulted config. Missing fields keep
 // their defaults. All strings are bounded. An entry without its required URL is
-// skipped. Treat every value as untrusted.
-static void load_from_json(const cJSON *root)
+// skipped. Treat every value as untrusted. Takes the target explicitly so a web
+// full-replace can parse into scratch memory and leave the live config alone
+// until the save is known to have succeeded.
+static void load_from_json(config_t *c, const cJSON *root)
 {
     const cJSON *dev = cJSON_GetObjectItemCaseSensitive(root, "device");
     if (cJSON_IsObject(dev)) {
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(dev, "name");
         if (cJSON_IsString(name) && name->valuestring) {
-            strlcpy(s_config.device_name, name->valuestring, sizeof(s_config.device_name));
+            strlcpy(c->device_name, name->valuestring, sizeof(c->device_name));
         }
     }
 
@@ -164,26 +166,26 @@ static void load_from_json(const cJSON *root)
     if (cJSON_IsObject(ha)) {
         const cJSON *url = cJSON_GetObjectItemCaseSensitive(ha, "url");
         if (cJSON_IsString(url) && url->valuestring) {
-            strlcpy(s_config.ha.url, url->valuestring, sizeof(s_config.ha.url));
+            strlcpy(c->ha.url, url->valuestring, sizeof(c->ha.url));
         }
         const cJSON *eid = cJSON_GetObjectItemCaseSensitive(ha, "entity_id");
         if (cJSON_IsString(eid) && eid->valuestring) {
-            strlcpy(s_config.ha.entity_id, eid->valuestring, sizeof(s_config.ha.entity_id));
+            strlcpy(c->ha.entity_id, eid->valuestring, sizeof(c->ha.entity_id));
         }
     }
 
     const cJSON *radios = cJSON_GetObjectItemCaseSensitive(root, "webradios");
     if (cJSON_IsArray(radios)) {
         int n = cJSON_GetArraySize(radios);
-        for (int i = 0; i < n && s_config.webradio_count < CFG_MAX_WEBRADIOS; i++) {
+        for (int i = 0; i < n && c->webradio_count < CFG_MAX_WEBRADIOS; i++) {
             const cJSON *it = cJSON_GetArrayItem(radios, i);
             if (!cJSON_IsObject(it)) continue;
             const cJSON *url = cJSON_GetObjectItemCaseSensitive(it, "url");
             if (!cJSON_IsString(url) || !url->valuestring || url->valuestring[0] == '\0') continue;
             const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
             const cJSON *nm = cJSON_GetObjectItemCaseSensitive(it, "name");
-            config_webradio_t *w = &s_config.webradios[s_config.webradio_count++];
-            w->id = cJSON_IsNumber(id) ? id->valueint : (int)s_config.webradio_count;
+            config_webradio_t *w = &c->webradios[c->webradio_count++];
+            w->id = cJSON_IsNumber(id) ? id->valueint : (int)c->webradio_count;
             strlcpy(w->name, (cJSON_IsString(nm) && nm->valuestring) ? nm->valuestring : "", sizeof(w->name));
             strlcpy(w->url, url->valuestring, sizeof(w->url));
             // The web form posts checkbox values as a number; accept a string too.
@@ -193,23 +195,23 @@ static void load_from_json(const cJSON *root)
             w->skip_preroll = spv ? 1 : 0;
         }
         int ids[CFG_MAX_WEBRADIOS];
-        for (size_t i = 0; i < s_config.webradio_count; i++) ids[i] = s_config.webradios[i].id;
-        dedup_ids(ids, s_config.webradio_count);
-        for (size_t i = 0; i < s_config.webradio_count; i++) s_config.webradios[i].id = ids[i];
+        for (size_t i = 0; i < c->webradio_count; i++) ids[i] = c->webradios[i].id;
+        dedup_ids(ids, c->webradio_count);
+        for (size_t i = 0; i < c->webradio_count; i++) c->webradios[i].id = ids[i];
     }
 
     const cJSON *pods = cJSON_GetObjectItemCaseSensitive(root, "podcasts");
     if (cJSON_IsArray(pods)) {
         int n = cJSON_GetArraySize(pods);
-        for (int i = 0; i < n && s_config.podcast_count < CFG_MAX_PODCASTS; i++) {
+        for (int i = 0; i < n && c->podcast_count < CFG_MAX_PODCASTS; i++) {
             const cJSON *it = cJSON_GetArrayItem(pods, i);
             if (!cJSON_IsObject(it)) continue;
             const cJSON *rss = cJSON_GetObjectItemCaseSensitive(it, "rss_url");
             if (!cJSON_IsString(rss) || !rss->valuestring || rss->valuestring[0] == '\0') continue;
             const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
             const cJSON *title = cJSON_GetObjectItemCaseSensitive(it, "title");
-            config_podcast_t *p = &s_config.podcasts[s_config.podcast_count++];
-            p->id = cJSON_IsNumber(id) ? id->valueint : (int)s_config.podcast_count;
+            config_podcast_t *p = &c->podcasts[c->podcast_count++];
+            p->id = cJSON_IsNumber(id) ? id->valueint : (int)c->podcast_count;
             strlcpy(p->title, (cJSON_IsString(title) && title->valuestring) ? title->valuestring : "", sizeof(p->title));
             strlcpy(p->rss_url, rss->valuestring, sizeof(p->rss_url));
             // The web form posts numbers as strings, so accept both forms.
@@ -219,37 +221,37 @@ static void load_from_json(const cJSON *root)
             p->skip_seconds = sk < 0 ? 0 : sk;
         }
         int ids[CFG_MAX_PODCASTS];
-        for (size_t i = 0; i < s_config.podcast_count; i++) ids[i] = s_config.podcasts[i].id;
-        dedup_ids(ids, s_config.podcast_count);
-        for (size_t i = 0; i < s_config.podcast_count; i++) s_config.podcasts[i].id = ids[i];
+        for (size_t i = 0; i < c->podcast_count; i++) ids[i] = c->podcasts[i].id;
+        dedup_ids(ids, c->podcast_count);
+        for (size_t i = 0; i < c->podcast_count; i++) c->podcasts[i].id = ids[i];
     }
 
     const cJSON *ui = cJSON_GetObjectItemCaseSensitive(root, "ui");
     if (cJSON_IsObject(ui)) {
         const cJSON *vol = cJSON_GetObjectItemCaseSensitive(ui, "volume");
-        if (cJSON_IsNumber(vol)) s_config.ui.volume = clampi(vol->valueint, 0, 100);
+        if (cJSON_IsNumber(vol)) c->ui.volume = clampi(vol->valueint, 0, 100);
         const cJSON *vmax = cJSON_GetObjectItemCaseSensitive(ui, "volume_max");
-        if (cJSON_IsNumber(vmax)) s_config.ui.volume_max = clampi(vmax->valueint, 1, 100);
+        if (cJSON_IsNumber(vmax)) c->ui.volume_max = clampi(vmax->valueint, 1, 100);
         const cJSON *ss = cJSON_GetObjectItemCaseSensitive(ui, "screen_sleep_seconds");
-        if (cJSON_IsNumber(ss)) s_config.ui.screen_sleep_seconds = ss->valueint < 0 ? 0 : ss->valueint;
+        if (cJSON_IsNumber(ss)) c->ui.screen_sleep_seconds = ss->valueint < 0 ? 0 : ss->valueint;
         const cJSON *lang = cJSON_GetObjectItemCaseSensitive(ui, "lang");
         if (cJSON_IsString(lang) && lang->valuestring && lang->valuestring[0])
-            strlcpy(s_config.ui.lang, lang->valuestring, sizeof(s_config.ui.lang));
+            strlcpy(c->ui.lang, lang->valuestring, sizeof(c->ui.lang));
         const cJSON *ori = cJSON_GetObjectItemCaseSensitive(ui, "orientation");
-        if (cJSON_IsNumber(ori)) s_config.ui.orientation = clampi(ori->valueint, 0, 1);
+        if (cJSON_IsNumber(ori)) c->ui.orientation = clampi(ori->valueint, 0, 1);
         const cJSON *dk = cJSON_GetObjectItemCaseSensitive(ui, "dark");
-        if (cJSON_IsNumber(dk)) s_config.ui.dark = clampi(dk->valueint, 0, 1);
+        if (cJSON_IsNumber(dk)) c->ui.dark = clampi(dk->valueint, 0, 1);
         const cJSON *ac = cJSON_GetObjectItemCaseSensitive(ui, "accent");
-        if (cJSON_IsNumber(ac)) s_config.ui.accent = clampi(ac->valueint, 0, 4);
+        if (cJSON_IsNumber(ac)) c->ui.accent = clampi(ac->valueint, 0, 4);
         const cJSON *gm = cJSON_GetObjectItemCaseSensitive(ui, "game");
-        if (cJSON_IsNumber(gm)) s_config.ui.game = clampi(gm->valueint, 0, 1);
+        if (cJSON_IsNumber(gm)) c->ui.game = clampi(gm->valueint, 0, 1);
         const cJSON *tn = cJSON_GetObjectItemCaseSensitive(ui, "tuner");
-        if (cJSON_IsNumber(tn)) s_config.ui.tuner = clampi(tn->valueint, 0, 1);
+        if (cJSON_IsNumber(tn)) c->ui.tuner = clampi(tn->valueint, 0, 1);
         const cJSON *mr = cJSON_GetObjectItemCaseSensitive(ui, "memo_rx");
-        if (cJSON_IsNumber(mr)) s_config.ui.memo_rx = clampi(mr->valueint, 0, 1);
+        if (cJSON_IsNumber(mr)) c->ui.memo_rx = clampi(mr->valueint, 0, 1);
         const cJSON *tz = cJSON_GetObjectItemCaseSensitive(ui, "tz");
         if (cJSON_IsString(tz) && tz->valuestring && tz->valuestring[0])
-            strlcpy(s_config.ui.tz, tz->valuestring, sizeof(s_config.ui.tz));
+            strlcpy(c->ui.tz, tz->valuestring, sizeof(c->ui.tz));
     }
 
     // Legacy single "alarm" object, kept forever for backward compat: maps to
@@ -257,7 +259,7 @@ static void load_from_json(const cJSON *root)
     // page saved by old firmware, mid-transition) has the array win.
     const cJSON *alarm = cJSON_GetObjectItemCaseSensitive(root, "alarm");
     if (cJSON_IsObject(alarm)) {
-        parse_one_alarm(alarm, &s_config.alarms[0]);
+        parse_one_alarm(alarm, &c->alarms[0]);
     }
 
     const cJSON *alarms = cJSON_GetObjectItemCaseSensitive(root, "alarms");
@@ -267,14 +269,14 @@ static void load_from_json(const cJSON *root)
         for (int i = 0; i < n; i++) {
             const cJSON *it = cJSON_GetArrayItem(alarms, i);
             if (!cJSON_IsObject(it)) continue;
-            parse_one_alarm(it, &s_config.alarms[i]);
+            parse_one_alarm(it, &c->alarms[i]);
         }
     }
 
     const cJSON *favs = cJSON_GetObjectItemCaseSensitive(root, "favorites");
     if (cJSON_IsArray(favs)) {
         int n = cJSON_GetArraySize(favs);
-        for (int i = 0; i < n && s_config.favorite_count < CFG_MAX_FAVORITES; i++) {
+        for (int i = 0; i < n && c->favorite_count < CFG_MAX_FAVORITES; i++) {
             const cJSON *it = cJSON_GetArrayItem(favs, i);
             if (!cJSON_IsObject(it)) continue;
             const cJSON *ty = cJSON_GetObjectItemCaseSensitive(it, "type");
@@ -282,7 +284,7 @@ static void load_from_json(const cJSON *root)
             const cJSON *pa = cJSON_GetObjectItemCaseSensitive(it, "path");
             // An SD favorite without its path is unplayable: skip it.
             if (type == 1 && (!cJSON_IsString(pa) || !pa->valuestring || pa->valuestring[0] == '\0')) continue;
-            config_favorite_t *f = &s_config.favorites[s_config.favorite_count++];
+            config_favorite_t *f = &c->favorites[c->favorite_count++];
             f->type = type;
             const cJSON *rid = cJSON_GetObjectItemCaseSensitive(it, "radio_id");
             f->radio_id = cJSON_IsNumber(rid) ? rid->valueint : 0;
@@ -299,7 +301,7 @@ static void load_from_json(const cJSON *root)
         for (int i = 0; i < n; i++) {
             const cJSON *it = cJSON_GetArrayItem(quiet, i);
             if (!cJSON_IsObject(it)) continue;
-            config_quiet_window_t *q = &s_config.quiet[i];
+            config_quiet_window_t *q = &c->quiet[i];
             const cJSON *en = cJSON_GetObjectItemCaseSensitive(it, "enabled");
             if (cJSON_IsNumber(en)) q->enabled = clampi(en->valueint, 0, 1);
             const cJSON *sh = cJSON_GetObjectItemCaseSensitive(it, "start_hour");
@@ -321,9 +323,9 @@ static void load_from_json(const cJSON *root)
     const cJSON *lim = cJSON_GetObjectItemCaseSensitive(root, "daily_limit");
     if (cJSON_IsObject(lim)) {
         const cJSON *en = cJSON_GetObjectItemCaseSensitive(lim, "enabled");
-        if (cJSON_IsNumber(en)) s_config.daily_limit.enabled = clampi(en->valueint, 0, 1);
+        if (cJSON_IsNumber(en)) c->daily_limit.enabled = clampi(en->valueint, 0, 1);
         const cJSON *mi = cJSON_GetObjectItemCaseSensitive(lim, "minutes");
-        if (cJSON_IsNumber(mi)) s_config.daily_limit.minutes = clampi(mi->valueint, 5, 720);
+        if (cJSON_IsNumber(mi)) c->daily_limit.minutes = clampi(mi->valueint, 5, 720);
     }
 }
 
@@ -515,7 +517,7 @@ static esp_err_t load_config(void)
         return ESP_OK;
     }
 
-    load_from_json(root);
+    load_from_json(&s_config, root);
     cJSON_Delete(root);
     ESP_LOGI(TAG, "config loaded: %u webradios, %u podcasts, %u favorites",
              (unsigned)s_config.webradio_count, (unsigned)s_config.podcast_count,
@@ -719,10 +721,31 @@ esp_err_t config_store_write_json(const char *json)
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
-    set_defaults(&s_config);
-    load_from_json(root);
+
+    // Parse into scratch memory and save THAT to disk first: if the save fails
+    // (config over the size cap, full LittleFS), the live config must stay the
+    // one on disk. Committing to RAM before the save used to leave RAM holding
+    // the rejected config, which the next device-side setter then persisted.
+    config_t *scratch = heap_caps_calloc(1, sizeof(*scratch), MALLOC_CAP_SPIRAM);
+    if (!scratch) {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    set_defaults(scratch);
+    load_from_json(scratch, root);
     cJSON_Delete(root);
-    return save_to_disk(&s_config);
+
+    esp_err_t err = save_to_disk(scratch);
+    if (err == ESP_OK) {
+        // Atomic commit for readers on other tasks (they see old or new, never
+        // a half-parsed mix). schema_version is identical by construction.
+        memcpy(&s_config, scratch, sizeof(*scratch));
+    } else {
+        ESP_LOGE(TAG, "posted config not saved (%s), keeping the current one",
+                 esp_err_to_name(err));
+    }
+    free(scratch);
+    return err;
 }
 
 static void hash_password(const uint8_t *salt, const char *plain, uint8_t *out)

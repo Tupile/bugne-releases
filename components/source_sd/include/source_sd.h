@@ -17,6 +17,16 @@ esp_err_t source_sd_init(void);
 // Whether the SD card is mounted.
 bool source_sd_present(void);
 
+// Periodic presence probe, called from the UI tick. Two jobs, both rate-limited
+// internally (cheap opendir, never f_getfree which scans the whole FAT):
+//  - no card: retry the mount every ~30 s, so a card inserted after boot
+//    appears without a reboot (the UI rebuilds on the presence edge);
+//  - card present: verify it still answers every ~60 s; a pulled card is
+//    unmounted cleanly so the retry path above can bring it back.
+// Call it only while nothing holds the card busy (no playback, no download):
+// unmounting under an open FILE* is not supported.
+void source_sd_poll(void);
+
 // Card capacity and free space in bytes. Returns false (and leaves the outputs
 // untouched) if no card is mounted or the query fails. Either pointer may be NULL.
 bool source_sd_usage(uint64_t *total_bytes, uint64_t *free_bytes);

@@ -1,9 +1,23 @@
-name: "Touch Podcast SD Resume Test"
+name: "Offline Podcasts Navigation (no seed)"
 version: 1
 author: "Bugne"
+# The old demo seed (fake manifest + fake resume position written by
+# podcast_resume_init) is gone from production firmware, so the "Reprendre"
+# dialog cannot appear in the simulator: there is no network, no SD card, and
+# no manifest in flash. This scenario pins the real offline behavior instead:
+# navigating into a podcast with no manifest and no Wi-Fi must show the
+# episodes screen with its status line, refuse playback harmlessly, never pop
+# a resume dialog, and never crash. The resume store itself is covered by
+# test/host/test_podcast_resume.c.
 steps:
   - wait-serial: "Bugne booting"
-  - delay: 3500ms
+  # Pins the seed removal directly: the resume store must come up EMPTY (the
+  # old firmware logged a seeded fake position instead).
+  - wait-serial: "podcast_resume: loaded 0 resume position(s)"
+  # Slow subsystems landed (net/web/SD/sources): proves the boot path behind
+  # this batch's config_store/stats/library changes completed cleanly.
+  - wait-serial: "background init complete"
+  - delay: 1500ms
   # Tap Podcasts tile on Home (top-right)
   - touch:
       part-id: lcd
@@ -11,24 +25,38 @@ steps:
       y: 110
       duration: 120ms
   - delay: 1500ms
-  # Tap first podcast ("Les P'tits Bateaux") in the podcast list
+  # Tap first podcast ("Les P'tits Bateaux", the config default) in the list
   - touch:
       part-id: lcd
       x: 120
       y: 80
       duration: 120ms
   - delay: 1500ms
-  # Tap first episode ("Pourquoi la mer est salée ?") in the episode table
+  # Episodes screen: manifest missing, offline. Tap the first row area and the
+  # coordinates where the resume dialog buttons used to sit: both must be
+  # inert (no dialog exists to catch them).
   - touch:
       part-id: lcd
       x: 120
       y: 80
       duration: 120ms
-  - delay: 1500ms
-  # Tap "Reprendre" button in the resume modal (centered primary button)
+  - delay: 800ms
   - touch:
       part-id: lcd
       x: 120
       y: 165
       duration: 120ms
-  - delay: 2000ms
+  - delay: 800ms
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 215
+      duration: 120ms
+  - delay: 800ms
+  # Back to Home
+  - touch:
+      part-id: lcd
+      x: 20
+      y: 20
+      duration: 120ms
+  - delay: 1500ms

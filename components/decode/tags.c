@@ -58,6 +58,9 @@ void tags_id3_text(char *out, size_t size, const uint8_t *p, size_t len)
         size_t k = tn < size - 1 ? tn : size - 1, j = 0;
         while (j < k && t[j]) { out[j] = (char)t[j]; j++; }
         out[j] = '\0';
+        // The bounded copy can cut a multi-byte sequence in half; drop the
+        // partial tail so the string is always valid UTF-8.
+        tags_utf8_trim_partial(out);
         break;
     }
     case 1: {  // UTF-16 with BOM
@@ -92,7 +95,8 @@ void tags_parse_id3v2(tags_t *out, const uint8_t *tag, size_t size)
                ((tag[pos+2] & 0x7F) << 7) | (tag[pos+3] & 0x7F))
             : (((size_t)tag[pos] << 24) | ((size_t)tag[pos+1] << 16) |
                ((size_t)tag[pos+2] << 8) | tag[pos+3]);
-        pos += 4 + ext;
+        // v2.3's size field excludes itself; v2.4's counts the whole header.
+        pos += (ver == 4 && ext >= 4) ? ext : 4 + ext;
     }
     while (pos + hdrlen <= size) {
         const uint8_t *id = tag + pos;
@@ -132,6 +136,9 @@ void tags_copy_utf8(char *out, size_t size, const char *s, size_t n)
     size_t k = n < size - 1 ? n : size - 1;
     memcpy(out, s, k);
     out[k] = '\0';
+    // Same rule as everywhere untrusted UTF-8 lands in a fixed buffer: a cut
+    // multi-byte tail must go, or JSON consumers see invalid UTF-8.
+    tags_utf8_trim_partial(out);
 }
 
 // Parse a Vorbis comment block already read into memory.
@@ -200,7 +207,9 @@ static bool id3_walk_start(const uint8_t *tag, size_t size, uint8_t *ver_out,
                ((tag[*pos+2] & 0x7F) << 7) | (tag[*pos+3] & 0x7F))
             : (((size_t)tag[*pos] << 24) | ((size_t)tag[*pos+1] << 16) |
                ((size_t)tag[*pos+2] << 8) | tag[*pos+3]);
-        *pos += 4 + ext;
+        // v2.3's size field excludes itself (skip 4 + ext); v2.4's counts the
+        // whole extended header including those 4 bytes (skip just ext).
+        *pos += (ver == 4 && ext >= 4) ? ext : 4 + ext;
     }
     *ver_out = ver;
     return true;
