@@ -98,10 +98,11 @@ device.
 
 <img src="manual/img/en/web-radios.png" width="300">
 
-**Podcasts tab**: add a podcast with the URL of its RSS feed. To find that URL,
-search on [podcastindex.org](https://podcastindex.org) and click "Copy RSS",
-then paste the link into the field. "Download new" saves the fresh episodes to
-the microSD card for offline listening.
+**Podcasts tab**: the "Find podcasts" box searches the Apple Podcasts
+directory. Type a name, then add a result with one click: the page fills in
+the title and the RSS address by itself. You can also paste any RSS address by
+hand. "Download new" saves the fresh episodes to the microSD card for offline
+listening.
 
 <img src="manual/img/en/web-podcasts.png" width="300">
 

@@ -102,7 +102,9 @@ on it is optional.
    which looks like `http://bugne-xxxx.local`.
 6. Optional: insert a microSD card with music. The folders and the files then
    appear under the SD card tile. The device plays MP3, FLAC, AAC (.m4a), Ogg
-   Opus and Ogg Vorbis files.
+   Opus and Ogg Vorbis files. You can insert or remove the card at any time,
+   while the device runs: it notices by itself within about half a minute,
+   with no reboot.
 7. Optional but recommended: on the web page, open Settings and set a page
    password. A child then cannot open the parent settings from their own phone.
 
@@ -298,14 +300,21 @@ from the library.
 
 <img src="img/en/web-podcasts.png" width="300">
 
-Add a podcast with the URL of its RSS feed. To find that URL, search on
-[podcastindex.org](https://podcastindex.org) and click "Copy RSS", then paste
-the link into the field. The page refuses to save a podcast with no RSS URL.
+The "Find podcasts" box searches the Apple Podcasts directory. Type a name,
+then add one of the results with one click: the page fills in the title and
+the RSS address by itself. You can also add a show by hand: paste the address
+of its RSS feed into the field below. The page refuses to save a podcast with
+no RSS URL.
+
+The "Intro / ads skip calibration" card plays the latest episode of a show in
+your browser. Pause when the intro or the sponsor part ends, and the button
+sets the skip seconds for that show. Each saved podcast also has a "Test
+skip" button that opens the same player, to check or adjust the value later.
 
 The intro-skip field cuts the first N seconds of every episode, for a sponsor
 jingle. "Download new" saves the fresh episodes to the SD card for offline
-listening. A download runs when nobody uses the device, and pauses as soon as a
-child plays something. The device also refreshes the feeds and downloads the
+listening. A download runs when nobody uses the device, and pauses as soon as
+a child plays something. The device also refreshes the feeds and downloads the
 new episodes by itself, after it stays idle for a while.
 
 ### Radios
@@ -400,7 +409,8 @@ to the previous one by itself.
   and the tuner keep working. The web radios and the episodes that are not
   downloaded stay grey until the connection returns.
 - No SD card, or the device does not see it: the web radios and the podcast
-  streaming still work. Re-seat the card. Use a card formatted in FAT32.
+  streaming still work. Re-seat the card; the device rechecks the slot by
+  itself, with no reboot. Use a card formatted in FAT32.
 - No sound: check the volume slider, then the max volume ceiling on the web
   Settings tab, then make sure the quiet hours are not active.
 - A web radio stopped by itself: the device retries a dropped stream for about

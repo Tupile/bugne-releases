@@ -104,10 +104,10 @@ la tuile Radios web de l'appareil.
 
 <img src="manual/img/fr/web-radios.png" width="300">
 
-**Onglet Podcasts** : ajoutez un podcast avec l'URL de son flux RSS. Pour
-trouver cette URL, cherchez sur
-[podcastindex.org](https://podcastindex.org), cliquez sur « Copy RSS », puis
-collez le lien dans le champ. « Télécharger nouveaux » enregistre les épisodes
+**Onglet Podcasts** : le cadre « Trouver des podcasts » cherche dans l'annuaire
+Apple Podcasts. Tapez un nom, puis ajoutez un résultat en un clic : la page
+remplit toute seule le titre et l'adresse RSS. Vous pouvez aussi coller une
+adresse RSS à la main. « Télécharger nouveaux » enregistre les épisodes
 récents sur la carte microSD pour l'écoute hors ligne.
 
 <img src="manual/img/fr/web-podcasts.png" width="300">

@@ -28,7 +28,7 @@ The firmware was developed with substantial help from AI coding assistants.
 
 ## Status
 
-Version 1.9.0. Feature-complete and validated on real hardware: display, touch,
+Version 1.9.6. Feature-complete and validated on real hardware: display, touch,
 audio, SD card, Wi-Fi, Sendspin sync, and firmware update with rollback. It
 builds with ESP-IDF 5.5. The implemented feature set:
 
@@ -37,7 +37,9 @@ builds with ESP-IDF 5.5. The implemented feature set:
 - NVS holds the Wi-Fi credentials and the hashed web page password.
 - LittleFS holds `config.json`.
 - The device works with or without an SD card. The SD card holds bulk content
-  only: music, cached episodes and manifests.
+  only: music, cached episodes and manifests. You can insert or remove the
+  card while the device runs; it notices by itself within about half a minute,
+  with no reboot.
 
 **Audio**
 
@@ -60,8 +62,9 @@ builds with ESP-IDF 5.5. The implemented feature set:
 - The device parses the RSS feed itself with yxml and writes a fixed-schema
   manifest. The number of episodes is not limited. Each feed can skip its own
   intro.
-- Search for a feed on [podcastindex.org](https://podcastindex.org) and click
-  "Copy RSS" to get its address.
+- The web page searches the Apple Podcasts directory: type a name, add a show
+  with one click, and set the intro skip while you listen to the latest
+  episode in the browser. You can also paste any RSS address by hand.
 - The device downloads episodes to the SD card. The download engine runs only
   when nothing plays, and continues after a reboot. When the device stays idle
   it also refreshes the feeds, downloads the new episodes and rescans the SD

@@ -105,7 +105,9 @@ avec de la musique est facultative.
    l'adresse, de la forme `http://bugne-xxxx.local`.
 6. Facultatif : insérez une carte microSD avec de la musique. Les dossiers et
    les fichiers apparaissent alors sous la tuile Carte SD. L'appareil lit les
-   fichiers MP3, FLAC, AAC (.m4a), Ogg Opus et Ogg Vorbis.
+   fichiers MP3, FLAC, AAC (.m4a), Ogg Opus et Ogg Vorbis. Vous pouvez
+   insérer ou retirer la carte à tout moment, l'appareil allumé : il le
+   remarque tout seul en une demi-minute environ, sans redémarrage.
 7. Facultatif mais recommandé : sur la page web, ouvrez Réglages et définissez
    un mot de passe de page. Un enfant ne pourra alors pas ouvrir les réglages
    parents depuis son propre téléphone.
@@ -312,10 +314,17 @@ n'importe quel morceau de la bibliothèque.
 
 <img src="img/fr/web-podcasts.png" width="300">
 
-Ajoutez un podcast avec l'URL de son flux RSS. Pour trouver cette URL, cherchez
-sur [podcastindex.org](https://podcastindex.org), cliquez sur « Copy RSS », puis
-collez le lien dans le champ. La page refuse d'enregistrer un podcast sans URL
-de flux RSS.
+Le cadre « Trouver des podcasts » cherche dans l'annuaire Apple Podcasts.
+Tapez un nom, puis ajoutez l'un des résultats en un clic : la page remplit
+toute seule le titre et l'adresse RSS. Vous pouvez aussi ajouter une émission
+à la main : collez l'adresse de son flux RSS dans le champ ci-dessous. La page
+refuse d'enregistrer un podcast sans URL de flux RSS.
+
+La carte « Calage du saut d'intro / de pub » joue le dernier épisode d'une
+émission dans votre navigateur. Mettez en pause quand l'intro ou la partie
+sponsor se termine, et le bouton règle les secondes à sauter pour cette
+émission. Chaque podcast enregistré a aussi un bouton « Tester le saut » qui
+ouvre le même lecteur, pour vérifier ou ajuster la valeur plus tard.
 
 Le champ des secondes d'intro coupe les N premières secondes de chaque épisode,
 pour un jingle de sponsor. « Télécharger nouveaux » enregistre les nouveaux
@@ -420,8 +429,9 @@ firmware ne démarre pas, l'appareil revient tout seul au précédent.
   téléchargés, le jeu et l'accordeur continuent de marcher. Les radios web et
   les épisodes non téléchargés restent grisés jusqu'au retour de la connexion.
 - Pas de carte SD, ou l'appareil ne la voit pas : les radios web et le
-  streaming de podcasts marchent quand même. Réinsérez la carte. Utilisez une
-  carte formatée en FAT32.
+  streaming de podcasts marchent quand même. Réinsérez la carte ; l'appareil
+  revérifie le lecteur tout seul, sans redémarrage. Utilisez une carte
+  formatée en FAT32.
 - Pas de son : vérifiez le curseur de volume, puis le volume maximum dans
   l'onglet Réglages de la page web, puis que les heures calmes ne sont pas
   actives.
