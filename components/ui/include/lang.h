@@ -80,6 +80,7 @@ typedef enum {
     STR_ALARM_VOLUME,
     STR_ALARM_SOURCE,
     STR_ALARM_SD_UNSET,
+    STR_ALARM_NONE,         // alarm source dropdown: no favorite, no SD track, no radio
     STR_ALARM_BEEP,
     STR_ALARM_N_FMT,        // printf with one %d (1-based alarm index), e.g. "Alarm %d"
     STR_ALARM_OFF,          // alarm list row: shown instead of the day letters when disabled
@@ -139,6 +140,22 @@ typedef enum {
     STR_RESUME_AT_FMT,
     STR_RESUME_ACTION,
     STR_RESUME_FROM_START,
+    STR_UPDATE,             // settings menu row + update screen title
+    STR_UPD_CURRENT_FMT,    // printf with one %s (running version)
+    STR_UPD_CHECK,          // button: check GitHub for a new release
+    STR_UPD_CHECKING,       // status: check in progress
+    STR_UPD_UPTODATE,       // status: running version is the latest release
+    STR_UPD_AVAIL_FMT,      // printf with one %s (new version)
+    STR_UPD_INSTALL,        // button: install and restart
+    STR_UPD_CONFIRM_FMT,    // modal title, printf with one %s (new version)
+    STR_UPD_CONFIRM_BODY,   // modal body
+    STR_CANCEL,
+    STR_UPD_INSTALLING,     // status: download/flash in progress
+    STR_UPD_REBOOTING,      // status: installed, restarting now
+    STR_UPD_FAILED,         // status: check failed
+    STR_UPD_INSTALL_FAILED, // status: install failed
+    STR_UPD_NEED_WIFI,      // status: offline
+    STR_UPD_UNAVAILABLE,    // status: web_config not up (fn pointers NULL)
     STR__COUNT
 } str_id_t;
 

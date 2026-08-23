@@ -610,6 +610,50 @@ esp_err_t web_config_gh_check(char *latest, size_t cap, bool *update)
     return ESP_OK;
 }
 
+// Public read of the check cache for the device UI's badge (and the status
+// endpoint). False when nothing has been checked since boot.
+bool web_config_gh_status(char *latest, size_t cap, bool *update)
+{
+    bool checked = false;
+    long long age_s = -1;
+    gh_cache_read(latest, cap, update, &checked, &age_s);
+    return checked;
+}
+
+// Shared install body: stop playback (flash writes below), stream the latest
+// release into the inactive slot and validate it. Does NOT reboot: the web
+// handler answers first, the device UI shows its status line first. Blocking,
+// up to a minute; callers keep it off PSRAM stacks.
+esp_err_t web_config_gh_install(void)
+{
+    ui_remote(UI_REMOTE_STOP, 0);
+    for (int i = 0; i < 30; i++) {
+        ui_status_t st;
+        ui_status(&st);
+        if (!st.active) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    esp_https_ota_handle_t h = NULL;
+    if (gh_ota_begin(&h) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    esp_err_t err;
+    while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+        // Streaming ~2 MB into the inactive slot; nothing else to do here.
+    }
+    if (err != ESP_OK || !esp_https_ota_is_complete_data_received(h)) {
+        esp_https_ota_abort(h);
+        return ESP_FAIL;
+    }
+    if (esp_https_ota_finish(h) != ESP_OK) {  // validates the image, sets boot
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "GitHub OTA installed");
+    return ESP_OK;
+}
+
 static esp_err_t gh_check_get(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
@@ -658,36 +702,23 @@ static esp_err_t ghota_status_get(httpd_req_t *req)
 // Install the latest GitHub release. Runs in this httpd task (internal stack,
 // flash writes allowed) like the local upload above; the web page only calls
 // it after an explicit confirmation, so no version re-check here (re-publishing
-// a fixed asset under the same version stays installable).
+// a fixed asset under the same version stays installable). The blocking body
+// is the shared web_config_gh_install(); this handler only maps errors and
+// answers before the reboot.
 static esp_err_t gh_ota_post(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
-    // Stop playback before flash writes, same reason as ota_post above.
-    ui_remote(UI_REMOTE_STOP, 0);
-    for (int i = 0; i < 30; i++) {
-        ui_status_t st;
-        ui_status(&st);
-        if (!st.active) break;
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    esp_https_ota_handle_t h = NULL;
-    if (gh_ota_begin(&h) != ESP_OK) {
+    esp_err_t err = web_config_gh_install();
+    if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no release");
         return ESP_FAIL;
     }
-    esp_err_t err;
-    while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-        // Streaming ~2 MB into the inactive slot; nothing else to do here.
-    }
-    if (err != ESP_OK || !esp_https_ota_is_complete_data_received(h)) {
-        esp_https_ota_abort(h);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "download failed");
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid firmware image");
         return ESP_FAIL;
     }
-    if (esp_https_ota_finish(h) != ESP_OK) {  // validates the image, sets boot
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid firmware image");
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "download failed");
         return ESP_FAIL;
     }
     httpd_resp_sendstr(req, "update ok, rebooting");

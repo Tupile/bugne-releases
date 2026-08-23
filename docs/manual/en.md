@@ -254,7 +254,7 @@ the bottom sets the volume.
 
 ![Settings](img/en/settings.png) ![Theme](img/en/settings_theme.png)
 
-The gear on the home screen opens the settings. It has six rows:
+The gear on the home screen opens the settings. It has seven rows:
 
 - "Config page (QR)": the QR code of the web page address.
 - "Setup hotspot (QR)": the QR code that joins the setup hotspot.
@@ -264,6 +264,9 @@ The gear on the home screen opens the settings. It has six rows:
 - "Listening time": the time counted today. With a daily limit set, it also
   shows a bar, the used time against the limit, and the time that remains. A
   child can open this screen at any time, even when the limit is reached.
+- "Update": checks GitHub for a new firmware version and offers to install it.
+  A red dot marks this row when an update is already known. Installing asks
+  for a confirmation, stops playback and restarts the device.
 
 The music library and the podcast feeds keep themselves up to date. The device
 does that work by itself when nobody uses it.
@@ -273,8 +276,11 @@ does that work by itself when nobody uses it.
 ![Alarm clock](img/en/settings_alarm.png)
 
 You can set three alarms. For each one you select: on or off, the time, the
-days of the week, what it plays, and its volume. An alarm plays a web radio or
-a track from the SD card. The sound starts quietly and rises over one minute.
+days of the week, what it plays, and its volume. The alarm sound is picked in
+a drop-down list: your favorites first, then the SD card track chosen on the
+web page, then every web radio. Picking a favorite copies its content into
+the alarm: it keeps playing that station or track even if the favorite changes
+later. The sound starts quietly and rises over one minute.
 An alarm can also light the screen a few minutes before it rings, like a
 sunrise. If the device cannot reach the selected radio, it beeps instead: the
 alarm always sounds. While it rings you snooze it for 10 minutes or you stop

@@ -103,13 +103,17 @@ static void bg_init_task(void *arg)
     stats_init();   // load listening stats from LittleFS (C3)
     TRY(net_start());
     // Serve the config page once the network is up. On success, also wire the
-    // daily GitHub update check (A1) into ui's maintenance engine: ui cannot
-    // REQUIRE web_config back (web_config already depends on ui), so this
-    // function pointer is the one-way bridge. Left NULL on failure, which
-    // makes the scheduled check phase in worker_run_job a silent no-op.
+    // daily GitHub update check (A1) into ui's maintenance engine, plus the
+    // device-side update screen's install/status entry points: ui cannot
+    // REQUIRE web_config back (web_config already depends on ui), so these
+    // function pointers are the one-way bridge. Left NULL on failure, which
+    // makes the scheduled check phase in worker_run_job a silent no-op and
+    // the Settings update screen show "unavailable".
     esp_err_t wc_err = web_config_start();
     if (wc_err == ESP_OK) {
         ui_set_ghota_check_fn(web_config_gh_check);
+        ui_set_ghota_install_fn(web_config_gh_install);
+        ui_set_ghota_status_fn(web_config_gh_status);
     } else {
         ESP_LOGE(TAG, "web_config_start() failed: %s", esp_err_to_name(wc_err));
     }

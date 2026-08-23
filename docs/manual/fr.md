@@ -263,7 +263,7 @@ talkie-walkie. Le curseur en bas règle le volume.
 
 ![Réglages](img/fr/settings.png) ![Thème](img/fr/settings_theme.png)
 
-La roue dentée de l'accueil ouvre les réglages. Ils comptent six lignes :
+La roue dentée de l'accueil ouvre les réglages. Ils comptent sept lignes :
 
 - « Page de config (QR) » : le QR code de l'adresse de la page web.
 - « Hotspot de config (QR) » : le QR code qui rejoint le point d'accès
@@ -275,6 +275,10 @@ La roue dentée de l'accueil ouvre les réglages. Ils comptent six lignes :
   quotidienne, l'écran affiche aussi une barre, le temps utilisé face à la
   limite, et le temps qui reste. Un enfant peut ouvrir cet écran à tout moment,
   même quand la limite est atteinte.
+- « Mise à jour » : vérifie sur GitHub si une nouvelle version du firmware
+  existe et propose de l'installer. Un point rouge marque cette ligne quand une
+  mise à jour est déjà connue. L'installation demande une confirmation,
+  arrête la lecture et redémarre l'appareil.
 
 La bibliothèque musicale et les flux de podcast se mettent à jour tout seuls.
 L'appareil fait ce travail quand personne ne l'utilise.
@@ -284,8 +288,11 @@ L'appareil fait ce travail quand personne ne l'utilise.
 ![Réveil](img/fr/settings_alarm.png)
 
 Vous pouvez régler trois alarmes. Pour chacune, vous choisissez : activée ou
-non, l'heure, les jours de la semaine, ce qu'elle joue, et son volume. Une
-alarme joue une radio web ou un morceau de la carte SD. Le son démarre
+non, l'heure, les jours de la semaine, ce qu'elle joue, et son volume. La
+sonnerie se choisit dans un menu déroulant : vos favoris d'abord, puis le
+morceau de carte SD choisi sur la page web, puis toutes les radios web. Choisir
+un favori copie son contenu dans l'alarme : elle continue de le jouer même si
+le favori change plus tard. Le son démarre
 doucement et monte sur une minute. Une alarme peut aussi allumer l'écran
 quelques minutes avant de sonner, comme un lever de soleil. Si l'appareil ne
 joint pas la radio choisie, il bipe à la place : le réveil sonne toujours.

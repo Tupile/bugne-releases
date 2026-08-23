@@ -1,0 +1,35 @@
+name: "Alarm Source Dropdown Test"
+version: 1
+author: "Bugne"
+# Offline simulator: the default config ships with no webradios, no favorites
+# and no chosen SD track, so the alarm editor's new source dropdown must render
+# DISABLED with its "No source yet" placeholder instead of an empty pickable
+# list. Pins the degenerate path of the dropdown rewrite (empty option store,
+# disabled widget) plus crash-free touch navigation Home -> Settings -> Alarm
+# list -> Alarm editor. Selecting an actual entry needs radios/favorites, so
+# it is exercised on the bench instead.
+steps:
+  - wait-serial: "Bugne booting"
+  - wait-serial: "background init complete"
+  - delay: 1500ms
+  # Home -> Settings (gear icon, top-right)
+  - touch:
+      part-id: lcd
+      x: 218
+      y: 26
+      duration: 120ms
+  - delay: 1200ms
+  # Settings -> "Alarm clock" row (3rd of 6 portrait menu rows)
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 136
+      duration: 120ms
+  - delay: 1200ms
+  # Alarm list -> first alarm's editor
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 78
+      duration: 120ms
+  - delay: 1800ms

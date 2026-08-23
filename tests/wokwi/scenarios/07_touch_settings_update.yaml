@@ -1,0 +1,34 @@
+name: "Settings Update Screen Test"
+version: 1
+author: "Bugne"
+# Offline simulator: the device-side update screen must render its "Wi-Fi
+# required" status when Check is tapped without a network, and the Settings
+# menu must fit its 7th row ("Update") without overlap in both orientations
+# (portrait: 28 px rows on a 29 px pitch; landscape: 2x4 grid). The online
+# check/install flow needs real Wi-Fi and is exercised on the bench instead.
+# Could NOT run when written (Wokwi CI quota exhausted), like 06.
+steps:
+  - wait-serial: "Bugne booting"
+  - wait-serial: "background init complete"
+  - delay: 1500ms
+  # Home -> Settings (gear icon, top-right)
+  - touch:
+      part-id: lcd
+      x: 218
+      y: 26
+      duration: 120ms
+  - delay: 1200ms
+  # Settings -> "Update" row (7th of 7 portrait menu rows)
+  - touch:
+      part-id: lcd
+      x: 120
+      y: 240
+      duration: 120ms
+  - delay: 1200ms
+  # Tap Check while offline: the status line must show "Wi-Fi required."
+  - touch:
+      part-id: lcd
+      x: 212
+      y: 30
+      duration: 120ms
+  - delay: 1500ms

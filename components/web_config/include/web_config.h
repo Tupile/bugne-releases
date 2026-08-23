@@ -22,3 +22,19 @@ esp_err_t web_config_start(void);
 // cache served by GET /api/ghota/status, whatever the caller. Used by both
 // the manual "check now" endpoint and the daily auto-check in ui.c.
 esp_err_t web_config_gh_check(char *latest, size_t cap, bool *update);
+
+// Cached result of the last check (manual or the daily auto-check), same data
+// as GET /api/ghota/status. Returns false when no check has run since boot
+// (RAM-only cache) and leaves the outputs untouched.
+bool web_config_gh_status(char *latest, size_t cap, bool *update);
+
+// Install the latest GitHub release: stops playback first (same preamble as
+// the local-upload endpoint), streams the image into the inactive slot and
+// validates it. Returns ESP_OK when the boot partition is set and a REBOOT IS
+// EXPECTED FROM THE CALLER (the web handler must answer before restarting;
+// the device UI wants a moment to show its status line). Errors:
+// ESP_ERR_NOT_FOUND (no release reachable), ESP_ERR_INVALID_STATE (invalid
+// image), ESP_FAIL (download failed). Blocking, up to a minute: run it on a
+// task with an INTERNAL stack (flash writes) of ~12 KB (the size these
+// handlers use on httpd).
+esp_err_t web_config_gh_install(void);

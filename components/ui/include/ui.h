@@ -131,3 +131,12 @@ void ui_download_status(ui_dl_status_t *out);
 // scheduled check silently.
 typedef esp_err_t (*ui_ghota_check_fn_t)(char *latest, size_t cap, bool *update);
 void ui_set_ghota_check_fn(ui_ghota_check_fn_t fn);
+
+// Same one-way bridge for the DEVICE-side update screen (Settings menu):
+// install runs the shared web_config_gh_install() body (blocking, caller
+// reboots on success), status reads the last-check cache without network.
+// NULL (web_config not up) makes the screen show "unavailable".
+typedef esp_err_t (*ui_ghota_install_fn_t)(void);
+typedef bool (*ui_ghota_status_fn_t)(char *latest, size_t cap, bool *update);
+void ui_set_ghota_install_fn(ui_ghota_install_fn_t fn);
+void ui_set_ghota_status_fn(ui_ghota_status_fn_t fn);

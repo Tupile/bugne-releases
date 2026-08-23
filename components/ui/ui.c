@@ -16,6 +16,7 @@
 #include "audio.h"
 #include "audio_arbiter.h"
 #include "decode.h"
+#include "tags.h"  // tags_utf8_trim_partial
 #include "library.h"
 #include "quiet.h"
 #include "usage.h"
@@ -48,6 +49,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
+#include "esp_system.h"  // esp_restart (device-side update install)
 #include "esp_random.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -233,7 +235,7 @@ static lv_obj_t *s_alarm_src_lbl;
 
 // build_alarm_edit widgets, read by alarm_settings_save() on every control
 // change. NULL'd in show(); s_as_src_mode/s_as_src_radio_id are not widgets but
-// track the pending source selection (set by the source list's click handlers).
+// track the pending source selection (set by the source dropdown's callback).
 // s_alarm_edit_idx selects which alarms[] the list screen opened the editor on.
 static int       s_alarm_edit_idx;
 static lv_obj_t *s_as_switch;
@@ -244,6 +246,30 @@ static lv_obj_t *s_as_vol_slider;
 static lv_obj_t *s_as_status_lbl;
 static int       s_as_src_mode;      // 0 = web radio, 1 = SD track
 static int       s_as_src_radio_id;
+// Pending SD path/title for mode 1: initialized from the stored alarm at build
+// time and overwritten when a favorite pointing at an SD file is picked, so
+// the device can aim the alarm at a favorite's track (arbitrary SD browsing
+// stays web-only).
+static char s_as_src_path[CFG_URL_MAX];
+static char s_as_src_title[CFG_ALARM_SD_TITLE_MAX];
+
+// Source dropdown backing store: LVGL keeps only a pointer to the options
+// string (set_options_static), so it lives here, next to a parallel map from
+// option index to what picking it snapshots into the pending state. Rebuilt by
+// build_alarm_edit, read by its VALUE_CHANGED callback (same task).
+enum { AS_DD_FAV_RADIO, AS_DD_FAV_SD, AS_DD_SD, AS_DD_RADIO };
+#define AS_DD_MAX      (CFG_MAX_FAVORITES + 1 + CFG_MAX_WEBRADIOS)
+#define AS_DD_NAME_MAX 36  // name bytes after the icon; keeps the buffer under ~2 KB
+static char    s_as_dd_opts[AS_DD_MAX * (AS_DD_NAME_MAX + 5)];
+static uint8_t s_as_dd_kind[AS_DD_MAX];
+static int     s_as_dd_ref[AS_DD_MAX];
+static int     s_as_dd_n;
+// build_settings_update widgets, NULL'd in show(). The rest of the update
+// screen's state (state machine, latest version, busy guard) lives with the
+// update screen block further down.
+static lv_obj_t *s_upd_status_lbl;
+static lv_obj_t *s_upd_check_btn;
+static lv_obj_t *s_upd_install_btn;
 static char s_meta_artist[64];  // tag artist of the playing SD file
 
 // Playback worker: source_*_play() block, so run them off the UI task.
@@ -1517,6 +1543,9 @@ static void show(screen_builder_t builder)
     for (int i = 0; i < 7; i++) s_as_day_btn[i] = NULL;
     s_as_vol_slider = NULL;
     s_as_status_lbl = NULL;
+    s_upd_status_lbl = NULL;  // same for the update screen widgets
+    s_upd_check_btn = NULL;
+    s_upd_install_btn = NULL;
     lv_obj_t *old = lv_screen_active();
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_text_font(scr, &bugne_font_14, 0);  // accents via DejaVu, symbols via fallback
@@ -2615,6 +2644,19 @@ void ui_stats_reset(void)
 void ui_set_ghota_check_fn(ui_ghota_check_fn_t fn)
 {
     s_ghota_check_fn = fn;
+}
+
+static ui_ghota_install_fn_t s_ghota_install_fn;
+static ui_ghota_status_fn_t  s_ghota_status_fn;
+
+void ui_set_ghota_install_fn(ui_ghota_install_fn_t fn)
+{
+    s_ghota_install_fn = fn;
+}
+
+void ui_set_ghota_status_fn(ui_ghota_status_fn_t fn)
+{
+    s_ghota_status_fn = fn;
 }
 
 void ui_download_status(ui_dl_status_t *out)
@@ -4924,29 +4966,33 @@ static void on_open_favorites(lv_event_t *e) { (void)e; show(build_favorites); }
 static void on_open_settings(lv_event_t *e)  { (void)e; show(build_settings); }
 
 // Position of menu button idx on a menu screen of `count` items. Since the
-// 2026-07-03 tile redesign only the settings screen (6 items) uses this; the
-// count == 4 spacing is kept for a future 4-item menu.
+// 2026-07-03 tile redesign only the settings screen uses this (6 items since
+// the usage screen, 7 since the update screen); the count == 4 spacing is
+// kept for a future 4-item menu.
 // Portrait = one column, landscape = a 2-column grid.
 static void menu_pos(int idx, int count, int *x, int *y)
 {
     // The band runs from below the 44 px round back button (bottom edge at
     // 52, so rows start at 56) down to the floating mini bar; the row spacing
     // derives from those two limits. Button heights match add_menu_button's
-    // callers: menu_h() on 5/6-item menus, 50 px on 4-item ones.
+    // callers: menu_h() on settings-style menus, 50 px on 4-item ones.
     const int limit = scr_h() - MINI_CLEAR;
-    const int h = (count >= 5) ? ((count == 6 && scr_h() > scr_w()) ? 32 : 38) : 50;
-    if (scr_w() > scr_h()) {
+    const bool land = scr_w() > scr_h();
+    const int h = !land ? ((count == 6) ? 32 : (count >= 7) ? 28 : (count >= 5) ? 38 : 50)
+                 : ((count >= 7) ? 30 : (count >= 5) ? 38 : 50);
+    if (land) {
         // 2x2 grid (4 items), 2+2+1 with a centered last (5 items, 3 rows),
-        // or a full 3x2 grid (6 items).
-        *x = (count == 5 && idx == 4) ? 0 : (idx % 2) ? 80 : -80;
+        // a full 3x2 grid (6 items), or a 2x4 grid with a centered last
+        // (7 items, 4 rows: 240 px of height only fit 30 px buttons).
+        *x = ((count == 5 && idx == 4) || (count == 7 && idx == 6)) ? 0 : (idx % 2) ? 80 : -80;
         const int y0 = (count >= 5) ? 56 : 60;
-        const int rows = (count >= 5) ? 3 : 2;
+        const int rows = (count >= 7) ? 4 : (count >= 5) ? 3 : 2;
         *y = y0 + (idx / 2) * ((limit - y0 - h) / (rows - 1));
     } else {
         *x = 0;
-        // 6 portrait rows only fit with the thinner 32 px buttons and a
+        // 6/7 portrait rows only fit with thinner buttons (32/28 px) and a
         // slightly higher start (the title ends well above 52).
-        const int y0 = (count == 6) ? 52 : 56;
+        const int y0 = (count >= 6) ? 52 : 56;
         *y = y0 + idx * ((limit - y0 - h) / (count - 1));
     }
 }
@@ -4954,7 +5000,8 @@ static void menu_pos(int idx, int count, int *x, int *y)
 // Button height matching menu_pos's spacing for the settings-style menus.
 static int menu_h(int count)
 {
-    return (count == 6 && scr_h() > scr_w()) ? 32 : 38;
+    return (scr_w() > scr_h()) ? ((count >= 7) ? 30 : 38)
+                               : ((count >= 7) ? 28 : (count == 6) ? 32 : 38);
 }
 
 static lv_obj_t *add_menu_button(lv_obj_t *scr, const char *text, int x, int y, int h, lv_event_cb_t cb)
@@ -5774,9 +5821,10 @@ static void alarm_status_refresh(void)
 
 // Shared save path for every control on this screen: read the live widget
 // states into a config_alarm_t and persist it (config_store_set_alarm is the
-// one write path, same as the web page). sd_path/sd_title are carried over
-// unchanged (choosing an SD track is web-only; on-device you only switch to
-// an already-chosen one).
+// one write path, same as the web page). The pending sd_path/sd_title start as
+// a copy of the stored alarm and are overwritten when a favorite pointing at
+// an SD file is picked, so picking an SD favorite on the device re-aims the
+// alarm; arbitrary SD browsing stays web-only.
 static void alarm_settings_save(void)
 {
     config_alarm_t a = config_store_get()->alarms[s_alarm_edit_idx];
@@ -5789,7 +5837,12 @@ static void alarm_settings_save(void)
     }
     a.days = days;
     a.source = s_as_src_mode;
-    if (s_as_src_mode == 0) a.radio_id = s_as_src_radio_id;
+    if (s_as_src_mode == 0) {
+        a.radio_id = s_as_src_radio_id;
+    } else {
+        strlcpy(a.sd_path, s_as_src_path, sizeof(a.sd_path));
+        strlcpy(a.sd_title, s_as_src_title, sizeof(a.sd_title));
+    }
     if (s_as_vol_slider) a.volume = (int)lv_slider_get_value(s_as_vol_slider);
     config_store_set_alarm(s_alarm_edit_idx, &a);
     alarm_status_refresh();
@@ -5800,25 +5853,52 @@ static void on_alarm_roller(lv_event_t *e) { (void)e; alarm_settings_save(); }
 static void on_alarm_day(lv_event_t *e)    { (void)e; alarm_settings_save(); }
 static void on_alarm_volume(lv_event_t *e) { (void)e; alarm_settings_save(); }
 
-static void on_alarm_src_radio(lv_event_t *e)
+// Append one option line to the source dropdown store and record what picking
+// it means. kind: AS_DD_*; ref: favorites[] or webradios[] index (unused for
+// AS_DD_SD). Names are untrusted UTF-8 from the web: byte-truncate, then
+// repair a sequence cut in half (UTF-8 truncation rule).
+static void as_dd_add(int kind, int ref, const char *icon, const char *name)
 {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    const config_t *c = config_store_get();
-    if (!c || idx < 0 || (size_t)idx >= c->webradio_count) return;
-    s_as_src_mode = 0;
-    s_as_src_radio_id = c->webradios[idx].id;
-    alarm_settings_save();
-    show(build_alarm_edit);  // rebuild so the LV_SYMBOL_OK mark moves
+    if (s_as_dd_n >= AS_DD_MAX) return;
+    char label[AS_DD_NAME_MAX + 1];
+    snprintf(label, sizeof(label), "%.*s", AS_DD_NAME_MAX, name);
+    tags_utf8_trim_partial(label);
+    size_t len = strlen(s_as_dd_opts);
+    snprintf(s_as_dd_opts + len, sizeof(s_as_dd_opts) - len, "%s%s %s",
+             s_as_dd_n ? "\n" : "", icon, label);
+    s_as_dd_kind[s_as_dd_n] = (uint8_t)kind;
+    s_as_dd_ref[s_as_dd_n] = ref;
+    s_as_dd_n++;
 }
 
-static void on_alarm_src_sd(lv_event_t *e)
+static void on_alarm_src_dd(lv_event_t *e)
 {
-    (void)e;
+    lv_obj_t *dd = lv_event_get_target(e);
+    int idx = (int)lv_dropdown_get_selected(dd);
+    if (idx < 0 || idx >= s_as_dd_n) return;
     const config_t *c = config_store_get();
-    if (!c || !c->alarms[s_alarm_edit_idx].sd_path[0]) return;  // row is disabled in this case anyway
-    s_as_src_mode = 1;
+    if (!c) return;
+    switch (s_as_dd_kind[idx]) {
+    case AS_DD_FAV_RADIO:
+        s_as_src_mode = 0;
+        s_as_src_radio_id = c->favorites[s_as_dd_ref[idx]].radio_id;
+        break;
+    case AS_DD_FAV_SD: {
+        const config_favorite_t *f = &c->favorites[s_as_dd_ref[idx]];
+        s_as_src_mode = 1;
+        strlcpy(s_as_src_path, f->path, sizeof(s_as_src_path));
+        strlcpy(s_as_src_title, f->title, sizeof(s_as_src_title));
+        break;
+    }
+    case AS_DD_SD:
+        s_as_src_mode = 1;  // path/title stay as loaded at build time
+        break;
+    default:            // AS_DD_RADIO
+        s_as_src_mode = 0;
+        s_as_src_radio_id = c->webradios[s_as_dd_ref[idx]].id;
+        break;
+    }
     alarm_settings_save();
-    show(build_alarm_edit);
 }
 
 // Back from the single-alarm editor: return to the 3-alarm list, not straight
@@ -5827,9 +5907,9 @@ static void on_alarm_edit_back(lv_event_t *e) { (void)e; show(build_settings_ala
 
 // Scrollable single-alarm editor (s_alarm_edit_idx, set by the list row that
 // opened it): enable switch, hour/minute rollers, 7 day chips, a source
-// picker (radios + the chosen SD track) and a volume slider, each writing
-// config_store_set_alarm() on change (device UI and the web page share that
-// one path; the alarm engine just reads it back).
+// dropdown (favorites, then the chosen SD track, then the radios) and a
+// volume slider, each writing config_store_set_alarm() on change (device UI
+// and the web page share that one path; the alarm engine just reads it back).
 static void build_alarm_edit(lv_obj_t *scr)
 {
     add_back_cb(scr, on_alarm_edit_back);
@@ -5841,6 +5921,8 @@ static void build_alarm_edit(lv_obj_t *scr)
     const config_alarm_t *ca = &c->alarms[s_alarm_edit_idx];
     s_as_src_mode = ca->source;
     s_as_src_radio_id = ca->radio_id;
+    strlcpy(s_as_src_path, ca->sd_path, sizeof(s_as_src_path));
+    strlcpy(s_as_src_title, ca->sd_title, sizeof(s_as_src_title));
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_pos(content, 0, 52);
@@ -5914,35 +5996,54 @@ static void build_alarm_edit(lv_obj_t *scr)
         s_as_day_btn[i] = chip;
     }
 
-    // Source: a caption plus card rows (lv_list, so rows get the same readable
-    // SURFACE look as any other list without a local style), one per
-    // configured radio and a final SD row. Not scrollable itself (see
-    // alarm_row); the current pick shows an LV_SYMBOL_OK prefix.
+    // Source: one dropdown listing the favorites first (starred from the
+    // now-playing screens), then the alarm's chosen SD track, then every
+    // configured radio. Picking an entry snapshots its content into the
+    // alarm's existing fields (radio id or SD path/title): the alarm keeps
+    // playing it even if the favorite is later edited or removed, and the web
+    // page reads back exactly the same fields. No rebuild on pick (the old
+    // OK-marked list needed one; a dropdown displays its own selection).
     lv_obj_t *src_lbl = lv_label_create(content);
     lv_label_set_text(src_lbl, T(STR_ALARM_SOURCE));
     muted(src_lbl);
 
-    lv_obj_t *list = lv_list_create(content);
-    lv_obj_set_width(list, LV_PCT(100));
-    lv_obj_set_height(list, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
-    for (size_t i = 0; i < c->webradio_count; i++) {
-        char label[80];
-        bool sel = (ca->source == 0 && ca->radio_id == c->webradios[i].id);
-        if (sel) snprintf(label, sizeof(label), LV_SYMBOL_OK " %s", c->webradios[i].name);
-        else strlcpy(label, c->webradios[i].name, sizeof(label));
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_AUDIO, label);
-        lv_obj_add_event_cb(btn, on_alarm_src_radio, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    s_as_dd_n = 0;
+    s_as_dd_opts[0] = '\0';
+    int as_sel = -1;
+    for (size_t i = 0; i < c->favorite_count; i++) {
+        const config_favorite_t *f = &c->favorites[i];
+        bool radio = (f->type == 0);
+        const char *name = f->title[0] ? f->title : (radio ? "" : f->path);
+        bool match = radio ? (ca->source == 0 && ca->radio_id == f->radio_id)
+                           : (ca->source == 1 && strcmp(ca->sd_path, f->path) == 0);
+        int at = s_as_dd_n;
+        as_dd_add(radio ? AS_DD_FAV_RADIO : AS_DD_FAV_SD, (int)i,
+                  radio ? LV_SYMBOL_AUDIO : LV_SYMBOL_SD_CARD, name);
+        if (match && as_sel < 0) as_sel = at;
     }
-    {
-        char label[80];
-        bool sel = (ca->source == 1);
+    if (ca->sd_path[0]) {
         const char *name = ca->sd_title[0] ? ca->sd_title : T(STR_ALARM_SD_UNSET);
-        if (sel) snprintf(label, sizeof(label), LV_SYMBOL_OK " %s", name);
-        else strlcpy(label, name, sizeof(label));
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_SD_CARD, label);
-        if (!ca->sd_path[0]) lv_obj_add_state(btn, LV_STATE_DISABLED);
-        lv_obj_add_event_cb(btn, on_alarm_src_sd, LV_EVENT_CLICKED, NULL);
+        int at = s_as_dd_n;
+        as_dd_add(AS_DD_SD, 0, LV_SYMBOL_SD_CARD, name);
+        if (ca->source == 1 && as_sel < 0) as_sel = at;
+    }
+    for (size_t i = 0; i < c->webradio_count; i++) {
+        int at = s_as_dd_n;
+        as_dd_add(AS_DD_RADIO, (int)i, LV_SYMBOL_AUDIO, c->webradios[i].name);
+        if (ca->source == 0 && ca->radio_id == c->webradios[i].id && as_sel < 0) as_sel = at;
+    }
+
+    lv_obj_t *dd = lv_dropdown_create(content);
+    lv_obj_set_width(dd, LV_PCT(100));
+    if (s_as_dd_n == 0) {
+        lv_dropdown_set_options(dd, T(STR_ALARM_NONE));
+        lv_obj_add_state(dd, LV_STATE_DISABLED);
+    } else {
+        // Static options: s_as_dd_opts is a file-scope buffer that outlives any
+        // screen; a rebuild overwrites it only after show() has swapped screens.
+        lv_dropdown_set_options_static(dd, s_as_dd_opts);
+        lv_dropdown_set_selected(dd, as_sel < 0 ? 0 : (uint32_t)as_sel);
+        lv_obj_add_event_cb(dd, on_alarm_src_dd, LV_EVENT_VALUE_CHANGED, NULL);
     }
 
     // Volume.
@@ -5974,6 +6075,15 @@ static void on_alarm_row_click(lv_event_t *e)
 {
     s_alarm_edit_idx = (int)(intptr_t)lv_event_get_user_data(e);
     show(build_alarm_edit);
+}
+
+// Debug-nav only: open alarm 1's editor directly so a remote screenshot can
+// reach the source dropdown without simulating the two list taps (same trick
+// as "game_play").
+static void build_alarm_edit_nav(lv_obj_t *scr)
+{
+    s_alarm_edit_idx = 0;
+    build_alarm_edit(scr);
 }
 
 // Alarm list: one card row per alarms[] entry (time, on/off, day letters),
@@ -6100,24 +6210,315 @@ static void build_lamp(lv_obj_t *scr)
 }
 
 
+// ---- Settings > Update: device-side GitHub OTA check/install ----
+
+// State of the manual check/install flow, shown by build_settings_update.
+// Written by the one-shot ghupd task below and read by upd_screen_refresh on
+// the LVGL task: plain volatile words, like the other cross-task flags here.
+typedef enum {
+    UPD_IDLE,            // nothing since boot
+    UPD_NEED_WIFI,       // tapped while offline (LVGL task only, no task spawned)
+    UPD_NO_SERVICE,      // web_config not up: fn pointers NULL
+    UPD_CHECKING,
+    UPD_UPTODATE,
+    UPD_AVAILABLE,
+    UPD_CHECK_FAILED,
+    UPD_INSTALLING,
+    UPD_REBOOTING,       // installed; the task restarts the device momentarily
+    UPD_INSTALL_FAILED,
+} upd_state_t;
+
+static volatile upd_state_t s_upd_state = UPD_IDLE;
+static char s_upd_latest[32];      // version reported by the last check
+static bool s_upd_badge;           // last known "update available" (menu dot)
+
+// One-flight guard around the ghupd task (ha_client pattern): taps while busy
+// are ignored, never queued. The task runs on an INTERNAL stack on purpose:
+// web_config_gh_install writes flash, so a PSRAM stack would die when the
+// flash cache maps out; 12 KB matches what these same handlers use on the
+// httpd task (TLS handshake included).
+static portMUX_TYPE s_upd_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_upd_busy;
+
+// What the last check (manual or the daily auto-check) concluded. False when
+// web_config never came up or no check ran yet (RAM-only cache).
+static bool upd_cache_update(void)
+{
+    char latest[32];
+    bool update = false;
+    return s_ghota_status_fn && s_ghota_status_fn(latest, sizeof(latest), &update) && update;
+}
+
+static void upd_ota_task(void *arg)
+{
+    bool install = (bool)(intptr_t)arg;
+    if (!install) {
+        char latest[32] = "";
+        bool update = false;
+        esp_err_t err = s_ghota_check_fn ? s_ghota_check_fn(latest, sizeof(latest), &update)
+                                         : ESP_ERR_INVALID_STATE;
+        if (err != ESP_OK) {
+            s_upd_state = UPD_CHECK_FAILED;
+        } else {
+            strlcpy(s_upd_latest, latest, sizeof(s_upd_latest));
+            s_upd_state = update ? UPD_AVAILABLE : UPD_UPTODATE;
+        }
+    } else {
+        esp_err_t err = s_ghota_install_fn ? s_ghota_install_fn() : ESP_ERR_INVALID_STATE;
+        if (err != ESP_OK) {
+            s_upd_state = UPD_INSTALL_FAILED;
+        } else {
+            s_upd_state = UPD_REBOOTING;
+            vTaskDelay(pdMS_TO_TICKS(1500));  // let the tick paint the status line
+            esp_restart();
+        }
+    }
+    portENTER_CRITICAL(&s_upd_lock);
+    s_upd_busy = false;
+    portEXIT_CRITICAL(&s_upd_lock);
+    vTaskDelete(NULL);
+}
+
+static void upd_spawn(bool install)
+{
+    bool busy;
+    portENTER_CRITICAL(&s_upd_lock);
+    busy = s_upd_busy;
+    if (!busy) s_upd_busy = true;
+    portEXIT_CRITICAL(&s_upd_lock);
+    if (busy) return;  // a check or install is already running: newest tap loses
+    s_upd_state = install ? UPD_INSTALLING : UPD_CHECKING;
+    if (xTaskCreate(upd_ota_task, "ghupd", 12288, (void *)(intptr_t)install, 4, NULL) != pdPASS) {
+        // No task: report it as a failed action instead of a stuck "Checking".
+        s_upd_busy = false;
+        s_upd_state = install ? UPD_INSTALL_FAILED : UPD_CHECK_FAILED;
+    }
+}
+
+static void on_upd_check(lv_event_t *e)
+{
+    (void)e;
+    if (!s_ghota_check_fn) { s_upd_state = UPD_NO_SERVICE; return; }
+    if (net_state() != NET_STATE_CONNECTED) { s_upd_state = UPD_NEED_WIFI; return; }
+    upd_spawn(false);
+}
+
+static void on_upd_cancel(lv_event_t *e)
+{
+    lv_obj_t *backdrop = lv_obj_get_user_data(lv_event_get_target(e));
+    if (backdrop) lv_obj_delete(backdrop);
+}
+
+static void on_upd_confirm(lv_event_t *e)
+{
+    lv_obj_t *backdrop = lv_obj_get_user_data(lv_event_get_target(e));
+    if (backdrop) lv_obj_delete(backdrop);
+    // Surface a changed situation instead of closing silently (Wi-Fi may have
+    // dropped between "Install" and this tap).
+    if (!s_ghota_install_fn) { s_upd_state = UPD_NO_SERVICE; return; }
+    if (net_state() != NET_STATE_CONNECTED) { s_upd_state = UPD_NEED_WIFI; return; }
+    upd_spawn(true);  // this screen stays up; the tick shows the progress states
+}
+
+// Confirmation modal ("Install version X?"), same structure as the podcast
+// resume dialog: full-screen backdrop on the top layer, content card, and the
+// explicit bugne_font_14 (top-layer widgets do not inherit screen fonts).
+static void show_upd_modal(void)
+{
+    lv_obj_t *backdrop = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(backdrop, scr_w(), scr_h());
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+    lv_obj_align(backdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(backdrop, on_backdrop_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *modal = lv_obj_create(backdrop);
+    lv_obj_set_width(modal, scr_w() - 40);
+    lv_obj_set_height(modal, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(modal, col_surface(), 0);
+    lv_obj_set_style_border_width(modal, 0, 0);
+    lv_obj_set_style_radius(modal, RADIUS_BTN, 0);
+    lv_obj_set_style_pad_all(modal, 16, 0);
+    lv_obj_align(modal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(modal, 12, 0);
+    lv_obj_set_style_text_font(modal, &bugne_font_14, 0);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), T(STR_UPD_CONFIRM_FMT), s_upd_latest);
+    lv_obj_t *title = lv_label_create(modal);
+    lv_label_set_text(title, buf);
+    lv_obj_set_style_text_font(title, &bugne_font_20, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(title, LV_PCT(100));
+
+    lv_obj_t *body = lv_label_create(modal);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(body, T(STR_UPD_CONFIRM_BODY));
+    muted(body);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(body, LV_PCT(100));
+
+    lv_obj_t *ok = lv_button_create(modal);
+    lv_obj_set_width(ok, LV_PCT(100));
+    lv_obj_set_height(ok, 40);
+    lv_obj_set_user_data(ok, backdrop);
+    lv_obj_add_event_cb(ok, on_upd_confirm, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ok_l = lv_label_create(ok);
+    lv_label_set_text(ok_l, T(STR_UPD_INSTALL));
+    lv_obj_center(ok_l);
+
+    lv_obj_t *no = lv_button_create(modal);
+    lv_obj_set_width(no, LV_PCT(100));
+    lv_obj_set_height(no, 40);
+    lv_obj_set_style_bg_color(no, col_surface(), 0);
+    lv_obj_set_style_bg_color(no, col_surface_pr(), LV_STATE_PRESSED);
+    lv_obj_set_user_data(no, backdrop);
+    lv_obj_add_event_cb(no, on_upd_cancel, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *no_l = lv_label_create(no);
+    lv_label_set_text(no_l, T(STR_CANCEL));
+    lv_obj_center(no_l);
+}
+
+static void upd_screen_refresh(void);
+
+static void on_upd_install_click(lv_event_t *e)
+{
+    (void)e;
+    show_upd_modal();
+}
+
+// Update screen: current version, status line refreshed at 1 Hz by
+// upd_screen_refresh, round Check button top-right (mirrors the back button,
+// hence add_title not add_title_wide), and an Install button that only shows
+// once a check found something.
+static void build_settings_update(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_settings_back);
+    add_title(scr, T(STR_UPDATE));
+    lv_obj_t *chk = make_round_btn(scr, LV_SYMBOL_REFRESH, 44, true, on_upd_check);
+    lv_obj_align(chk, LV_ALIGN_TOP_RIGHT, -8, 8);
+    s_upd_check_btn = chk;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), T(STR_UPD_CURRENT_FMT), esp_app_get_description()->version);
+    lv_obj_t *ver = lv_label_create(scr);
+    lv_label_set_long_mode(ver, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(ver, scr_w() - 40);
+    lv_obj_set_style_text_align(ver, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(ver, buf);
+    lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 76);
+
+    lv_obj_t *st = lv_label_create(scr);
+    lv_label_set_long_mode(st, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(st, scr_w() - 40);
+    lv_obj_set_style_text_align(st, LV_TEXT_ALIGN_CENTER, 0);
+    muted(st);
+    lv_obj_align(st, LV_ALIGN_TOP_MID, 0, 106);
+    s_upd_status_lbl = st;
+
+    lv_obj_t *inst = lv_button_create(scr);
+    lv_obj_set_size(inst, 190, 44);
+    lv_obj_align(inst, LV_ALIGN_TOP_MID, 0, 160);
+    lv_obj_add_flag(inst, LV_OBJ_FLAG_HIDDEN);  // shown when a check finds one
+    lv_obj_add_event_cb(inst, on_upd_install_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *il = lv_label_create(inst);
+    lv_label_set_text(il, T(STR_UPD_INSTALL));
+    lv_obj_center(il);
+    s_upd_install_btn = inst;
+
+    upd_screen_refresh();  // paint the state we may already be in
+}
+
+// 1 Hz refresh of an open update screen: status text per state plus the
+// enable/visibility of the two buttons, all patched IN PLACE (the state
+// machine lives outside any widget, so nothing needs a rebuild). Also drives
+// the settings-menu red dot: re-read the check cache every tick and rebuild
+// build_settings on the edge (same trick as tick_favorites). Position in the
+// tick list not load-bearing.
+static void upd_screen_refresh(void)
+{
+    bool badge = upd_cache_update();
+    if (badge != s_upd_badge) {
+        s_upd_badge = badge;
+        if (s_active_builder == build_settings) {
+            show(build_settings);
+            return;
+        }
+    }
+
+    if (s_active_builder != build_settings_update || !s_upd_status_lbl) return;
+
+    static char txt[80];
+    switch (s_upd_state) {
+    case UPD_IDLE:           txt[0] = '\0'; break;
+    case UPD_NEED_WIFI:      strlcpy(txt, T(STR_UPD_NEED_WIFI), sizeof(txt)); break;
+    case UPD_NO_SERVICE:     strlcpy(txt, T(STR_UPD_UNAVAILABLE), sizeof(txt)); break;
+    case UPD_CHECKING:       strlcpy(txt, T(STR_UPD_CHECKING), sizeof(txt)); break;
+    case UPD_UPTODATE:       strlcpy(txt, T(STR_UPD_UPTODATE), sizeof(txt)); break;
+    case UPD_AVAILABLE:      snprintf(txt, sizeof(txt), T(STR_UPD_AVAIL_FMT), s_upd_latest); break;
+    case UPD_CHECK_FAILED:   strlcpy(txt, T(STR_UPD_FAILED), sizeof(txt)); break;
+    case UPD_INSTALLING:     strlcpy(txt, T(STR_UPD_INSTALLING), sizeof(txt)); break;
+    case UPD_REBOOTING:      strlcpy(txt, T(STR_UPD_REBOOTING), sizeof(txt)); break;
+    case UPD_INSTALL_FAILED: strlcpy(txt, T(STR_UPD_INSTALL_FAILED), sizeof(txt)); break;
+    }
+    if (strcmp(lv_label_get_text(s_upd_status_lbl), txt) != 0) {
+        lv_label_set_text(s_upd_status_lbl, txt);
+    }
+
+    bool busy = (s_upd_state == UPD_CHECKING || s_upd_state == UPD_INSTALLING ||
+                 s_upd_state == UPD_REBOOTING);
+    if (s_upd_check_btn) {
+        if (busy) lv_obj_add_state(s_upd_check_btn, LV_STATE_DISABLED);
+        else lv_obj_remove_state(s_upd_check_btn, LV_STATE_DISABLED);
+    }
+    if (s_upd_install_btn) {
+        if (s_upd_state == UPD_AVAILABLE) lv_obj_remove_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_open_update(lv_event_t *e) { (void)e; show(build_settings_update); }
+
 static void build_settings(lv_obj_t *scr)
 {
     add_back_button(scr);
     add_title_wide(scr, T(STR_SETTINGS));
     int bx, by;
-    const int h = menu_h(6);
-    menu_pos(0, 6, &bx, &by);
+    const int h = menu_h(7);
+    menu_pos(0, 7, &bx, &by);
     add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_CONFIG_PAGE_QR, bx, by, h, on_set_web);
-    menu_pos(1, 6, &bx, &by);
+    menu_pos(1, 7, &bx, &by);
     add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_SETUP_HOTSPOT_QR, bx, by, h, on_set_ap);
-    menu_pos(2, 6, &bx, &by);
+    menu_pos(2, 7, &bx, &by);
     add_menu_button_t(scr, LV_SYMBOL_BELL, STR_ALARM, bx, by, h, on_open_settings_alarm);
-    menu_pos(3, 6, &bx, &by);
+    menu_pos(3, 7, &bx, &by);
     add_menu_button_t(scr, LV_SYMBOL_TINT, STR_THEME, bx, by, h, on_open_theme);
-    menu_pos(4, 6, &bx, &by);
+    menu_pos(4, 7, &bx, &by);
     add_menu_button_t(scr, LV_SYMBOL_LOOP, STR_ORIENTATION, bx, by, h, on_toggle_orientation);
-    menu_pos(5, 6, &bx, &by);
+    menu_pos(5, 7, &bx, &by);
     add_menu_button_t(scr, LV_SYMBOL_BARS, STR_LISTEN_TIME, bx, by, h, on_open_usage);
+    menu_pos(6, 7, &bx, &by);
+    lv_obj_t *upd_row = add_menu_button_t(scr, LV_SYMBOL_DOWNLOAD, STR_UPDATE, bx, by, h, on_open_update);
+    // Red dot when the last GitHub check (manual or daily auto-check) already
+    // knows about an update; refreshed by the tick edge in upd_screen_refresh.
+    s_upd_badge = upd_cache_update();
+    if (s_upd_badge) {
+        lv_obj_t *dot = lv_obj_create(upd_row);
+        lv_obj_set_size(dot, 12, 12);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(0xE53935), 0);  // notification red
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(dot, lv_color_white(), 0);    // ring: visible on any accent
+        lv_obj_set_style_border_width(dot, 2, 0);
+        lv_obj_set_style_pad_all(dot, 0, 0);
+        lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -6, 6);
+        lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
 }
 
 // ---- Toast (brief top-layer message, survives screen changes) ----
@@ -6500,9 +6901,11 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "settings",          build_settings },
     { "settings_theme",    build_settings_theme },
     { "settings_alarm",    build_settings_alarm },
+    { "settings_alarm_edit", build_alarm_edit_nav },  // alarm 1's editor, for remote screenshots
     { "settings_web",      build_settings_web },
     { "settings_ap",       build_settings_ap },
     { "settings_usage",    build_settings_usage },
+    { "settings_update",   build_settings_update },
     { "setup",             build_setup },
     { "favorites",         build_favorites },
     { "now_playing",       build_now_playing },
@@ -7640,6 +8043,7 @@ static void tick_1hz(void)
     tick_stats_and_usage();
     tick_clock_labels();
     usage_screen_refresh();  // display only, position in this list not load-bearing
+    upd_screen_refresh();    // same: status line, buttons, and the menu-dot edge
 
     tick_sec_t sec = { .cfg = config_store_get(), .wall = time(NULL) };
     long step = (long)(sec.wall - s_last_wall);
