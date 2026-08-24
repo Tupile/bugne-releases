@@ -176,6 +176,13 @@ static void load_from_json(config_t *c, const cJSON *root)
 
     const cJSON *radios = cJSON_GetObjectItemCaseSensitive(root, "webradios");
     if (cJSON_IsArray(radios)) {
+        // A present array REPLACES the list: load_from_json overlays onto a
+        // defaulted config (both at boot and in config_store_write_json), so
+        // without this reset the default entry stayed at index 0 and every
+        // parse appended the file's list after it (bench-proven 2026-08-23:
+        // the default podcast reappeared and dedup_ids renumbered the real
+        // first feed). An ABSENT key keeps the defaults (partial-post rule).
+        c->webradio_count = 0;
         int n = cJSON_GetArraySize(radios);
         for (int i = 0; i < n && c->webradio_count < CFG_MAX_WEBRADIOS; i++) {
             const cJSON *it = cJSON_GetArrayItem(radios, i);
@@ -202,6 +209,7 @@ static void load_from_json(config_t *c, const cJSON *root)
 
     const cJSON *pods = cJSON_GetObjectItemCaseSensitive(root, "podcasts");
     if (cJSON_IsArray(pods)) {
+        c->podcast_count = 0;  // present array replaces the list (see webradios)
         int n = cJSON_GetArraySize(pods);
         for (int i = 0; i < n && c->podcast_count < CFG_MAX_PODCASTS; i++) {
             const cJSON *it = cJSON_GetArrayItem(pods, i);
@@ -275,6 +283,7 @@ static void load_from_json(config_t *c, const cJSON *root)
 
     const cJSON *favs = cJSON_GetObjectItemCaseSensitive(root, "favorites");
     if (cJSON_IsArray(favs)) {
+        c->favorite_count = 0;  // present array replaces the list (see webradios)
         int n = cJSON_GetArraySize(favs);
         for (int i = 0; i < n && c->favorite_count < CFG_MAX_FAVORITES; i++) {
             const cJSON *it = cJSON_GetArrayItem(favs, i);
