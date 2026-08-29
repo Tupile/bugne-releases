@@ -9,7 +9,7 @@ dependencies:
 
   # ES8311 codec support. Mature.
   espressif/esp_codec_dev:
-    version: "^1.6.1"
+    version: "^1.6.2"
 
   # AAC-LC decoder (for .m4a podcasts and AAC web radio). The MP4 container is
   # demuxed by the vendored minimp4 (Radio France .m4a has moov at the end, which
@@ -40,7 +40,7 @@ dependencies:
 
   # LittleFS for the JSON config in internal flash. Mature.
   joltwallet/littlefs:
-    version: "^1.22.2"
+    version: "^1.22.3"
 
   # mDNS for bugne-XXXX.local and Sendspin discovery.
   espressif/mdns:
