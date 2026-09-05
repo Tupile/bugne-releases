@@ -144,7 +144,7 @@ static int read_full(esp_http_client_handle_t c, char *buf, int n)
 static void reader_task(void *arg)
 {
     stream_ctx_t *s = arg;
-    uint8_t *chunk = malloc(READ_CHUNK);
+    uint8_t *chunk = heap_caps_malloc(READ_CHUNK, MALLOC_CAP_SPIRAM);
     if (chunk) {
         int left = s->metaint;  // audio bytes until the next ICY metadata block
         while (!s_stop) {

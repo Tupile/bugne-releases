@@ -123,9 +123,11 @@ static void test_scan_and_list(void)
     // A smaller out keeps only the newest entries.
     n = memo_list(out, 2);
     CHECK(n == 2, "capped list: got %d", n);
-    if (n == 2)
+    if (n == 2) {
         CHECK(out[0].seq == 7 && out[1].seq == 4, "capped keeps newest: %d %d",
               out[0].seq, out[1].seq);
+        CHECK(out[1].duration_s == 1, "capped duration: got %d, want 1", out[1].duration_s);
+    }
 }
 
 static void test_keep_rec(void)

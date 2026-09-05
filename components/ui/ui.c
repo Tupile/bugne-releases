@@ -4228,6 +4228,7 @@ static void memo_record_run(void)
         free(buf);
     }
     if (acquired) audio_arbiter_release(AUDIO_SOURCE_MEMO);
+    remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);  // FatFs: rename does not replace an existing target
     if (ok && rename(MEMO_ABS_DIR "/.rec.part", MEMO_ABS_DIR "/" MEMO_REC_NAME) != 0) ok = false;
     if (!ok) {
         remove(MEMO_ABS_DIR "/.rec.part");
@@ -4658,6 +4659,7 @@ static void on_memo_row(lv_event_t *e)
         memo_abs_path(oldp, sizeof(oldp), en->name);
         snprintf(newn, sizeof(newn), "rx-%s-%03d.wav", en->sender, en->seq);
         memo_abs_path(newp, sizeof(newp), newn);
+        remove(newp);  // FatFs: rename does not replace an existing target
         if (rename(oldp, newp) == 0) {
             strlcpy(en->name, newn, sizeof(en->name));
             en->unread = false;

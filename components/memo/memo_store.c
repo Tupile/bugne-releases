@@ -49,16 +49,22 @@ static int scan(memo_entry_t *out, int max, int *unread, int *max_seq)
             if (e.seq > ms) ms = e.seq;
             if (out && max > 0) {
                 strlcpy(e.name, de->d_name, sizeof(e.name));
-                char abs[MEMO_NAME_MAX + 20];
-                memo_abs_path(abs, sizeof(abs), e.name);
-                struct stat st;
-                if (stat(abs, &st) == 0 && st.st_size > MEMO_WAV_HEADER_BYTES)
-                    e.duration_s = (int)((st.st_size - MEMO_WAV_HEADER_BYTES) / (MEMO_RATE_HZ * 2));
                 insert_sorted(out, max, count < max ? count : max, &e);
             }
             count++;
         }
         closedir(dir);
+
+        if (out && max > 0) {
+            int kept = count < max ? count : max;
+            for (int i = 0; i < kept; i++) {
+                char abs[MEMO_NAME_MAX + 20];
+                memo_abs_path(abs, sizeof(abs), out[i].name);
+                struct stat st;
+                if (stat(abs, &st) == 0 && st.st_size > MEMO_WAV_HEADER_BYTES)
+                    out[i].duration_s = (int)((st.st_size - MEMO_WAV_HEADER_BYTES) / (MEMO_RATE_HZ * 2));
+            }
+        }
     }
     if (unread) *unread = nu;
     if (max_seq) *max_seq = ms;
@@ -93,6 +99,7 @@ int memo_keep_rec(void)
     char name[MEMO_NAME_MAX], dst[MEMO_NAME_MAX + 20];
     memo_name_mine(name, sizeof(name), seq);
     memo_abs_path(dst, sizeof(dst), name);
+    remove(dst);  // FatFs: rename does not replace an existing target
     if (rename(MEMO_ABS_DIR "/" MEMO_REC_NAME, dst) != 0) {
         ESP_LOGW(TAG, "keep failed: %s", dst);
         return -1;

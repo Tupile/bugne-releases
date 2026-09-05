@@ -177,6 +177,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         if (s_want_sta) esp_wifi_connect();  // first attempt immediately
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_state = s_ap_up ? NET_STATE_PROVISIONING : (s_want_sta ? NET_STATE_CONNECTING : NET_STATE_BOOT);
         if (s_want_sta) {
             const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)data;
             int reason = d ? d->reason : 0;

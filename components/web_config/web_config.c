@@ -504,17 +504,6 @@ static esp_err_t ota_post(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA partition");
         return ESP_FAIL;
     }
-    esp_ota_handle_t handle = 0;
-    if (esp_ota_begin(part, OTA_SIZE_UNKNOWN, &handle) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ota begin failed");
-        return ESP_FAIL;
-    }
-    char *buf = malloc(4096);
-    if (!buf) {
-        esp_ota_abort(handle);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
-        return ESP_FAIL;
-    }
     // Bound and de-wrap the body like sd_upload_post: content_len is unsigned,
     // so an int copy wrapped negative over 2 GB and skipped the loop entirely
     // (esp_ota_end then failed on an empty image). A chunked request has
@@ -522,6 +511,17 @@ static esp_err_t ota_post(httpd_req_t *req)
     // partition's size, so it stays correct if the layout changes.
     if (req->content_len == 0 || req->content_len > part->size) {
         httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad firmware size");
+        return ESP_FAIL;
+    }
+    esp_ota_handle_t handle = 0;
+    if (esp_ota_begin(part, OTA_SIZE_UNKNOWN, &handle) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ota begin failed");
+        return ESP_FAIL;
+    }
+    char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        esp_ota_abort(handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_FAIL;
     }
     int remaining = (int)req->content_len;
@@ -1011,7 +1011,7 @@ static esp_err_t sd_upload_post(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot create file");
         return ESP_FAIL;
     }
-    char *buf = malloc(4096);
+    char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     if (!buf) {
         fclose(f);
         source_sd_delete(part);
@@ -1215,6 +1215,7 @@ static esp_err_t memo_post(httpd_req_t *req)
     }
     free(buf);
     fclose(f);
+    remove(final_abs);  // FatFs: rename does not replace an existing target
     if (ok && rename(part_abs, final_abs) != 0) ok = false;
     if (!ok) {
         remove(part_abs);

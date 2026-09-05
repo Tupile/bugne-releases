@@ -1,5 +1,5 @@
 # External dependencies for Bugne, resolved by the IDF component manager.
-# Versions confirmed against the ESP Component Registry on 2026-08-21.
+# Versions confirmed against the ESP Component Registry on 2026-09-03.
 # Single-file libraries (dr_mp3, dr_flac, yxml, qrcodegen) are vendored into
 # their own component directories, so they are not listed here.
 dependencies:
@@ -27,7 +27,7 @@ dependencies:
   espressif/esp_lvgl_port:
     version: "^2.9.0"
   espressif/esp_lcd_ili9341:
-    version: "^2.0.2"
+    version: "^2.1.0"
   espressif/esp_lcd_touch_ft5x06:
     version: "^1.1.1"
 
@@ -44,7 +44,7 @@ dependencies:
 
   # mDNS for bugne-XXXX.local and Sendspin discovery.
   espressif/mdns:
-    version: "^1.11.3"
+    version: "^1.12.0"
 
   # Sendspin player protocol. Highest-risk dependency: pre-1.0 and tracks the
   # Music Assistant protocol. Pinned to an exact version on purpose.

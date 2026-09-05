@@ -12,6 +12,8 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_littlefs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "cJSON.h"
 #include "mbedtls/sha256.h"
 
@@ -31,6 +33,7 @@ static const char *TAG = "config_store";
 static config_t *s_cfg;
 #define s_config (*s_cfg)
 static bool s_ready;
+static SemaphoreHandle_t s_lock;
 
 static int clampi(int v, int lo, int hi)
 {
@@ -562,8 +565,14 @@ static esp_err_t mount_littlefs(void)
 
 esp_err_t config_store_init(void)
 {
+    s_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_lock, ESP_ERR_NO_MEM, TAG, "mutex alloc failed");
     s_cfg = heap_caps_calloc(1, sizeof(*s_cfg), MALLOC_CAP_SPIRAM);
-    ESP_RETURN_ON_FALSE(s_cfg, ESP_ERR_NO_MEM, TAG, "config alloc failed");
+    if (!s_cfg) {
+        vSemaphoreDelete(s_lock);
+        s_lock = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     ESP_RETURN_ON_ERROR(init_nvs(), TAG, "nvs init failed");
     ESP_RETURN_ON_ERROR(mount_littlefs(), TAG, "littlefs init failed");
     ESP_RETURN_ON_ERROR(load_config(), TAG, "config load failed");
@@ -582,26 +591,36 @@ const config_t *config_store_get(void)
 esp_err_t config_store_set_lang(const char *code)
 {
     if (!code || !code[0]) return ESP_ERR_INVALID_ARG;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     strlcpy(s_config.ui.lang, code, sizeof(s_config.ui.lang));
-    return save_to_disk(&s_config);
+    esp_err_t err = save_to_disk(&s_config);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return err;
 }
 
 esp_err_t config_store_set_orientation(int orientation)
 {
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     s_config.ui.orientation = (orientation == 1) ? 1 : 0;
-    return save_to_disk(&s_config);
+    esp_err_t err = save_to_disk(&s_config);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return err;
 }
 
 esp_err_t config_store_set_theme(int dark, int accent)
 {
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     s_config.ui.dark = clampi(dark, 0, 1);
     s_config.ui.accent = clampi(accent, 0, 4);
-    return save_to_disk(&s_config);
+    esp_err_t err = save_to_disk(&s_config);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return err;
 }
 
 esp_err_t config_store_set_alarm(int idx, const config_alarm_t *a)
 {
     if (!a || idx < 0 || idx >= CFG_MAX_ALARMS) return ESP_ERR_INVALID_ARG;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     config_alarm_t *dst = &s_config.alarms[idx];
     dst->enabled = clampi(a->enabled, 0, 1);
     dst->hour = clampi(a->hour, 0, 23);
@@ -614,7 +633,9 @@ esp_err_t config_store_set_alarm(int idx, const config_alarm_t *a)
     strlcpy(dst->sd_title, a->sd_title, sizeof(dst->sd_title));
     dst->volume = clampi(a->volume, 5, 100);
     dst->sunrise = clampi(a->sunrise, 0, 15);
-    return save_to_disk(&s_config);
+    esp_err_t err = save_to_disk(&s_config);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return err;
 }
 
 esp_err_t config_store_favorite_add(const config_favorite_t *f)
@@ -622,23 +643,35 @@ esp_err_t config_store_favorite_add(const config_favorite_t *f)
     if (!f) return ESP_ERR_INVALID_ARG;
     int type = clampi(f->type, 0, 1);
     if (type == 1 && f->path[0] == '\0') return ESP_ERR_INVALID_ARG;
-    if (s_config.favorite_count >= CFG_MAX_FAVORITES) return ESP_ERR_NO_MEM;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_config.favorite_count >= CFG_MAX_FAVORITES) {
+        if (s_lock) xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
+    }
     config_favorite_t *dst = &s_config.favorites[s_config.favorite_count++];
     dst->type = type;
     dst->radio_id = f->radio_id;
     strlcpy(dst->path, (type == 1) ? f->path : "", sizeof(dst->path));
     strlcpy(dst->title, f->title, sizeof(dst->title));
-    return save_to_disk(&s_config);
+    esp_err_t err = save_to_disk(&s_config);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return err;
 }
 
 esp_err_t config_store_favorite_remove(int index)
 {
-    if (index < 0 || (size_t)index >= s_config.favorite_count) return ESP_ERR_INVALID_ARG;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (index < 0 || (size_t)index >= s_config.favorite_count) {
+        if (s_lock) xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_ARG;
+    }
     for (size_t i = (size_t)index; i + 1 < s_config.favorite_count; i++) {
         s_config.favorites[i] = s_config.favorites[i + 1];
     }
     s_config.favorite_count--;
-    return save_to_disk(&s_config);
+    esp_err_t err = save_to_disk(&s_config);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return err;
 }
 
 #define NVS_NAMESPACE   "bugne"
@@ -710,10 +743,15 @@ esp_err_t config_store_set_wifi_slot(int slot, const char *ssid, const char *pas
 esp_err_t config_store_read_json(char *buf, size_t size, size_t *out_len)
 {
     if (size == 0) return ESP_ERR_INVALID_ARG;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     FILE *f = fopen(CONFIG_PATH, "r");
-    if (!f) return ESP_ERR_NOT_FOUND;
+    if (!f) {
+        if (s_lock) xSemaphoreGive(s_lock);
+        return ESP_ERR_NOT_FOUND;
+    }
     size_t n = fread(buf, 1, size - 1, f);
     fclose(f);
+    if (s_lock) xSemaphoreGive(s_lock);
     buf[n] = '\0';
     if (out_len) *out_len = n;
     return ESP_OK;
@@ -744,6 +782,7 @@ esp_err_t config_store_write_json(const char *json)
     load_from_json(scratch, root);
     cJSON_Delete(root);
 
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = save_to_disk(scratch);
     if (err == ESP_OK) {
         // Atomic commit for readers on other tasks (they see old or new, never
@@ -753,6 +792,7 @@ esp_err_t config_store_write_json(const char *json)
         ESP_LOGE(TAG, "posted config not saved (%s), keeping the current one",
                  esp_err_to_name(err));
     }
+    if (s_lock) xSemaphoreGive(s_lock);
     free(scratch);
     return err;
 }
