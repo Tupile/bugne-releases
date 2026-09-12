@@ -62,7 +62,7 @@ def parse_lock(path: str) -> Dict[str, str]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            if stripped in ("dependencies:", "direct_dependencies:"):
+            if not line.startswith(" ") and stripped in ("dependencies:", "direct_dependencies:"):
                 current_dep = None
                 continue
 
@@ -71,7 +71,7 @@ def parse_lock(path: str) -> Dict[str, str]:
                 current_dep = match_name.group(1)
                 continue
 
-            if current_dep and stripped.startswith("version:"):
+            if current_dep and line.startswith("    version:"):
                 v_match = re.search(r'version:\s*["\']?([^"\']+)["\']?', stripped)
                 if v_match:
                     locked[current_dep] = v_match.group(1).strip()

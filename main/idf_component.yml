@@ -1,5 +1,5 @@
 # External dependencies for Bugne, resolved by the IDF component manager.
-# Versions confirmed against the ESP Component Registry on 2026-09-03.
+# Versions confirmed against the ESP Component Registry on 2026-09-11.
 # Single-file libraries (dr_mp3, dr_flac, yxml, qrcodegen) are vendored into
 # their own component directories, so they are not listed here.
 dependencies:
