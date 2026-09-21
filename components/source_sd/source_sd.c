@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
+#include "freertos/FreeRTOS.h"
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -32,7 +33,11 @@ static const char *TAG = "source_sd";
 
 static sdmmc_card_t *s_card;
 static bool s_present;
+static bool s_init_done;  // the boot mount has been attempted (see source_sd_poll)
 static volatile bool s_stop;
+static uint32_t s_generation;
+static uint32_t s_completed_generation;
+static portMUX_TYPE s_stop_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_completed;  // last play decoded to the end (not stopped, no error)
 
 esp_err_t source_sd_init(void)
@@ -75,6 +80,9 @@ esp_err_t source_sd_init(void)
         host.max_freq_khz = SDMMC_FREQ_DEFAULT;  // 20 MHz, the previously validated speed
         err = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot, &mount_cfg, &s_card);
     }
+    // Both returns below are ESP_OK for the caller, so release the hot-insert
+    // probe here: it covers the no-card path too.
+    s_init_done = true;
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "no SD card mounted (%s); SD features disabled", esp_err_to_name(err));
         s_present = false;
@@ -93,6 +101,15 @@ bool source_sd_present(void)
 
 void source_sd_poll(void)
 {
+    // The boot mount belongs to bg_init_task. ui_start creates the UI timer
+    // before it returns, so without this gate the very first tick mounts
+    // /sdcard from the LVGL task and bg_init then mounts the SAME path again:
+    // the second mount's error path calls esp_vfs_fat_unregister_path, which
+    // destroys the live registration's lock (assert in _lock_close, task
+    // bg_init). That panic hit roughly one boot in three and could get an OTA
+    // rolled back before the 30 s health confirmation.
+    if (!s_init_done) return;
+
     // Rate limits: a fresh mount attempt is only worth trying every ~30 s, and
     // the presence check (one root-directory read) runs every ~60 s.
     static int64_t s_next_probe_us = 0;
@@ -134,14 +151,28 @@ bool source_sd_usage(uint64_t *total_bytes, uint64_t *free_bytes)
     return true;
 }
 
+uint32_t source_sd_generation(void)
+{
+    taskENTER_CRITICAL(&s_stop_mux);
+    uint32_t generation = s_generation;
+    taskEXIT_CRITICAL(&s_stop_mux);
+    return generation;
+}
+
 void source_sd_stop(void)
 {
+    taskENTER_CRITICAL(&s_stop_mux);
+    s_generation++;
     s_stop = true;
+    taskEXIT_CRITICAL(&s_stop_mux);
 }
 
 bool source_sd_completed(void)
 {
-    return s_completed;
+    taskENTER_CRITICAL(&s_stop_mux);
+    bool completed = s_completed && s_completed_generation == s_generation;
+    taskEXIT_CRITICAL(&s_stop_mux);
+    return completed;
 }
 
 // decode_source_t callbacks over a FILE*.
@@ -198,6 +229,18 @@ static bool format_from_path(const char *path, decode_format_t *fmt)
 
 esp_err_t source_sd_play(const char *path)
 {
+    return source_sd_play_generation(path, source_sd_generation());
+}
+
+esp_err_t source_sd_play_generation(const char *path, uint32_t generation)
+{
+    taskENTER_CRITICAL(&s_stop_mux);
+    s_completed = false;
+    bool current = generation == s_generation;
+    if (current) s_stop = false;
+    taskEXIT_CRITICAL(&s_stop_mux);
+    if (!current) return ESP_ERR_INVALID_STATE;
+    if (!path) return ESP_ERR_INVALID_ARG;
     if (!s_present) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -222,7 +265,12 @@ esp_err_t source_sd_play(const char *path)
         free(iobuf);
         return err;
     }
-    s_stop = false;
+    if (s_stop) {
+        audio_arbiter_release(AUDIO_SOURCE_SD);
+        fclose(f);
+        free(iobuf);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     // File size for the decoder's duration estimate (seek back to the start so
     // the decoder reads from the beginning).
@@ -238,13 +286,17 @@ esp_err_t source_sd_play(const char *path)
         .total_bytes = fsize > 0 ? fsize : 0,
     };
     ESP_LOGI(TAG, "playing %s", path);
-    err = decode_run(fmt, &src);
+    err = s_stop ? ESP_ERR_INVALID_STATE : decode_run(fmt, &src);
     // A clean decode that was not interrupted by source_sd_stop() means the file
     // reached its end, so the caller can move to the next track in the folder.
     // A read fault must NOT count as completion: file_read returns 0 both at EOF
     // and on fread error, so without the ferror check one transient SD read
     // failure (marginal card, hot pull) silently skips to the next track.
-    s_completed = (err == ESP_OK) && !s_stop && !ferror(f);
+    bool read_fault = ferror(f);
+    taskENTER_CRITICAL(&s_stop_mux);
+    s_completed = (err == ESP_OK) && !s_stop && !read_fault;
+    s_completed_generation = generation;
+    taskEXIT_CRITICAL(&s_stop_mux);
 
     audio_arbiter_release(AUDIO_SOURCE_SD);
     fclose(f);       // flushes/detaches the stdio buffer before we free it

@@ -156,6 +156,7 @@ typedef enum {
     STR_UPD_INSTALL_FAILED, // status: install failed
     STR_UPD_NEED_WIFI,      // status: offline
     STR_UPD_UNAVAILABLE,    // status: web_config not up (fn pointers NULL)
+    STR_SAVE_FAILED,
     STR__COUNT
 } str_id_t;
 

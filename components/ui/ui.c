@@ -237,6 +237,7 @@ static lv_obj_t *s_alarm_src_lbl;
 // change. NULL'd in show(); s_as_src_mode/s_as_src_radio_id are not widgets but
 // track the pending source selection (set by the source dropdown's callback).
 // s_alarm_edit_idx selects which alarms[] the list screen opened the editor on.
+static bool s_alarm_rebuild_pending;
 static int       s_alarm_edit_idx;
 static lv_obj_t *s_as_switch;
 static lv_obj_t *s_as_hour_roller;
@@ -280,6 +281,11 @@ typedef enum { REQ_PLAY, REQ_REFRESH, REQ_REFRESH_ALL, REQ_DOWNLOAD_JOB, REQ_BEE
                REQ_TALKIE_SEND, REQ_TALKIE_PLAY } req_kind_t;
 typedef struct {
     req_kind_t kind;
+    uint32_t generation;
+    uint32_t source_generation;
+    uint32_t refresh_generation;
+    int play_ctx;
+    char cover[PODCAST_PATH_MAX];
     bool is_file;
     int id;                        // podcast id (REQ_REFRESH / REQ_DOWNLOAD), peer index (REQ_MEMO_SEND)
     int skip_ms;                   // intro to skip at playback (REQ_PLAY)
@@ -363,6 +369,15 @@ static volatile bool s_play_retrying;  // stream reconnect in progress (play_tas
 // serve here: it self-clears from the UI timer as soon as audio goes idle, which
 // can happen before the worker gets to check it.
 static volatile bool s_stop_requested;
+static uint32_t s_play_generation = 1;
+static uint32_t s_advance_generation;
+static uint32_t s_worker_generation;
+static volatile bool s_play_worker_busy;
+static portMUX_TYPE s_play_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_refresh_generation;
+static uint32_t s_refresh_owner_generation;
+static volatile bool s_refresh_cancel;
+static portMUX_TYPE s_refresh_mux = portMUX_INITIALIZER_UNLOCKED;
 // Background download engine. A single job (persisted in NVS so it survives a
 // reboot) is run on the worker, gated by the scheduler in sleep_timer_cb: it runs
 // only when audio has been idle >5 min and Wi-Fi is up, and pauses the moment the
@@ -935,8 +950,93 @@ static void muted(lv_obj_t *label) { lv_obj_add_style(label, &s_th_muted, 0); }
 
 // ---- Playback worker ----
 
-static void dljob_persist(void) { config_store_set_dljob(&s_dljob); }
-static void resume_persist(void) { config_store_set_resume(&s_resume); }
+static bool s_save_failed_pending;
+
+static bool config_saved(esp_err_t err)
+{
+    if (err == ESP_OK) return true;
+    __atomic_store_n(&s_save_failed_pending, true, __ATOMIC_RELEASE);
+    return false;
+}
+
+static void dljob_persist(void) { config_saved(config_store_set_dljob(&s_dljob)); }
+static void resume_persist(void) { config_saved(config_store_set_resume(&s_resume)); }
+
+static bool play_current(uint32_t generation)
+{
+    taskENTER_CRITICAL(&s_play_mux);
+    bool current = generation == s_play_generation && !s_stop_requested;
+    taskEXIT_CRITICAL(&s_play_mux);
+    return current;
+}
+
+static bool play_worker_current(void)
+{
+    taskENTER_CRITICAL(&s_play_mux);
+    bool current = s_worker_generation == s_play_generation && !s_stop_requested;
+    taskEXIT_CRITICAL(&s_play_mux);
+    return current;
+}
+
+static void refresh_cancel(void)
+{
+    taskENTER_CRITICAL(&s_refresh_mux);
+    s_refresh_generation++;
+    s_refresh_cancel = true;
+    taskEXIT_CRITICAL(&s_refresh_mux);
+}
+
+static bool refresh_begin(uint32_t generation)
+{
+    taskENTER_CRITICAL(&s_refresh_mux);
+    bool current = generation == s_refresh_generation;
+    if (current) s_refresh_cancel = false;
+    taskEXIT_CRITICAL(&s_refresh_mux);
+    return current;
+}
+
+static void refresh_finished(uint32_t generation, bool ok)
+{
+    taskENTER_CRITICAL(&s_refresh_mux);
+    if (generation == s_refresh_owner_generation) {
+        s_refresh_ok = ok && generation == s_refresh_generation && !s_refresh_cancel;
+        s_refreshing = false;
+        s_refresh_done = true;
+    }
+    taskEXIT_CRITICAL(&s_refresh_mux);
+}
+
+static void play_cancel(void)
+{
+    taskENTER_CRITICAL(&s_play_mux);
+    s_play_generation++;
+    s_stop_requested = true;
+    s_advance = false;
+    s_play_retrying = false;
+    taskEXIT_CRITICAL(&s_play_mux);
+}
+
+static void play_ended(const play_req_t *req, bool completed, bool failed)
+{
+    taskENTER_CRITICAL(&s_play_mux);
+    if (req->generation == s_play_generation && !s_stop_requested) {
+        if (completed && req->play_ctx != PLAY_CTX_NONE) {
+            s_advance_generation = req->generation;
+            s_advance = true;
+        }
+        s_play_failed_local = req->is_file;
+        s_play_failed = failed;
+    }
+    taskEXIT_CRITICAL(&s_play_mux);
+}
+
+static void play_retrying(uint32_t generation, bool retrying)
+{
+    taskENTER_CRITICAL(&s_play_mux);
+    if (generation == s_play_generation && !s_stop_requested)
+        s_play_retrying = retrying;
+    taskEXIT_CRITICAL(&s_play_mux);
+}
 
 // True if podcast `p` is within the current job's scope.
 static bool job_in_scope(const config_podcast_t *p)
@@ -951,12 +1051,12 @@ static bool job_refresh(void)
     s_dl_phase = UI_DL_REFRESHING;
     const config_t *c = config_store_get();
     for (size_t i = 0; c && i < c->podcast_count; i++) {
-        if (s_dl_cancel) return false;
+        if (s_dl_cancel || uxQueueMessagesWaiting(s_play_q) > 0) return false;
         const config_podcast_t *p = &c->podcasts[i];
         if (!job_in_scope(p) || p->rss_url[0] == '\0') continue;
-        podcast_refresh(p->id, p->title, p->rss_url);
+        podcast_refresh_cancelable(p->id, p->title, p->rss_url, &s_dl_cancel);
     }
-    return !s_dl_cancel;
+    return !s_dl_cancel && uxQueueMessagesWaiting(s_play_q) == 0;
 }
 
 // Run the persisted background download job on the worker. Resumes from the saved
@@ -971,7 +1071,7 @@ static void worker_run_job(void)
     // The job may have sat queued while playback started (s_downloading only
     // turns on here, so the scheduler could not pause it in time): bail out at
     // once and let the scheduler reschedule when idle again.
-    if (s_dl_cancel || audio_is_active()) {
+    if (s_dl_cancel || audio_is_active() || uxQueueMessagesWaiting(s_play_q) > 0) {
         s_downloading = false;
         return;
     }
@@ -1145,7 +1245,7 @@ static void beep_run(void)
 // Worker task only (SD I/O + JPEG decode must never run on the LVGL task).
 // A missing file is the normal case, not an error: most feeds have no cover
 // cached yet, and the screen simply shows no art.
-static void load_cover_file(const char *abs_path)
+static void load_cover_file(const char *abs_path, uint32_t generation)
 {
     FILE *f = fopen(abs_path, "rb");
     if (!f) return;
@@ -1157,7 +1257,8 @@ static void load_cover_file(const char *abs_path)
     if (!buf) { fclose(f); return; }
     size_t got = fread(buf, 1, (size_t)len, f);
     fclose(f);
-    if (got == (size_t)len) art_set_jpeg(buf, got);
+    if (got == (size_t)len && play_current(generation)) art_set_jpeg(buf, got);
+    if (!play_current(generation)) art_clear();
     heap_caps_free(buf);
 }
 
@@ -1167,20 +1268,29 @@ static void play_task(void *arg)
     play_req_t req;
     for (;;) {
         if (xQueueReceive(s_play_q, &req, portMAX_DELAY) == pdTRUE) {
+            if (req.kind == REQ_REFRESH_ALL || req.kind == REQ_REFRESH) {
+                if (!refresh_begin(req.refresh_generation) || uxQueueMessagesWaiting(s_play_q) > 0) {
+                    refresh_finished(req.refresh_generation, false);
+                    continue;
+                }
+            }
             if (req.kind == REQ_REFRESH_ALL) {
                 const config_t *c = config_store_get();
                 size_t n = c ? c->podcast_count : 0;
                 ESP_LOGI(TAG, "refreshing all %u podcast feed(s)", (unsigned)n);
                 bool ok = true;
                 for (size_t i = 0; i < n; i++) {
-                    esp_err_t r = podcast_refresh(c->podcasts[i].id, c->podcasts[i].title, c->podcasts[i].rss_url);
+                    if (s_refresh_cancel || uxQueueMessagesWaiting(s_play_q) > 0) {
+                        ok = false;
+                        break;
+                    }
+                    esp_err_t r = podcast_refresh_cancelable(c->podcasts[i].id, c->podcasts[i].title,
+                                                             c->podcasts[i].rss_url, &s_refresh_cancel);
                     if (r != ESP_OK) ok = false;
                     ESP_LOGI(TAG, "  %u/%u %s: %s", (unsigned)(i + 1), (unsigned)n,
                              c->podcasts[i].title, r == ESP_OK ? "ok" : "failed");
                 }
-                s_refresh_ok = ok;
-                s_refreshing = false;
-                s_refresh_done = true;
+                refresh_finished(req.refresh_generation, ok);
                 continue;
             }
             if (req.kind == REQ_REFRESH) {
@@ -1189,17 +1299,15 @@ static void play_task(void *arg)
                 const config_t *c = config_store_get();
                 for (size_t i = 0; c && i < c->podcast_count; i++)
                     if (c->podcasts[i].id == req.id) { name = c->podcasts[i].title; break; }
-                esp_err_t r = podcast_refresh(req.id, name, req.target);
+                esp_err_t r = podcast_refresh_cancelable(req.id, name, req.target, &s_refresh_cancel);
                 ESP_LOGI(TAG, "podcast %d refresh %s", req.id, r == ESP_OK ? "ok" : "failed");
-                s_refresh_ok = (r == ESP_OK);
-                s_refreshing = false;
-                s_refresh_done = true;
+                refresh_finished(req.refresh_generation, r == ESP_OK);
                 continue;
             }
             if (req.kind == REQ_DOWNLOAD_JOB) {
                 // The worker owns s_downloading: producers only queue.
-                s_dl_queued = false;
                 s_downloading = true;
+                s_dl_queued = false;
                 worker_run_job();
                 continue;
             }
@@ -1237,35 +1345,22 @@ static void play_task(void *arg)
             // worker (internal stack, SD I/O allowed) rather than on the LVGL
             // task. The path was staged by the LVGL task before req_post; it
             // is empty for sources whose art comes from the file's own tags.
-            if (s_art_pending_path[0]) {
-                char cover[PODCAST_PATH_MAX];
-                strlcpy(cover, s_art_pending_path, sizeof(cover));
-                s_art_pending_path[0] = '\0';
-                load_cover_file(cover);
+            if (!play_current(req.generation)) continue;
+            s_play_worker_busy = true;
+            taskENTER_CRITICAL(&s_play_mux);
+            s_worker_generation = req.generation;
+            taskEXIT_CRITICAL(&s_play_mux);
+            if (req.cover[0]) load_cover_file(req.cover, req.generation);
+            if (!play_current(req.generation)) {
+                s_play_worker_busy = false;
+                continue;
             }
-            s_stop_requested = false;  // a fresh play; a later stop re-arms it
-            // Clear here too (not only in ui_play): if the previous play failed
-            // in the instant between ui_play's clear and its takeover-stop being
-            // seen, the stale flag would mark this healthy play as failed.
-            s_play_failed = false;
             esp_err_t perr = ESP_OK;
+            bool completed = false;
             decode_set_start_skip_ms((uint32_t)req.skip_ms);  // skip a podcast intro (0 otherwise)
             if (req.is_file) {
-                perr = source_sd_play(req.target);
-                // A local file (SD track or cached episode) that reached its end:
-                // ask the UI task to play the next item in the list. LVGL is not
-                // thread-safe, so we only flag it here and let sleep_timer_cb (UI
-                // task) advance.
-                if ((s_play_ctx == PLAY_CTX_SD || s_play_ctx == PLAY_CTX_PODCAST) &&
-                    source_sd_completed()) {
-                    s_advance = true;
-                    podcast_resume_clear(req.target);
-                    // The episode finished on its own: no resume point to keep.
-                    if (s_play_ctx == PLAY_CTX_PODCAST && s_resume.active) {
-                        s_resume.active = false;
-                        resume_persist();
-                    }
-                }
+                perr = source_sd_play_generation(req.target, req.source_generation);
+                completed = perr == ESP_OK && play_current(req.generation) && source_sd_completed();
             } else {
                 // Streams auto-reconnect: a Wi-Fi blip otherwise silences a live
                 // radio until a manual replay. Up to 6 attempts over ~2 min; any
@@ -1273,8 +1368,32 @@ static void play_task(void *arg)
                 // ends the retries instantly. An attempt that played > 60 s before
                 // dying opens a fresh retry window.
                 static const uint16_t retry_delay_s[] = { 2, 5, 10, 20, 30, 45 };
+                int64_t takeover_until = esp_timer_get_time() + 8000000LL;
+                bool takeover_timed_out = false;
+                while (play_current(req.generation) && uxQueueMessagesWaiting(s_play_q) == 0 &&
+                       (source_sendspin_session_active() ||
+                        audio_arbiter_active() == AUDIO_SOURCE_SENDSPIN)) {
+                    if (esp_timer_get_time() >= takeover_until) {
+                        takeover_timed_out = true;
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
+                if (takeover_timed_out || !play_current(req.generation) ||
+                    uxQueueMessagesWaiting(s_play_q) > 0) {
+                    if (takeover_timed_out) {
+                        ESP_LOGW(TAG, "Sendspin takeover timed out");
+                        play_ended(&req, false, true);
+                    }
+                    s_play_worker_busy = false;
+                    continue;
+                }
                 int attempt = 0;
                 for (;;) {
+                    if (!play_current(req.generation) || uxQueueMessagesWaiting(s_play_q) > 0 ||
+                        source_sendspin_session_active() ||
+                        audio_arbiter_active() == AUDIO_SOURCE_SENDSPIN)
+                        break;
                     // Single choke point for every stream play (device UI, web
                     // /api/playback, and the alarm): arm the decoy only for a
                     // configured webradio with skip_preroll set, and always set
@@ -1291,23 +1410,17 @@ static void play_task(void *arg)
                     }
                     source_stream_set_preroll_decoy(decoy);
                     int64_t t0 = esp_timer_get_time();
-                    perr = source_stream_play(req.target);
+                    perr = source_stream_play_generation(req.target, req.source_generation);
                     // A streamed podcast episode that played to its end advances
                     // too; live web radio (PLAY_CTX_NONE) never completes, so it
                     // stays put.
-                    if (s_play_ctx == PLAY_CTX_PODCAST && source_stream_completed()) {
-                        s_advance = true;
-                        podcast_resume_clear(req.target);
-                        if (s_resume.active) {
-                            s_resume.active = false;
-                            resume_persist();
-                        }
-                        break;
-                    }
+                    completed = perr == ESP_OK && play_current(req.generation) &&
+                                req.play_ctx == PLAY_CTX_PODCAST && source_stream_completed();
+                    if (completed) break;
                     // Stop, takeover, or a Music Assistant session engaged
                     // meanwhile (a reconnect must not steal the arbiter back
                     // from Sendspin): not a failure, no retry.
-                    if (s_stop_requested || uxQueueMessagesWaiting(s_play_q) > 0 ||
+                    if (!play_current(req.generation) || uxQueueMessagesWaiting(s_play_q) > 0 ||
                         source_sendspin_session_active())
                         break;
                     // Abnormal end: dead connection, unreachable stream, or a
@@ -1319,40 +1432,34 @@ static void play_task(void *arg)
                     // as the interrupted-resume path); a radio keeps skip_ms 0.
                     uint32_t pos = 0, dur = 0;
                     decode_progress(&pos, &dur);
-                    if (s_play_ctx == PLAY_CTX_PODCAST && pos > 0) {
+                    if (req.play_ctx == PLAY_CTX_PODCAST && pos > 0)
                         req.skip_ms = (int)pos;
-                        if (s_resume.active) {
-                            s_resume.pos_ms = pos;  // a reboot mid-retry resumes here
-                            resume_persist();
-                        }
-                    }
-                    s_play_retrying = true;
+                    play_retrying(req.generation, true);
                     ESP_LOGW(TAG, "stream died, reconnect attempt %d in %u s",
                              attempt + 1, (unsigned)retry_delay_s[attempt]);
                     int64_t until = esp_timer_get_time() +
                                     (int64_t)retry_delay_s[attempt] * 1000000LL;
-                    while (esp_timer_get_time() < until && !s_stop_requested &&
+                    while (esp_timer_get_time() < until && play_current(req.generation) &&
                            uxQueueMessagesWaiting(s_play_q) == 0 &&
                            !source_sendspin_session_active()) {
                         vTaskDelay(pdMS_TO_TICKS(200));
                     }
-                    if (s_stop_requested || uxQueueMessagesWaiting(s_play_q) > 0 ||
+                    if (!play_current(req.generation) || uxQueueMessagesWaiting(s_play_q) > 0 ||
                         source_sendspin_session_active())
                         break;
                     attempt++;
                     decode_set_start_skip_ms((uint32_t)req.skip_ms);
                 }
-                s_play_retrying = false;
+                play_retrying(req.generation, false);
             }
             // Surface abnormal ends on the now-playing screen. A live radio never
             // ends by itself, so it returning without a requested stop is a failure
             // (unreachable stream or a dead connection) even when the decode path
             // reported a clean EOF.
-            if (!s_stop_requested && uxQueueMessagesWaiting(s_play_q) == 0 &&
-                (perr != ESP_OK || s_play_ctx == PLAY_CTX_NONE)) {
-                s_play_failed_local = req.is_file;  // pick the right message
-                s_play_failed = true;
-            }
+            if (uxQueueMessagesWaiting(s_play_q) == 0 && !source_sendspin_session_active())
+                play_ended(&req, completed, !completed);
+            if (!play_current(req.generation)) art_clear();
+            s_play_worker_busy = false;
             ESP_LOGI(TAG, "play finished");
         }
     }
@@ -1391,14 +1498,12 @@ static void tuner_stop_sync(void)
 // only the worker's handler clears it, so a dropped request would otherwise
 // wedge the UI (a refresh button that stays dead, a memo screen stuck on
 // "Sending..."). Called from req_post, on the LVGL task.
-static void req_abandoned(req_kind_t kind)
+static void req_abandoned(const play_req_t *req)
 {
-    switch (kind) {
+    switch (req->kind) {
     case REQ_REFRESH:
     case REQ_REFRESH_ALL:
-        s_refreshing = false;
-        s_refresh_ok = false;   // surfaces "refresh failed" instead of a silent wedge
-        s_refresh_done = true;
+        refresh_finished(req->refresh_generation, false);
         break;
     case REQ_DOWNLOAD_JOB:
         // The job request was dropped before the worker served it. Only the
@@ -1435,11 +1540,34 @@ static void req_abandoned(req_kind_t kind)
 // sleep_timer_cb turns into a call to ui_remote_apply.
 static void req_post(const play_req_t *req)
 {
+    play_req_t next = *req;
     play_req_t old;
-    if (xQueuePeek(s_play_q, &old, 0) == pdTRUE && old.kind != req->kind) {
-        req_abandoned(old.kind);
+    refresh_cancel();
+    if (next.kind != REQ_DOWNLOAD_JOB) s_dl_cancel = true;
+    if (xQueuePeek(s_play_q, &old, 0) == pdTRUE && old.kind != next.kind) {
+        req_abandoned(&old);
     }
-    xQueueOverwrite(s_play_q, req);
+    if (next.kind == REQ_PLAY) {
+        taskENTER_CRITICAL(&s_play_mux);
+        next.generation = s_play_generation;
+        s_stop_requested = false;
+        s_play_failed = false;
+        s_play_retrying = false;
+        taskEXIT_CRITICAL(&s_play_mux);
+        next.source_generation = next.is_file ? source_sd_generation() : source_stream_generation();
+        next.play_ctx = s_play_ctx;
+        strlcpy(next.cover, s_art_pending_path, sizeof(next.cover));
+        s_art_pending_path[0] = '\0';
+    }
+    if (next.kind == REQ_REFRESH || next.kind == REQ_REFRESH_ALL) {
+        taskENTER_CRITICAL(&s_refresh_mux);
+        next.refresh_generation = s_refresh_generation;
+        s_refresh_owner_generation = next.refresh_generation;
+        s_refreshing = true;
+        s_refresh_done = false;
+        taskEXIT_CRITICAL(&s_refresh_mux);
+    }
+    xQueueOverwrite(s_play_q, &next);
 }
 
 static void ui_play(bool is_file, const char *target, const char *title, int skip_ms)
@@ -1447,9 +1575,7 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
     tuner_stop_sync();        // free the mic and the arbiter before a source starts
     s_beep_stop = true;       // end the alarm beep if it is sounding (source takes over)
     s_memo_stop = true;       // end a memo record/playback the same way
-    s_stop_requested = true;  // the current play (if any) is being taken over
-    s_play_failed = false;    // a fresh start clears a stale error
-    s_play_retrying = false;  // and any in-progress reconnect display
+    play_cancel();
     audio_set_paused(false);  // never carry a paused state into a new track
     source_sd_stop();      // stop whatever is currently playing
     source_stream_stop();
@@ -1498,7 +1624,7 @@ static void ui_stop(void)
 {
     s_beep_stop = true;       // end the alarm beep if it is sounding
     s_memo_stop = true;       // end a memo record/playback the same way
-    s_stop_requested = true;  // an expected end: not a playback failure
+    play_cancel();
     s_user_stopped = true;    // hide the mini bar at once, before the source tears down
     audio_output_off();       // mute now so playback stops instantly, not after buffers drain
     audio_set_paused(false);  // release a paused decode loop so it can unwind
@@ -1899,13 +2025,16 @@ static void on_fav_toggle(lv_event_t *e)
     if (!fav_current(&f)) return;  // identity lost since the build: ignore
     int idx = fav_find(&f);
     if (idx >= 0) {
-        config_store_favorite_remove(idx);
+        if (!config_saved(config_store_favorite_remove(idx))) return;
         toast(T(STR_FAV_REMOVED));
-    } else if (config_store_favorite_add(&f) == ESP_OK) {
-        toast(T(STR_FAV_ADDED));
     } else {
-        toast(T(STR_FAV_LIST_FULL));
-        return;  // nothing changed: no rebuild needed
+        const config_t *c = config_store_get();
+        if (c && c->favorite_count >= CFG_MAX_FAVORITES) {
+            toast(T(STR_FAV_LIST_FULL));
+            return;
+        }
+        if (!config_saved(config_store_favorite_add(&f))) return;
+        toast(T(STR_FAV_ADDED));
     }
     show(build_now_playing);
 }
@@ -2540,7 +2669,6 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         // so only start it when nothing is playing (the web endpoint already tells
         // the user to stop playback first).
         if (!audio_is_active() && !s_refreshing && !s_downloading) {
-            s_refreshing = true;
             play_req_t req = { .kind = REQ_REFRESH_ALL };
             req_post(&req);
         }
@@ -3309,7 +3437,6 @@ static void on_refresh(lv_event_t *e)
         // REQ_PLAY, leaving s_refreshing stuck true forever (matches the web path).
         return;
     }
-    s_refreshing = true;
     play_req_t req = { .kind = REQ_REFRESH, .id = s_nav_podcast_id };
     strlcpy(req.target, s_nav_podcast_rss, sizeof(req.target));
     req_post(&req);
@@ -3477,8 +3604,8 @@ static lv_obj_t *s_game_leitner_btn;
 static void game_save_leitner_if_dirty(void)
 {
     if (s_game_leitner_dirty) {
-        config_store_set_leitner(s_game_leitner_boxes);
-        s_game_leitner_dirty = false;
+        if (config_saved(config_store_set_leitner(s_game_leitner_boxes)))
+            s_game_leitner_dirty = false;
     }
 }
 
@@ -3688,10 +3815,10 @@ static void on_game_key(lv_event_t *e)
             s_game_error_count++;
             if (!s_game_mode_leitner && s_game_error_count > 3) {
                 if (s_game_best > config_store_get_highscore()) {
-                    config_store_set_highscore(s_game_best);
+                    config_saved(config_store_set_highscore(s_game_best));
                 }
                 if (s_game_max_streak > config_store_get_maxstreak()) {
-                    config_store_set_maxstreak(s_game_max_streak);
+                    config_saved(config_store_set_maxstreak(s_game_max_streak));
                 }
                 s_game_score = 0;
                 s_game_error_count = 0;
@@ -3717,10 +3844,10 @@ static void on_game_back(lv_event_t *e)
     if (s_game_timer) { lv_timer_delete(s_game_timer); s_game_timer = NULL; }
     if (!s_game_mode_leitner) {
         if (s_game_best > config_store_get_highscore()) {
-            config_store_set_highscore(s_game_best);
+            config_saved(config_store_set_highscore(s_game_best));
         }
         if (s_game_max_streak > config_store_get_maxstreak()) {
-            config_store_set_maxstreak(s_game_max_streak);
+            config_saved(config_store_set_maxstreak(s_game_max_streak));
         }
     }
     game_save_leitner_if_dirty();
@@ -5441,7 +5568,7 @@ static void on_set_ap(lv_event_t *e)  { (void)e; show(build_settings_ap); }
 static void on_toggle_orientation(lv_event_t *e)
 {
     (void)e;
-    config_store_set_orientation(s_landscape ? 0 : 1);
+    config_saved(config_store_set_orientation(s_landscape ? 0 : 1));
 }
 
 static void on_open_theme(lv_event_t *e) { (void)e; show(build_settings_theme); }
@@ -5452,12 +5579,12 @@ static void on_open_theme(lv_event_t *e) { (void)e; show(build_settings_theme); 
 // task. Each tap changes one of the two choices and keeps the other.
 static void on_theme_mode(lv_event_t *e)
 {
-    config_store_set_theme((int)(intptr_t)lv_event_get_user_data(e), s_accent_applied);
+    config_saved(config_store_set_theme((int)(intptr_t)lv_event_get_user_data(e), s_accent_applied));
 }
 
 static void on_theme_accent(lv_event_t *e)
 {
-    config_store_set_theme(s_dark_applied, (int)(intptr_t)lv_event_get_user_data(e));
+    config_saved(config_store_set_theme(s_dark_applied, (int)(intptr_t)lv_event_get_user_data(e)));
 }
 
 // Label helper: prefix with a checkmark when this choice is the active one.
@@ -5829,6 +5956,7 @@ static void alarm_status_refresh(void)
 // alarm; arbitrary SD browsing stays web-only.
 static void alarm_settings_save(void)
 {
+    if (s_alarm_rebuild_pending) return;
     config_alarm_t a = config_store_get()->alarms[s_alarm_edit_idx];
     a.enabled = (s_as_switch && lv_obj_has_state(s_as_switch, LV_STATE_CHECKED)) ? 1 : 0;
     if (s_as_hour_roller) a.hour = (int)lv_roller_get_selected(s_as_hour_roller);
@@ -5846,7 +5974,10 @@ static void alarm_settings_save(void)
         strlcpy(a.sd_title, s_as_src_title, sizeof(a.sd_title));
     }
     if (s_as_vol_slider) a.volume = (int)lv_slider_get_value(s_as_vol_slider);
-    config_store_set_alarm(s_alarm_edit_idx, &a);
+    if (!config_saved(config_store_set_alarm(s_alarm_edit_idx, &a))) {
+        s_alarm_rebuild_pending = true;
+        return;
+    }
     alarm_status_refresh();
 }
 
@@ -5914,6 +6045,7 @@ static void on_alarm_edit_back(lv_event_t *e) { (void)e; show(build_settings_ala
 // and the web page share that one path; the alarm engine just reads it back).
 static void build_alarm_edit(lv_obj_t *scr)
 {
+    s_alarm_rebuild_pending = false;
     add_back_cb(scr, on_alarm_edit_back);
     char title[24];
     snprintf(title, sizeof(title), T(STR_ALARM_N_FMT), s_alarm_edit_idx + 1);
@@ -6725,7 +6857,7 @@ static void beep_start(void)
     s_memo_stop = true; // a memo record/playback yields too: the alarm always sounds
     s_alarm_beeping = true;
     s_beep_stop = false;
-    s_stop_requested = true;
+    play_cancel();
     audio_set_paused(false);
     // Same metadata reset as ui_play(), so GET /api/playback (and any other reader
     // of s_now_title/s_meta_*) reports the beep cleanly instead of the previous
@@ -7103,7 +7235,8 @@ static void tick_download_scheduler(void)
             // Running or queued: pause it the moment audio plays (a queued job
             // picks the cancel up in worker_run_job's early guard).
             if (audio_is_active()) s_dl_cancel = true;
-        } else if (s_dljob.active && net_ok && idle_5min) {
+        } else if (s_dljob.active && net_ok && idle_5min && !s_play_worker_busy &&
+                   uxQueueMessagesWaiting(s_play_q) == 0) {
             s_dl_queued = true;
             s_dl_cancel = false;
             play_req_t req = { .kind = REQ_DOWNLOAD_JOB };
@@ -7391,8 +7524,8 @@ static void tick_sd_presence(void)
     // Hot insert/remove probe. Only when nothing can hold the card busy: the
     // poll's unmount-on-vanish path must never race an open FILE*. Radio
     // playback touches no SD file, so it does not block the probe.
-    if (!audio_is_active() && !s_downloading && !s_refreshing &&
-        s_memo_state == MEMO_UI_IDLE) {
+    if (!audio_is_active() && !s_downloading && !s_refreshing && !s_play_worker_busy &&
+        uxQueueMessagesWaiting(s_play_q) == 0 && s_memo_state == MEMO_UI_IDLE) {
         source_sd_poll();
     }
     static int s_sd_present_applied = -1;
@@ -7485,6 +7618,11 @@ static void tick_art(void)
     uint8_t *px = NULL;
     uint16_t w = 0, h = 0;
     bool got = art_take(&px, &w, &h);
+    if (got && !play_worker_current()) {
+        free(px);
+        px = NULL;
+        got = false;
+    }
     if (!got && !s_art_px) return;  // cleared and nothing was shown: no rebuild
 
     bool was_shown = s_art_px != NULL && s_active_builder == build_now_playing;
@@ -7565,7 +7703,8 @@ static void tick_now_playing(void)
     // screen is shown, so it survives a power loss (there is no shutdown hook
     // to save on instead). Throttled: only every RESUME_WRITE_INTERVAL_US, and
     // only once the position has actually moved.
-    if (s_play_ctx == PLAY_CTX_PODCAST && s_resume.active && audio_is_active()) {
+    if (s_play_ctx == PLAY_CTX_PODCAST && s_resume.active &&
+        (audio_is_active() || s_play_retrying) && play_worker_current()) {
         uint32_t pos = 0, dur = 0;
         decode_progress(&pos, &dur);
         uint32_t abs_pos = s_resume.cached_trimmed_mp3
@@ -7590,7 +7729,7 @@ static void tick_now_playing(void)
 
     // Persist the generic/podcast/SD resume position periodically to the generic
     // resume store so it can be resumed across sessions when browsing SD files/podcasts.
-    if ((s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) && audio_is_active()) {
+    if ((s_play_ctx == PLAY_CTX_PODCAST || s_play_ctx == PLAY_CTX_SD) && audio_is_active() && play_worker_current()) {
         char path_or_url[PODCAST_URL_MAX + 1];  // full-length: the reader hashes the same string
         if (get_current_playing_path_or_url(path_or_url, sizeof(path_or_url))) {
             uint32_t pos = 0, dur = 0;
@@ -7642,8 +7781,16 @@ static void tick_remote(void)
 // play_ctx_at (LVGL) is safe.
 static void tick_advance(void)
 {
-    if (s_advance) {
-        s_advance = false;
+    taskENTER_CRITICAL(&s_play_mux);
+    bool advance = s_advance && s_advance_generation == s_play_generation && !s_stop_requested;
+    s_advance = false;
+    taskEXIT_CRITICAL(&s_play_mux);
+    if (advance) {
+        podcast_resume_clear(s_now_target);
+        if (s_play_ctx == PLAY_CTX_PODCAST && s_resume.active) {
+            s_resume.active = false;
+            resume_persist();
+        }
         // A3: the episode that just ended reached a real natural end (s_advance
         // is only set by play_task on source_sd_completed()/source_stream_completed(),
         // never on a user stop). Mark it played. This runs on the UI (LVGL) task,
@@ -7732,7 +7879,7 @@ static void tick_stats_and_usage(void)
         int today = date_today();
         if (counting && today > 0) {
             if (usage_tick(today))
-                config_store_set_usage(usage_date(), usage_seconds());
+                config_saved(config_store_set_usage(usage_date(), usage_seconds()));
             // One-shot warning per day when 5 minutes of quota remain.
             const config_t *lc = config_store_get();
             if (lc && lc->daily_limit.enabled && s_limit_warn_date != today) {
@@ -7744,7 +7891,7 @@ static void tick_stats_and_usage(void)
             }
         }
         if (s_usage_counting_prev && !counting && usage_date() > 0)
-            config_store_set_usage(usage_date(), usage_seconds());
+            config_saved(config_store_set_usage(usage_date(), usage_seconds()));
         s_usage_counting_prev = counting;
 }
 
@@ -8070,11 +8217,15 @@ static void tick_1hz(void)
 // and surface a failed refresh instead of silently showing the stale list.
 static void tick_refresh_done(void)
 {
-    if (s_refresh_done) {
-        s_refresh_done = false;
+    taskENTER_CRITICAL(&s_refresh_mux);
+    bool done = s_refresh_done;
+    bool ok = s_refresh_ok;
+    s_refresh_done = false;
+    taskEXIT_CRITICAL(&s_refresh_mux);
+    if (done) {
         if (s_active_builder == build_episodes) {
             show(build_episodes);
-            if (!s_refresh_ok && s_ep_msg) {
+            if (!ok && s_ep_msg) {
                 lv_label_set_text(s_ep_msg, T(STR_REFRESH_FAILED));
             }
         }
@@ -8131,6 +8282,16 @@ static void tick_wake_and_sleep(void)
     }
 }
 
+static void tick_config_save(void)
+{
+    if (s_alarm_rebuild_pending) {
+        s_alarm_rebuild_pending = false;
+        if (s_active_builder == build_alarm_edit) show(build_alarm_edit);
+    }
+    if (__atomic_exchange_n(&s_save_failed_pending, false, __ATOMIC_ACQ_REL))
+        toast(T(STR_SAVE_FAILED));
+}
+
 static void sleep_timer_cb(lv_timer_t *t)
 {
     (void)t;
@@ -8153,6 +8314,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     mini_bar_update();  // persistent now-playing bar across screens
     tick_1hz();
     tick_refresh_done();
+    tick_config_save();
     tick_net_change();
     tick_wake_and_sleep();
 }

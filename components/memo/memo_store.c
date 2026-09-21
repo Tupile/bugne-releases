@@ -2,6 +2,7 @@
 // state: no NVS, no wall clock (memos are ordered by a monotonic sequence
 // number embedded in the file name).
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -93,18 +94,53 @@ static int next_seq(void)
     return (ms % 999) + 1;
 }
 
+static FILE *reserve_part(const char *final_abs, const char *read_abs,
+                          char *part_abs, size_t part_size)
+{
+    int n = snprintf(part_abs, part_size, "%s.part", final_abs);
+    if (n < 0 || (size_t)n >= part_size) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    FILE *f = fopen(part_abs, "wx");
+    if (!f) return NULL;
+    struct stat st;
+    int err = 0;
+    if (stat(final_abs, &st) == 0) err = EEXIST;
+    else if (errno != ENOENT) err = errno;
+    if (!err && read_abs) {
+        if (stat(read_abs, &st) == 0) err = EEXIST;
+        else if (errno != ENOENT) err = errno;
+    }
+    if (!err) return f;
+    fclose(f);
+    remove(part_abs);
+    errno = err;
+    return NULL;
+}
+
 int memo_keep_rec(void)
 {
     int seq = next_seq();
-    char name[MEMO_NAME_MAX], dst[MEMO_NAME_MAX + 20];
-    memo_name_mine(name, sizeof(name), seq);
-    memo_abs_path(dst, sizeof(dst), name);
-    remove(dst);  // FatFs: rename does not replace an existing target
-    if (rename(MEMO_ABS_DIR "/" MEMO_REC_NAME, dst) != 0) {
-        ESP_LOGW(TAG, "keep failed: %s", dst);
-        return -1;
+    for (int attempt = 0; attempt < 999; attempt++, seq = (seq % 999) + 1) {
+        char name[MEMO_NAME_MAX], dst[MEMO_NAME_MAX + 20], part[MEMO_NAME_MAX + 25];
+        memo_name_mine(name, sizeof(name), seq);
+        memo_abs_path(dst, sizeof(dst), name);
+        FILE *reservation = reserve_part(dst, NULL, part, sizeof(part));
+        if (!reservation) {
+            if (errno == EEXIST) continue;
+            return -1;
+        }
+        int result = fclose(reservation);
+        if (result == 0) result = rename(MEMO_ABS_DIR "/" MEMO_REC_NAME, dst);
+        remove(part);
+        if (result != 0) {
+            ESP_LOGW(TAG, "keep failed: %s", dst);
+            return -1;
+        }
+        return seq;
     }
-    return seq;
+    return -1;
 }
 
 FILE *memo_rx_create(const char *sender, char *final_abs, size_t final_size,
@@ -113,16 +149,15 @@ FILE *memo_rx_create(const char *sender, char *final_abs, size_t final_size,
     if (!source_sd_present()) return NULL;
     if (source_sd_mkdir(MEMO_DIR) != ESP_OK) return NULL;
     int seq = next_seq();
-    // "wx" (O_EXCL) makes concurrent allocations collision-safe without a lock:
-    // a taken name fails the open and the next sequence number is tried.
-    for (int attempt = 0; attempt < 8; attempt++) {
-        char name[MEMO_NAME_MAX];
+    for (int attempt = 0; attempt < 999; attempt++, seq = (seq % 999) + 1) {
+        char name[MEMO_NAME_MAX], read_abs[MEMO_NAME_MAX + 20];
         memo_name_rx(name, sizeof(name), sender, seq);
-        snprintf(final_abs, final_size, MEMO_ABS_DIR "/%s", name);
-        snprintf(part_abs, part_size, "%s.part", final_abs);
-        FILE *f = fopen(part_abs, "wx");
+        int n = snprintf(final_abs, final_size, MEMO_ABS_DIR "/%s", name);
+        if (n < 0 || (size_t)n >= final_size) return NULL;
+        snprintf(read_abs, sizeof(read_abs), MEMO_ABS_DIR "/rx-%s-%03d.wav", sender, seq);
+        FILE *f = reserve_part(final_abs, read_abs, part_abs, part_size);
         if (f) return f;
-        seq = (seq % 999) + 1;
+        if (errno != EEXIST) return NULL;
     }
     return NULL;
 }
@@ -132,15 +167,12 @@ FILE *memo_tk_create(char *final_abs, size_t final_size,
 {
     if (!source_sd_present()) return NULL;
     if (source_sd_mkdir(MEMO_DIR) != ESP_OK) return NULL;
-    // tk files are few and short-lived: a static counter is enough, "wx"
-    // (O_EXCL) keeps concurrent receives collision-safe like memo_rx_create.
-    static int s_tk_seq;
-    for (int attempt = 0; attempt < 8; attempt++) {
-        s_tk_seq = (s_tk_seq % 999) + 1;
-        snprintf(final_abs, final_size, MEMO_ABS_DIR "/" MEMO_TK_PREFIX "%03d.wav", s_tk_seq);
-        snprintf(part_abs, part_size, "%s.part", final_abs);
-        FILE *f = fopen(part_abs, "wx");
+    for (int seq = 1; seq <= 999; seq++) {
+        int n = snprintf(final_abs, final_size, MEMO_ABS_DIR "/" MEMO_TK_PREFIX "%03d.wav", seq);
+        if (n < 0 || (size_t)n >= final_size) return NULL;
+        FILE *f = reserve_part(final_abs, NULL, part_abs, part_size);
         if (f) return f;
+        if (errno != EEXIST) return NULL;
     }
     return NULL;
 }

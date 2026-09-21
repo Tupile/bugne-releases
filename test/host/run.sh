@@ -177,3 +177,64 @@ echo "=== checking config field parity ==="
 # Not a C test: compares the fields config_store parses against the fields it
 # writes back, which is the exact class that dropped the `quiet` array once.
 python3 check_config_parity.py
+
+echo "=== building review memo fault tests ==="
+# Same memo_store.c as above, but with rename()/fopen() redirected through the
+# test's own wrappers so the collision and rename-failure branches of
+# reserve_part() are exercised (they cannot be provoked on a real filesystem).
+gcc -std=c11 -Wall -Wextra -g -D_DEFAULT_SOURCE \
+    -DMEMO_ABS_DIR='"/tmp/bugne-memo-fault-test"' \
+    -I stubs \
+    -I ../../components/memo/include \
+    -o "$OUT/test_review_memo_faults" \
+    test_review_memo_faults.c ../../components/memo/memo_name.c
+
+echo "=== running ==="
+"$OUT/test_review_memo_faults"
+
+echo "=== building podcast storage/cancellation tests ==="
+# podcast.c is included directly by the test, which redirects every stdio and
+# dirent call plus esp_http_client so the storage faults, the MP3 trim, the
+# cache scan and every cancellation point can be driven deterministically.
+# podcast_lot23_stubs/ provides the ESP headers; stubs/podcast.h must NOT be on
+# the include path here (it would shadow the real podcast.h).
+CJSON="${IDF_PATH:-$HOME/esp/esp-idf}/components/json/cJSON"
+LOT23_INC="$OUT/lot23_inc"
+rm -rf "$LOT23_INC"; mkdir -p "$LOT23_INC"
+for f in stubs/*; do
+    [ "$(basename "$f")" = "podcast.h" ] && continue
+    cp -r "$f" "$LOT23_INC/"
+done
+gcc -std=c11 -Wall -Wextra -g \
+    -I podcast_lot23_stubs \
+    -I "$LOT23_INC" \
+    -I ../../components/podcast \
+    -I ../../components/podcast/include \
+    -I "$CJSON" \
+    -o "$OUT/test_podcast_lot23" \
+    test_podcast_lot23.c ../../components/podcast/rss_parse.c "$OUT/yxml.o" "$CJSON/cJSON.c"
+
+echo "=== running ==="
+"$OUT/test_podcast_lot23"
+
+echo "=== running source-level review tests ==="
+# Not C tests of their own: each one extracts the functions it covers from the
+# real source with a regex, compiles them against a scripted harness, and
+# asserts on the behaviour. They cover the code that cannot be linked on a host
+# (ui.c's worker, net.c's event handlers, config_store's transactions) and they
+# break on purpose when those functions are refactored.
+for t in test_review_playback_worker.py \
+         test_review_playback_cancel.py \
+         test_review_source_startup.py \
+         test_review_ui_save_feedback.py \
+         test_review_net_task_faults.py \
+         test_review_ha_tls.py \
+         test_lot4_config_transactions.py; do
+    echo "--- $t"
+    python3 "$t"
+done
+
+echo "=== running web page tests ==="
+# Parses the embedded page, syntax-checks every inline script and inline event
+# handler, then drives the save/install handlers against a scripted fetch.
+node test_lot4_web_actions.js

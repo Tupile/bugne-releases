@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 // No heavy setup needed. Kept for boot-order symmetry.
@@ -21,6 +22,8 @@ size_t source_stream_title(char *buf, size_t size);
 // Stream and play a URL (blocking until the stream ends, errors, or
 // source_stream_stop() is called). Acquires the audio arbiter for the duration.
 esp_err_t source_stream_play(const char *url);
+uint32_t source_stream_generation(void);
+esp_err_t source_stream_play_generation(const char *url, uint32_t generation);
 
 // Ask the current stream to stop. The play call then returns.
 void source_stream_stop(void);

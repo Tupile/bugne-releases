@@ -47,6 +47,9 @@ typedef struct {
 } stream_ctx_t;
 
 static volatile bool s_stop;
+static uint32_t s_generation;
+static uint32_t s_completed_generation;
+static portMUX_TYPE s_stop_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_completed;  // last play reached the stream end (not stopped, no error)
 static int s_metaint;  // icy-metaint captured by the HTTP header event handler
 static char s_ctype[64];  // Content-Type captured by the header event handler
@@ -202,10 +205,13 @@ static void reader_task(void *arg)
 static int open_following_redirects(esp_http_client_handle_t client)
 {
     for (int i = 0; i < MAX_REDIRECTS; i++) {
+        if (s_stop) return -1;
         if (esp_http_client_open(client, 0) != ESP_OK) {
             return -1;
         }
+        if (s_stop) return -1;
         esp_http_client_fetch_headers(client);
+        if (s_stop) return -1;
         int status = esp_http_client_get_status_code(client);
         if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
             esp_http_client_set_redirection(client);
@@ -266,7 +272,7 @@ static bool fetch_text(const char *url, char *buf, size_t size)
     int status = open_following_redirects(client);
     if (status == 200) {
         int total = 0;
-        while (total < (int)size - 1) {
+        while (total < (int)size - 1 && !s_stop) {
             int r = esp_http_client_read(client, buf + total, (int)size - 1 - total);
             if (r <= 0) break;
             total += r;
@@ -342,15 +348,29 @@ esp_err_t source_stream_init(void)
     return ESP_OK;
 }
 
+uint32_t source_stream_generation(void)
+{
+    taskENTER_CRITICAL(&s_stop_mux);
+    uint32_t generation = s_generation;
+    taskEXIT_CRITICAL(&s_stop_mux);
+    return generation;
+}
+
 void source_stream_stop(void)
 {
+    taskENTER_CRITICAL(&s_stop_mux);
+    s_generation++;
     s_stop = true;
-    s_rf_gen++;  // invalidate any running radiofrance meta poller
+    s_rf_gen++;
+    taskEXIT_CRITICAL(&s_stop_mux);
 }
 
 bool source_stream_completed(void)
 {
-    return s_completed;
+    taskENTER_CRITICAL(&s_stop_mux);
+    bool completed = s_completed && s_completed_generation == s_generation;
+    taskEXIT_CRITICAL(&s_stop_mux);
+    return completed;
 }
 
 void source_stream_set_preroll_decoy(bool enable)
@@ -524,7 +544,7 @@ static esp_err_t stream_decode_mp4_seek(const char *url, int64_t total)
     }
     uint8_t front[64];
     size_t fn = 0;
-    while (fn < sizeof(front)) {
+    while (fn < sizeof(front) && !s_stop) {
         int r = esp_http_client_read(h.cl, (char *)front + fn, sizeof(front) - fn);
         if (r <= 0) break;
         fn += r;
@@ -757,7 +777,7 @@ static esp_http_client_handle_t open_preroll_decoy(const char *url)
     uint8_t *buf = malloc(READ_CHUNK);
     if (buf) {
         int total = 0;
-        while (total < 16 * 1024) {
+        while (total < 16 * 1024 && !s_stop) {
             int r = esp_http_client_read(client, (char *)buf, READ_CHUNK);
             if (r <= 0) break;
             total += r;
@@ -781,7 +801,19 @@ static void close_preroll_decoy(esp_http_client_handle_t decoy)
 
 esp_err_t source_stream_play(const char *url)
 {
-    s_rf_gen++;  // invalidate any poller left over from a previous stream
+    return source_stream_play_generation(url, source_stream_generation());
+}
+
+esp_err_t source_stream_play_generation(const char *url, uint32_t generation)
+{
+    taskENTER_CRITICAL(&s_stop_mux);
+    s_completed = false;
+    bool current = generation == s_generation;
+    if (current) s_stop = false;
+    uint32_t rf_generation = ++s_rf_gen;
+    taskEXIT_CRITICAL(&s_stop_mux);
+    if (!current) return ESP_ERR_INVALID_STATE;
+    if (!url) return ESP_ERR_INVALID_ARG;
     icy_set_title("");  // clear any previous station's "now playing"
     char resolved[URL_MAX];
     strlcpy(resolved, url, sizeof(resolved));
@@ -850,9 +882,11 @@ esp_err_t source_stream_play(const char *url)
         }
         err = audio_arbiter_acquire(AUDIO_SOURCE_STREAM);
         if (err != ESP_OK) return err;
-        s_stop = false;
-        err = stream_decode_mp4_seek(resolved, total);
+        err = s_stop ? ESP_ERR_INVALID_STATE : stream_decode_mp4_seek(resolved, total);
+        taskENTER_CRITICAL(&s_stop_mux);
         s_completed = (err == ESP_OK) && !s_stop;
+        s_completed_generation = generation;
+        taskEXIT_CRITICAL(&s_stop_mux);
         s_stop = true;
         audio_arbiter_release(AUDIO_SOURCE_STREAM);
         return err;
@@ -865,7 +899,12 @@ esp_err_t source_stream_play(const char *url)
         return err;
     }
 
-    s_stop = false;
+    if (s_stop) {
+        audio_arbiter_release(AUDIO_SOURCE_STREAM);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_INVALID_STATE;
+    }
     // Create the persistent ring buffer once; on later plays just reset it. No
     // task is blocked on it here (the previous play already joined its reader),
     // so the reset is safe.
@@ -912,7 +951,7 @@ esp_err_t source_stream_play(const char *url)
         if (rf_id > 0) {
             rf_poll_arg_t *rf_arg = malloc(sizeof(*rf_arg));
             if (rf_arg) {
-                rf_arg->gen = s_rf_gen;
+                rf_arg->gen = rf_generation;
                 rf_arg->station_id = rf_id;
                 // PSRAM stack: this task never touches NVS/LittleFS/flash APIs
                 // (hard project rule: flash writes need an internal-RAM stack).
@@ -944,7 +983,7 @@ esp_err_t source_stream_play(const char *url)
         .total_bytes = clen > 0 ? clen : 0,
     };
     ESP_LOGI(TAG, "streaming %s", resolved);
-    err = decode_run(detect_format(client, resolved), &src);
+    err = s_stop ? ESP_ERR_INVALID_STATE : decode_run(detect_format(client, resolved), &src);
     // A connection dropped mid-episode looks like a clean EOF to the decoder.
     // Compare bytes delivered against the announced length before calling it a
     // completion, or the UI would silently auto-advance and drop the resume
@@ -957,7 +996,10 @@ esp_err_t source_stream_play(const char *url)
     }
     // Capture natural end before the cleanup below sets s_stop: a clean decode
     // that the user did not interrupt means the episode played to its end.
+    taskENTER_CRITICAL(&s_stop_mux);
     s_completed = (err == ESP_OK) && !s_stop && !truncated;
+    s_completed_generation = generation;
+    taskEXIT_CRITICAL(&s_stop_mux);
     if (err == ESP_OK && truncated && !s_stop) {
         err = ESP_FAIL;  // surface the failure on the now-playing screen
     }

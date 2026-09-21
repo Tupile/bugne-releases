@@ -8,6 +8,7 @@
 #include <string.h>
 #include <strings.h>  // strncasecmp
 #include <time.h>
+#include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -22,7 +23,7 @@
 static const char *TAG = "podcast";
 
 #define HTTP_CHUNK      4096
-#define HTTP_TIMEOUT_MS 15000
+#define HTTP_TIMEOUT_MS 3000
 #define MAX_REDIRECTS   6
 // Hard wall-clock cap on a refresh. Per-read timeouts (HTTP_TIMEOUT_MS) bound a
 // single stalled read, but a server that trickles bytes could keep the loop
@@ -35,14 +36,23 @@ static const char *TAG = "podcast";
 #define EPISODE_MAX_MS    (60 * 60 * 1000)
 
 // Open the client, following redirects. Returns the final status code or -1.
-static int http_open_redirect(esp_http_client_handle_t client)
+static bool transfer_stopped(volatile bool *cancel, int64_t deadline)
+{
+    return (cancel && *cancel) || esp_timer_get_time() >= deadline;
+}
+
+static int http_open_redirect(esp_http_client_handle_t client, volatile bool *cancel,
+                              int64_t deadline)
 {
     for (int i = 0; i < MAX_REDIRECTS; i++) {
+        if (transfer_stopped(cancel, deadline)) return -1;
         if (esp_http_client_open(client, 0) != ESP_OK) return -1;
-        esp_http_client_fetch_headers(client);
+        if (transfer_stopped(cancel, deadline)) return -1;
+        if (esp_http_client_fetch_headers(client) < 0) return -1;
+        if (transfer_stopped(cancel, deadline)) return -1;
         int status = esp_http_client_get_status_code(client);
         if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
-            esp_http_client_set_redirection(client);
+            if (esp_http_client_set_redirection(client) != ESP_OK) return -1;
             esp_http_client_close(client);
             continue;
         }
@@ -112,7 +122,8 @@ static uint32_t path_hash(const char *s)
     return h;
 }
 
-static void download_cover(const char *url, const char *podir);  // defined at the end
+static void download_cover(const char *url, const char *podir, volatile bool *cancel,
+                           int64_t deadline);
 
 static void mw_write_header(manifest_writer_t *w)
 {
@@ -211,6 +222,14 @@ static void mw_on_episode(const rss_episode_t *ep, void *ctx)
 
 esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
 {
+    return podcast_refresh_cancelable(id, name, rss_url, NULL);
+}
+
+esp_err_t podcast_refresh_cancelable(int id, const char *name, const char *rss_url,
+                                     volatile bool *cancel)
+{
+    if (cancel && *cancel) return ESP_ERR_INVALID_STATE;
+    int64_t deadline = esp_timer_get_time() + (int64_t)REFRESH_MAX_MS * 1000;
     rss_parser_t *p = malloc(sizeof(rss_parser_t));  // small now: no episode array
     void *ybuf = malloc(RSS_YXML_BUF_SIZE);
     if (!p || !ybuf) {
@@ -257,11 +276,10 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     char *chunk = heap_caps_malloc(HTTP_CHUNK, MALLOC_CAP_SPIRAM);
     bool net_ok = false;
-    if (client && chunk && http_open_redirect(client) == 200) {
+    if (client && chunk && http_open_redirect(client, cancel, deadline) == 200) {
         net_ok = true;
-        int64_t deadline = esp_timer_get_time() + (int64_t)REFRESH_MAX_MS * 1000;
         for (;;) {
-            if (esp_timer_get_time() > deadline) {
+            if (transfer_stopped(cancel, deadline)) {
                 ESP_LOGW(TAG, "refresh exceeded %d ms, aborting", REFRESH_MAX_MS);
                 net_ok = false;
                 break;
@@ -269,7 +287,12 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
             int n = esp_http_client_read(client, chunk, HTTP_CHUNK);
             if (n < 0) { net_ok = false; break; }  // transport error / premature
                                                     // close: keep the old manifest
-            if (n == 0) break;                      // clean EOF
+            if (transfer_stopped(cancel, deadline)) { net_ok = false; break; }
+            if (n == 0) {
+                net_ok = esp_http_client_is_complete_data_received(client) &&
+                         yxml_eof(&p->x) == YXML_OK;
+                break;
+            }
             if (!rss_parse_feed(p, chunk, (size_t)n)) { net_ok = false; break; }
             if (p->emitted >= RSS_MAX_EPISODES) break;  // safety cap
         }
@@ -283,11 +306,12 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
     }
 
     esp_err_t ret = ESP_FAIL;
-    bool good = net_ok && !w.failed && w.header_written;
+    bool good = net_ok && !w.failed && w.header_written && !transfer_stopped(cancel, deadline);
     if (good && fputs("]}", w.f) < 0) good = false;  // close the array + object
     // fclose flushes: on a full LittleFS it is where the write actually fails, so
     // a bad close must not promote a truncated manifest over the good one.
     if (fclose(w.f) != 0) good = false;
+    if (transfer_stopped(cancel, deadline)) good = false;
     if (good) {
         // No remove() first: the manifest lives on LittleFS, whose rename replaces
         // the target atomically. Removing it opened a power-loss window where
@@ -296,8 +320,10 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
             ret = ESP_OK;
             ESP_LOGI(TAG, "manifest written: %d episodes", w.count);
             // The feed's artwork, once the manifest is safely in place: it is a
-            // nicety, so it must never be able to cost us the episode list.
-            download_cover(p->image_url, w.podir);
+            // nicety, so it must never be able to cost us the episode list. A
+            // cancel landing here (any new request sets the flag) leaves the
+            // episodes written and only skips the cover.
+            download_cover(p->image_url, w.podir, cancel, deadline);
         } else {
             ESP_LOGE(TAG, "cannot rename manifest into place");
             remove(tmp_path);
@@ -310,7 +336,7 @@ esp_err_t podcast_refresh(int id, const char *name, const char *rss_url)
     free(p);
     free(ybuf);
     free(w.seen);
-    return ret;
+    return cancel && *cancel && ret != ESP_OK ? ESP_ERR_INVALID_STATE : ret;
 }
 
 // Download/copy chunk size. 16 KB (PSRAM) means fewer, larger SD writes and
@@ -364,21 +390,31 @@ static bool mp3_parse_frame(const uint8_t *h, int *frame_len, double *frame_secs
 }
 
 // Copy `in` to `out` starting at byte offset `from` to EOF. Returns ESP_OK.
-static esp_err_t copy_from(FILE *fi, long from, const char *out)
+static esp_err_t copy_from(FILE *fi, long from, const char *out, volatile bool *cancel)
 {
-    FILE *fo = fopen(out, "wb");
-    if (!fo) return ESP_FAIL;
+    if (cancel && *cancel) return ESP_ERR_INVALID_STATE;
+    if (fseek(fi, from, SEEK_SET) != 0) return ESP_FAIL;
     char *buf = heap_caps_malloc(DL_BUF_BYTES, MALLOC_CAP_SPIRAM);
-    if (!buf) { fclose(fo); return ESP_ERR_NO_MEM; }
-    fseek(fi, from, SEEK_SET);
+    if (!buf) return ESP_ERR_NO_MEM;
+    FILE *fo = fopen(out, "wb");
+    if (!fo) { free(buf); return ESP_FAIL; }
     esp_err_t ret = ESP_OK;
+    size_t total = 0;
     for (;;) {
+        if (cancel && *cancel) { ret = ESP_ERR_INVALID_STATE; break; }
         size_t n = fread(buf, 1, DL_BUF_BYTES, fi);
-        if (n == 0) break;
-        if (fwrite(buf, 1, n, fo) != n) { ret = ESP_FAIL; break; }
+        if (ferror(fi)) { ret = ESP_FAIL; break; }
+        if (cancel && *cancel) { ret = ESP_ERR_INVALID_STATE; break; }
+        if (n && fwrite(buf, 1, n, fo) != n) { ret = ESP_FAIL; break; }
+        total += n;
+        if (n < DL_BUF_BYTES) {
+            if (!feof(fi) || total == 0) ret = ESP_FAIL;
+            break;
+        }
     }
     free(buf);
-    fclose(fo);
+    if (fclose(fo) != 0) ret = ESP_FAIL;
+    if (cancel && *cancel) ret = ESP_ERR_INVALID_STATE;
     return ret;
 }
 
@@ -387,37 +423,53 @@ static esp_err_t copy_from(FILE *fi, long from, const char *out)
 // then copies from the first frame past the cut point to EOF into `out`.
 // ESP_ERR_NOT_SUPPORTED if the stream is not parseable here or shorter than the
 // skip (the caller then keeps the untrimmed file).
-static esp_err_t mp3_trim_file(const char *in, const char *out, int skip_seconds)
+static esp_err_t mp3_trim_file(const char *in, const char *out, int skip_seconds,
+                               volatile bool *cancel)
 {
+    if (cancel && *cancel) return ESP_ERR_INVALID_STATE;
     FILE *fi = fopen(in, "rb");
     if (!fi) return ESP_FAIL;
+    esp_err_t ret = ESP_FAIL;
+    if (fseek(fi, 0, SEEK_END) != 0) goto done;
+    long size = ftell(fi);
+    if (size < 0 || fseek(fi, 0, SEEK_SET) != 0) goto done;
 
     long start = 0;
     uint8_t hdr[10];
-    if (fread(hdr, 1, 10, fi) == 10 && hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
+    size_t n = fread(hdr, 1, sizeof(hdr), fi);
+    if (ferror(fi)) goto done;
+    if (n == sizeof(hdr) && hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
         long tagsz = ((long)(hdr[6] & 0x7f) << 21) | ((long)(hdr[7] & 0x7f) << 14) |
                      ((long)(hdr[8] & 0x7f) << 7)  |  (long)(hdr[9] & 0x7f);
         start = 10 + tagsz;
+        if (hdr[3] == 4 && (hdr[5] & 0x10)) start += 10;
     }
 
-    long cut = 0;
+    if (fseek(fi, start, SEEK_SET) != 0) goto done;
     double acc = 0.0;
-    bool found = false;
-    fseek(fi, start, SEEK_SET);
     for (;;) {
+        if (cancel && *cancel) { ret = ESP_ERR_INVALID_STATE; break; }
         long pos = ftell(fi);
+        if (pos < 0) break;
         uint8_t h[4];
-        if (fread(h, 1, 4, fi) != 4) break;  // EOF before reaching the skip
+        n = fread(h, 1, sizeof(h), fi);
+        if (ferror(fi)) break;
+        if (n != sizeof(h)) { ret = ESP_ERR_NOT_SUPPORTED; break; }
         int len; double secs;
-        if (!mp3_parse_frame(h, &len, &secs)) { fclose(fi); return ESP_ERR_NOT_SUPPORTED; }
-        if (acc >= (double)skip_seconds) { cut = pos; found = true; break; }
+        if (!mp3_parse_frame(h, &len, &secs) || pos > size || len > size - pos) {
+            ret = ESP_ERR_NOT_SUPPORTED;
+            break;
+        }
+        if (acc >= (double)skip_seconds) {
+            ret = copy_from(fi, pos, out, cancel);
+            break;
+        }
         acc += secs;
         if (fseek(fi, pos + len, SEEK_SET) != 0) break;
     }
-    if (!found) { fclose(fi); return ESP_ERR_NOT_SUPPORTED; }
-
-    esp_err_t ret = copy_from(fi, cut, out);
-    fclose(fi);
+done:
+    if (fclose(fi) != 0) ret = ESP_FAIL;
+    if (cancel && *cancel) ret = ESP_ERR_INVALID_STATE;
     return ret;
 }
 
@@ -425,6 +477,8 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
 {
     // cache_path is absolute ("/sdcard/..."); source_sd_create wants it relative
     // to the SD root.
+    if (cancel && *cancel) return ESP_ERR_INVALID_STATE;
+    int64_t deadline = esp_timer_get_time() + (int64_t)EPISODE_MAX_MS * 1000;
     const char *prefix = "/sdcard/";
     if (strncmp(ep->cache_path, prefix, strlen(prefix)) != 0) return ESP_ERR_INVALID_ARG;
     const char *rel = ep->cache_path + strlen(prefix);
@@ -447,15 +501,14 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) { fclose(fo); remove(part_abs); return ESP_ERR_NO_MEM; }
 
-    bool ok = false, aborted = false;
-    if (http_open_redirect(client) == 200) {
+    bool ok = false;
+    if (http_open_redirect(client, cancel, deadline) == 200) {
         char *buf = heap_caps_malloc(DL_BUF_BYTES, MALLOC_CAP_SPIRAM);
         if (buf) {
             ok = true;
-            int64_t deadline = esp_timer_get_time() + (int64_t)EPISODE_MAX_MS * 1000;
             uint64_t total = 0;
             for (;;) {
-                if (cancel && *cancel) { ok = false; aborted = true; break; }
+                if (cancel && *cancel) { ok = false; break; }
                 if (esp_timer_get_time() > deadline) {
                     ESP_LOGW(TAG, "episode download exceeded %d ms, aborting", EPISODE_MAX_MS);
                     ok = false;
@@ -463,7 +516,11 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
                 }
                 int n = esp_http_client_read(client, buf, DL_BUF_BYTES);
                 if (n < 0) { ok = false; break; }
-                if (n == 0) break;  // end of body
+                if (transfer_stopped(cancel, deadline)) { ok = false; break; }
+                if (n == 0) {
+                    ok = total > 0 && esp_http_client_is_complete_data_received(client);
+                    break;
+                }
                 total += (uint64_t)n;
                 if (total > EPISODE_MAX_BYTES) {
                     ESP_LOGW(TAG, "episode download over %llu bytes, aborting",
@@ -482,25 +539,39 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
     // cache a truncated episode that plays short forever.
     if (fclose(fo) != 0) ok = false;
 
-    if (!ok) {
+    if (!ok || (cancel && *cancel)) {
         remove(part_abs);
-        return aborted ? ESP_ERR_INVALID_STATE : ESP_FAIL;
+        return cancel && *cancel ? ESP_ERR_INVALID_STATE : ESP_FAIL;
     }
 
     // Finalize: physically trim the intro only for MP3 (frame-based). FLAC and
     // AAC/.m4a are saved as-is; their intro is skipped at playback instead.
     size_t pl = strlen(ep->cache_path);
     bool is_mp3 = pl >= 4 && strcasecmp(ep->cache_path + pl - 4, ".mp3") == 0;
+    char trim_abs[PODCAST_PATH_MAX + 16];
+    snprintf(trim_abs, sizeof(trim_abs), "%s.trim.part", ep->cache_path);
+    const char *ready = part_abs;
     if (is_mp3 && skip_seconds > 0) {
-        if (mp3_trim_file(part_abs, ep->cache_path, skip_seconds) == ESP_OK) {
-            remove(part_abs);
-            return ESP_OK;
+        esp_err_t err = mp3_trim_file(part_abs, trim_abs, skip_seconds, cancel);
+        if (err == ESP_OK) {
+            ready = trim_abs;
+        } else {
+            remove(trim_abs);
+            if (err != ESP_ERR_NOT_SUPPORTED) {
+                remove(part_abs);
+                return err;
+            }
+            ESP_LOGW(TAG, "intro trim skipped, keeping full file: %s", ep->cache_path);
         }
-        // Not trimmable (unparseable, or shorter than the skip): keep the file.
-        ESP_LOGW(TAG, "intro trim skipped, keeping full file: %s", ep->cache_path);
     }
-    remove(ep->cache_path);  // drop any stale file before the rename
-    if (rename(part_abs, ep->cache_path) != 0) { remove(part_abs); return ESP_FAIL; }
+    if (cancel && *cancel) {
+        remove(part_abs);
+        if (ready == trim_abs) remove(trim_abs);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (remove(ep->cache_path) != 0 && errno != ENOENT) return ESP_FAIL;
+    if (rename(ready, ep->cache_path) != 0) return ESP_FAIL;
+    if (ready == trim_abs) remove(part_abs);
     return ESP_OK;
 }
 
@@ -589,6 +660,7 @@ typedef struct {
     char     dir[PODCAST_PATH_MAX];  // folder that was scanned ("" = none)
     uint64_t *names;                 // FNV-1a of each entry name (PSRAM)
     int      n;
+    bool     complete;
 } cache_scan_t;
 
 static uint64_t fnv1a64(const char *s)
@@ -614,11 +686,14 @@ static void cache_scan_start(cache_scan_t *cs, const char *dir)
         return;
     }
     strlcpy(cs->dir, dir, sizeof(cs->dir));
-    struct dirent *e;
-    while (cs->n < CACHE_NAMES_MAX && (e = readdir(d)) != NULL) {
+    for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (!e) { cs->complete = errno == 0; break; }
+        if (cs->n == CACHE_NAMES_MAX) break;
         cs->names[cs->n++] = fnv1a64(e->d_name);
     }
-    closedir(d);
+    if (closedir(d) != 0) cs->complete = false;
 }
 
 static void cache_scan_done(cache_scan_t *cs)
@@ -641,9 +716,10 @@ static bool cache_scan_has(const cache_scan_t *cs, const char *name)
 static bool ep_is_cached(const cache_scan_t *cs, const podcast_episode_t *ep)
 {
     if (ep->cache_path[0] == '\0') return false;
-    if (cs->names) {
+    if (cs->names && cs->complete) {
         size_t dl = strlen(cs->dir);
-        bool in_dir = strncmp(ep->cache_path, cs->dir, dl) == 0 && ep->cache_path[dl] == '/';
+        bool in_dir = strncmp(ep->cache_path, cs->dir, dl) == 0 && ep->cache_path[dl] == '/' &&
+                      strchr(ep->cache_path + dl + 1, '/') == NULL;
         if (in_dir) {
             const char *slash = strrchr(ep->cache_path, '/');
             if (!cache_scan_has(cs, slash ? slash + 1 : ep->cache_path)) return false;
@@ -742,9 +818,10 @@ void podcast_cover_path(int id, const char *name, char *out, size_t out_size)
 // no file and is not reported, a refresh must still succeed without artwork.
 // Skipped when a cover is already there (feeds rarely change their image, and
 // a refresh runs on every auto-maintenance pass).
-static void download_cover(const char *url, const char *podir)
+static void download_cover(const char *url, const char *podir, volatile bool *cancel,
+                           int64_t deadline)
 {
-    if (!url || !url[0] || !podir || !podir[0]) return;
+    if (transfer_stopped(cancel, deadline) || !url || !url[0] || !podir || !podir[0]) return;
 
     char abs_path[PODCAST_PATH_MAX];
     char rel[PODCAST_PATH_MAX];
@@ -769,15 +846,19 @@ static void download_cover(const char *url, const char *podir)
     if (!client) { fclose(fo); remove(part_abs); return; }
 
     bool ok = false;
-    if (http_open_redirect(client) == 200) {
+    if (http_open_redirect(client, cancel, deadline) == 200) {
         char *buf = heap_caps_malloc(HTTP_CHUNK, MALLOC_CAP_SPIRAM);
         if (buf) {
             size_t total = 0;
             ok = true;
             for (;;) {
+                if (transfer_stopped(cancel, deadline)) { ok = false; break; }
                 int n = esp_http_client_read(client, buf, HTTP_CHUNK);
-                if (n < 0) { ok = false; break; }
-                if (n == 0) break;  // done
+                if (n < 0 || transfer_stopped(cancel, deadline)) { ok = false; break; }
+                if (n == 0) {
+                    ok = esp_http_client_is_complete_data_received(client);
+                    break;
+                }
                 total += (size_t)n;
                 if (total > COVER_MAX_BYTES) { ok = false; break; }
                 if (fwrite(buf, 1, (size_t)n, fo) != (size_t)n) { ok = false; break; }
@@ -785,10 +866,12 @@ static void download_cover(const char *url, const char *podir)
             if (total == 0) ok = false;
             free(buf);
         }
-        esp_http_client_close(client);
     }
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    if (fclose(fo) != 0) ok = false;  // the flush is where a full card fails
+    if (fclose(fo) != 0) ok = false;
+    if (transfer_stopped(cancel, deadline)) ok = false;
+    if (ok && remove(abs_path) != 0 && errno != ENOENT) ok = false;
     if (ok && rename(part_abs, abs_path) == 0) {
         ESP_LOGI(TAG, "cover cached: %s", abs_path);
     } else {

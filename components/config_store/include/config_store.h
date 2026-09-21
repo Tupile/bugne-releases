@@ -115,6 +115,7 @@ typedef struct {
 
 #define CFG_HA_URL_MAX 128
 #define CFG_HA_ENTITY_MAX 64
+#define CFG_HA_TOKEN_MAX 300
 
 typedef struct {
     char url[CFG_HA_URL_MAX];

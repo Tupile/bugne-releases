@@ -728,6 +728,28 @@ static esp_err_t gh_ota_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t ha_token_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_FAIL);
+    char token[CFG_HA_TOKEN_MAX];
+    size_t len = 0;
+    esp_err_t err = read_body(req, token, sizeof(token), &len);
+    if (err != ESP_OK) {
+        memset(token, 0, sizeof(token));
+        httpd_resp_send_err(req, err == ESP_ERR_INVALID_SIZE ? HTTPD_413_CONTENT_TOO_LARGE
+                                                          : HTTPD_400_BAD_REQUEST,
+                            "invalid token body");
+        return ESP_FAIL;
+    }
+    err = memchr(token, '\0', len) ? ESP_ERR_INVALID_ARG : config_store_set_ha_token(token);
+    memset(token, 0, sizeof(token));
+    if (err == ESP_ERR_INVALID_ARG || err == ESP_ERR_INVALID_SIZE)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid token");
+    if (err != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "token save failed");
+    return httpd_resp_sendstr(req, "token saved");
+}
+
 static esp_err_t config_post(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
@@ -753,12 +775,12 @@ static esp_err_t config_post(httpd_req_t *req)
                  strstr(buf, "\"sunrise\"") ? "present" : "MISSING",
                  strstr(buf, "\"daily_limit\"") ? "present" : "MISSING");
         cJSON *root = cJSON_Parse(buf);
-        if (root) {
-            cJSON *ha_t = cJSON_GetObjectItemCaseSensitive(root, "ha_token");
-            if (cJSON_IsString(ha_t)) {
-                config_store_set_ha_token(ha_t->valuestring);
-            }
-            cJSON_Delete(root);
+        bool legacy_token = root && cJSON_HasObjectItem(root, "ha_token");
+        cJSON_Delete(root);
+        if (legacy_token) {
+            free(buf);
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "ha_token is not accepted here; use POST /api/ha/token");
         }
         err = config_store_write_json(buf);
     }
@@ -1670,6 +1692,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/scan",     .method = HTTP_GET,  .handler = scan_get},
         {.uri = "/api/config",   .method = HTTP_GET,  .handler = config_get},
         {.uri = "/api/config",   .method = HTTP_POST, .handler = config_post},
+        {.uri = "/api/ha/token", .method = HTTP_POST, .handler = ha_token_post},
         {.uri = "/api/logs",     .method = HTTP_GET,  .handler = logs_get},
         {.uri = "/api/coredump", .method = HTTP_GET,  .handler = coredump_get},
         {.uri = "/api/coredump/erase", .method = HTTP_POST, .handler = coredump_erase_post},

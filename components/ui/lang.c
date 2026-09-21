@@ -14,6 +14,7 @@ static const lang_def_t LANGS[] = {
     {
         .code = "en", .name = "English",
         .s = {
+            [STR_SAVE_FAILED]        = "Could not save changes",
             [STR_NOW_PLAYING]        = "Now playing",
             [STR_WEBRADIOS]          = "Web radios",
             [STR_PODCASTS]           = "Podcasts",
@@ -162,6 +163,7 @@ static const lang_def_t LANGS[] = {
     {
         .code = "fr", .name = "Français",
         .s = {
+            [STR_SAVE_FAILED]        = "Impossible d'enregistrer les modifications",
             [STR_NOW_PLAYING]        = "Lecture en cours",
             [STR_WEBRADIOS]          = "Radios web",
             [STR_PODCASTS]           = "Podcasts",

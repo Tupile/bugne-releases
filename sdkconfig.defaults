@@ -98,6 +98,12 @@ CONFIG_ESP_WIFI_RX_BA_WIN=6
 # decode on core 1; validated on the bench with playback while scrolling.
 CONFIG_LV_DEF_REFR_PERIOD=20
 
+# LVGL 9.6 deprecated LV_ASSERT_HANDLER_INCLUDE and warns once per translation
+# unit (1758 lines of build noise). We use LVGL's stock assert handler, so there
+# is nothing to migrate: silence the warning until the option is removed
+# upstream, then drop this line.
+CONFIG_LV_DISABLE_ASSERT_HANDLER_INCLUDE_WARNING=y
+
 # TCP receive window 4 -> 6 x MSS (5760 -> 8640): fewer round-trip stalls on
 # HTTPS streams and podcast downloads. The pbufs live in PSRAM
 # (SPIRAM_TRY_ALLOCATE_WIFI_LWIP), so internal RAM is unaffected.

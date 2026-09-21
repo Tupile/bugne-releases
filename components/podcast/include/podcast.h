@@ -36,6 +36,8 @@ typedef struct {
 // folder for cached episodes. May be "" to fall back to the feed title.
 // Blocks on the network fetch; call from a worker task, not the UI task.
 esp_err_t podcast_refresh(int id, const char *name, const char *rss_url);
+esp_err_t podcast_refresh_cancelable(int id, const char *name, const char *rss_url,
+                                     volatile bool *cancel);
 
 // Read the manifest for podcast `id` into the PSRAM array *eps, growing it as
 // needed with heap_caps_realloc (*cap updated), so no sizing pass over the file

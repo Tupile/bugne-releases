@@ -9,6 +9,7 @@
 #include "ha_client.h"
 #include "config_store.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,6 +44,7 @@ static void ha_perform(const ha_req_t *req)
         .timeout_ms = 3000,
         .buffer_size = 1024,
         .buffer_size_tx = 512,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);

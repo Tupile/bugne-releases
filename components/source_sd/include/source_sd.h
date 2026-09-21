@@ -34,6 +34,8 @@ bool source_sd_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 // Play a file (blocking until it finishes or errors). path is absolute, for
 // example "/sdcard/music/song.mp3". Acquires the audio arbiter for the duration.
 esp_err_t source_sd_play(const char *path);
+uint32_t source_sd_generation(void);
+esp_err_t source_sd_play_generation(const char *path, uint32_t generation);
 
 // Ask the current file playback to stop. The play call then returns.
 void source_sd_stop(void);

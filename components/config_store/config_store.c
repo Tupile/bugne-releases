@@ -348,91 +348,114 @@ static esp_err_t save_to_disk(const config_t *c)
     cJSON *root = cJSON_CreateObject();
     if (!root) return ESP_ERR_NO_MEM;
 
-    cJSON_AddNumberToObject(root, "schema_version", c->schema_version);
+    if (!cJSON_AddNumberToObject(root, "schema_version", c->schema_version)) goto no_mem;
     cJSON *dev = cJSON_AddObjectToObject(root, "device");
-    cJSON_AddStringToObject(dev, "name", c->device_name);
+    if (!dev || !cJSON_AddStringToObject(dev, "name", c->device_name)) goto no_mem;
 
     cJSON *ha = cJSON_AddObjectToObject(root, "ha");
-    cJSON_AddStringToObject(ha, "url", c->ha.url);
-    cJSON_AddStringToObject(ha, "entity_id", c->ha.entity_id);
+    if (!ha ||
+        !cJSON_AddStringToObject(ha, "url", c->ha.url) ||
+        !cJSON_AddStringToObject(ha, "entity_id", c->ha.entity_id)) goto no_mem;
 
     cJSON *radios = cJSON_AddArrayToObject(root, "webradios");
+    if (!radios) goto no_mem;
     for (size_t i = 0; i < c->webradio_count; i++) {
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "id", c->webradios[i].id);
-        cJSON_AddStringToObject(o, "name", c->webradios[i].name);
-        cJSON_AddStringToObject(o, "url", c->webradios[i].url);
-        cJSON_AddNumberToObject(o, "skip_preroll", c->webradios[i].skip_preroll);
-        cJSON_AddItemToArray(radios, o);
+        if (!o || !cJSON_AddItemToArray(radios, o)) {
+            cJSON_Delete(o);
+            goto no_mem;
+        }
+        if (!cJSON_AddNumberToObject(o, "id", c->webradios[i].id) ||
+            !cJSON_AddStringToObject(o, "name", c->webradios[i].name) ||
+            !cJSON_AddStringToObject(o, "url", c->webradios[i].url) ||
+            !cJSON_AddNumberToObject(o, "skip_preroll", c->webradios[i].skip_preroll)) goto no_mem;
     }
 
     cJSON *pods = cJSON_AddArrayToObject(root, "podcasts");
+    if (!pods) goto no_mem;
     for (size_t i = 0; i < c->podcast_count; i++) {
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "id", c->podcasts[i].id);
-        cJSON_AddStringToObject(o, "title", c->podcasts[i].title);
-        cJSON_AddStringToObject(o, "rss_url", c->podcasts[i].rss_url);
-        cJSON_AddNumberToObject(o, "skip_seconds", c->podcasts[i].skip_seconds);
-        cJSON_AddItemToArray(pods, o);
+        if (!o || !cJSON_AddItemToArray(pods, o)) {
+            cJSON_Delete(o);
+            goto no_mem;
+        }
+        if (!cJSON_AddNumberToObject(o, "id", c->podcasts[i].id) ||
+            !cJSON_AddStringToObject(o, "title", c->podcasts[i].title) ||
+            !cJSON_AddStringToObject(o, "rss_url", c->podcasts[i].rss_url) ||
+            !cJSON_AddNumberToObject(o, "skip_seconds", c->podcasts[i].skip_seconds)) goto no_mem;
     }
 
     cJSON *ui = cJSON_AddObjectToObject(root, "ui");
-    cJSON_AddNumberToObject(ui, "volume", c->ui.volume);
-    cJSON_AddNumberToObject(ui, "volume_max", c->ui.volume_max);
-    cJSON_AddNumberToObject(ui, "screen_sleep_seconds", c->ui.screen_sleep_seconds);
-    cJSON_AddStringToObject(ui, "lang", c->ui.lang[0] ? c->ui.lang : "en");
-    cJSON_AddNumberToObject(ui, "orientation", c->ui.orientation);
-    cJSON_AddNumberToObject(ui, "dark", c->ui.dark);
-    cJSON_AddNumberToObject(ui, "accent", c->ui.accent);
-    cJSON_AddNumberToObject(ui, "game", c->ui.game);
-    cJSON_AddNumberToObject(ui, "tuner", c->ui.tuner);
-    cJSON_AddNumberToObject(ui, "memo_rx", c->ui.memo_rx);
-    cJSON_AddStringToObject(ui, "tz", c->ui.tz[0] ? c->ui.tz : "CET-1CEST,M3.5.0,M10.5.0/3");
+    if (!ui ||
+        !cJSON_AddNumberToObject(ui, "volume", c->ui.volume) ||
+        !cJSON_AddNumberToObject(ui, "volume_max", c->ui.volume_max) ||
+        !cJSON_AddNumberToObject(ui, "screen_sleep_seconds", c->ui.screen_sleep_seconds) ||
+        !cJSON_AddStringToObject(ui, "lang", c->ui.lang[0] ? c->ui.lang : "en") ||
+        !cJSON_AddNumberToObject(ui, "orientation", c->ui.orientation) ||
+        !cJSON_AddNumberToObject(ui, "dark", c->ui.dark) ||
+        !cJSON_AddNumberToObject(ui, "accent", c->ui.accent) ||
+        !cJSON_AddNumberToObject(ui, "game", c->ui.game) ||
+        !cJSON_AddNumberToObject(ui, "tuner", c->ui.tuner) ||
+        !cJSON_AddNumberToObject(ui, "memo_rx", c->ui.memo_rx) ||
+        !cJSON_AddStringToObject(ui, "tz", c->ui.tz[0] ? c->ui.tz : "CET-1CEST,M3.5.0,M10.5.0/3")) goto no_mem;
 
     // Only "alarms" is written (the legacy "alarm" object is read forever but
     // never re-emitted): a save always upgrades a config to the new shape.
     cJSON *alarms = cJSON_AddArrayToObject(root, "alarms");
+    if (!alarms) goto no_mem;
     for (int i = 0; i < CFG_MAX_ALARMS; i++) {
         const config_alarm_t *a = &c->alarms[i];
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "enabled", a->enabled);
-        cJSON_AddNumberToObject(o, "hour", a->hour);
-        cJSON_AddNumberToObject(o, "minute", a->minute);
-        cJSON_AddNumberToObject(o, "days", a->days);
-        cJSON_AddNumberToObject(o, "source", a->source);
-        cJSON_AddNumberToObject(o, "radio_id", a->radio_id);
-        cJSON_AddStringToObject(o, "sd_path", a->sd_path);
-        cJSON_AddStringToObject(o, "sd_title", a->sd_title);
-        cJSON_AddNumberToObject(o, "volume", a->volume);
-        cJSON_AddNumberToObject(o, "sunrise", a->sunrise);
-        cJSON_AddItemToArray(alarms, o);
+        if (!o || !cJSON_AddItemToArray(alarms, o)) {
+            cJSON_Delete(o);
+            goto no_mem;
+        }
+        if (!cJSON_AddNumberToObject(o, "enabled", a->enabled) ||
+            !cJSON_AddNumberToObject(o, "hour", a->hour) ||
+            !cJSON_AddNumberToObject(o, "minute", a->minute) ||
+            !cJSON_AddNumberToObject(o, "days", a->days) ||
+            !cJSON_AddNumberToObject(o, "source", a->source) ||
+            !cJSON_AddNumberToObject(o, "radio_id", a->radio_id) ||
+            !cJSON_AddStringToObject(o, "sd_path", a->sd_path) ||
+            !cJSON_AddStringToObject(o, "sd_title", a->sd_title) ||
+            !cJSON_AddNumberToObject(o, "volume", a->volume) ||
+            !cJSON_AddNumberToObject(o, "sunrise", a->sunrise)) goto no_mem;
     }
 
     cJSON *favs = cJSON_AddArrayToObject(root, "favorites");
+    if (!favs) goto no_mem;
     for (size_t i = 0; i < c->favorite_count; i++) {
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "type", c->favorites[i].type);
-        cJSON_AddNumberToObject(o, "radio_id", c->favorites[i].radio_id);
-        cJSON_AddStringToObject(o, "path", c->favorites[i].path);
-        cJSON_AddStringToObject(o, "title", c->favorites[i].title);
-        cJSON_AddItemToArray(favs, o);
+        if (!o || !cJSON_AddItemToArray(favs, o)) {
+            cJSON_Delete(o);
+            goto no_mem;
+        }
+        if (!cJSON_AddNumberToObject(o, "type", c->favorites[i].type) ||
+            !cJSON_AddNumberToObject(o, "radio_id", c->favorites[i].radio_id) ||
+            !cJSON_AddStringToObject(o, "path", c->favorites[i].path) ||
+            !cJSON_AddStringToObject(o, "title", c->favorites[i].title)) goto no_mem;
     }
 
     cJSON *quiet = cJSON_AddArrayToObject(root, "quiet");
+    if (!quiet) goto no_mem;
     for (int i = 0; i < CFG_QUIET_WINDOWS; i++) {
         cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "enabled", c->quiet[i].enabled);
-        cJSON_AddNumberToObject(o, "start_hour", c->quiet[i].start_hour);
-        cJSON_AddNumberToObject(o, "start_minute", c->quiet[i].start_minute);
-        cJSON_AddNumberToObject(o, "end_hour", c->quiet[i].end_hour);
-        cJSON_AddNumberToObject(o, "end_minute", c->quiet[i].end_minute);
-        cJSON_AddNumberToObject(o, "days", c->quiet[i].days);
-        cJSON_AddItemToArray(quiet, o);
+        if (!o || !cJSON_AddItemToArray(quiet, o)) {
+            cJSON_Delete(o);
+            goto no_mem;
+        }
+        if (!cJSON_AddNumberToObject(o, "enabled", c->quiet[i].enabled) ||
+            !cJSON_AddNumberToObject(o, "start_hour", c->quiet[i].start_hour) ||
+            !cJSON_AddNumberToObject(o, "start_minute", c->quiet[i].start_minute) ||
+            !cJSON_AddNumberToObject(o, "end_hour", c->quiet[i].end_hour) ||
+            !cJSON_AddNumberToObject(o, "end_minute", c->quiet[i].end_minute) ||
+            !cJSON_AddNumberToObject(o, "days", c->quiet[i].days)) goto no_mem;
     }
 
     cJSON *lim = cJSON_AddObjectToObject(root, "daily_limit");
-    cJSON_AddNumberToObject(lim, "enabled", c->daily_limit.enabled);
-    cJSON_AddNumberToObject(lim, "minutes", c->daily_limit.minutes);
+    if (!lim ||
+        !cJSON_AddNumberToObject(lim, "enabled", c->daily_limit.enabled) ||
+        !cJSON_AddNumberToObject(lim, "minutes", c->daily_limit.minutes)) goto no_mem;
 
     char *txt = cJSON_Print(root);
     cJSON_Delete(root);
@@ -472,6 +495,10 @@ static esp_err_t save_to_disk(const config_t *c)
 
     cJSON_free(txt);
     return err;
+
+no_mem:
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
 }
 
 // Load config.json into s_config. Always leaves a valid in-memory config.
@@ -588,40 +615,64 @@ const config_t *config_store_get(void)
     return &s_config;
 }
 
+static esp_err_t candidate_begin(config_t **out)
+{
+    if (!s_ready || !s_lock) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = heap_caps_malloc(sizeof(**out), MALLOC_CAP_SPIRAM);
+    if (!*out) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(*out, s_cfg, sizeof(**out));
+    return ESP_OK;
+}
+
+static esp_err_t candidate_finish(config_t *candidate)
+{
+    esp_err_t err = save_to_disk(candidate);
+    if (err == ESP_OK) memcpy(s_cfg, candidate, sizeof(*candidate));
+    free(candidate);
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
 esp_err_t config_store_set_lang(const char *code)
 {
     if (!code || !code[0]) return ESP_ERR_INVALID_ARG;
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    strlcpy(s_config.ui.lang, code, sizeof(s_config.ui.lang));
-    esp_err_t err = save_to_disk(&s_config);
-    if (s_lock) xSemaphoreGive(s_lock);
-    return err;
+    config_t *candidate;
+    esp_err_t err = candidate_begin(&candidate);
+    if (err != ESP_OK) return err;
+    strlcpy(candidate->ui.lang, code, sizeof(candidate->ui.lang));
+    return candidate_finish(candidate);
 }
 
 esp_err_t config_store_set_orientation(int orientation)
 {
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_config.ui.orientation = (orientation == 1) ? 1 : 0;
-    esp_err_t err = save_to_disk(&s_config);
-    if (s_lock) xSemaphoreGive(s_lock);
-    return err;
+    config_t *candidate;
+    esp_err_t err = candidate_begin(&candidate);
+    if (err != ESP_OK) return err;
+    candidate->ui.orientation = (orientation == 1) ? 1 : 0;
+    return candidate_finish(candidate);
 }
 
 esp_err_t config_store_set_theme(int dark, int accent)
 {
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_config.ui.dark = clampi(dark, 0, 1);
-    s_config.ui.accent = clampi(accent, 0, 4);
-    esp_err_t err = save_to_disk(&s_config);
-    if (s_lock) xSemaphoreGive(s_lock);
-    return err;
+    config_t *candidate;
+    esp_err_t err = candidate_begin(&candidate);
+    if (err != ESP_OK) return err;
+    candidate->ui.dark = clampi(dark, 0, 1);
+    candidate->ui.accent = clampi(accent, 0, 4);
+    return candidate_finish(candidate);
 }
 
 esp_err_t config_store_set_alarm(int idx, const config_alarm_t *a)
 {
     if (!a || idx < 0 || idx >= CFG_MAX_ALARMS) return ESP_ERR_INVALID_ARG;
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    config_alarm_t *dst = &s_config.alarms[idx];
+    config_t *candidate;
+    esp_err_t err = candidate_begin(&candidate);
+    if (err != ESP_OK) return err;
+    config_alarm_t *dst = &candidate->alarms[idx];
     dst->enabled = clampi(a->enabled, 0, 1);
     dst->hour = clampi(a->hour, 0, 23);
     dst->minute = clampi(a->minute, 0, 59);
@@ -633,9 +684,7 @@ esp_err_t config_store_set_alarm(int idx, const config_alarm_t *a)
     strlcpy(dst->sd_title, a->sd_title, sizeof(dst->sd_title));
     dst->volume = clampi(a->volume, 5, 100);
     dst->sunrise = clampi(a->sunrise, 0, 15);
-    esp_err_t err = save_to_disk(&s_config);
-    if (s_lock) xSemaphoreGive(s_lock);
-    return err;
+    return candidate_finish(candidate);
 }
 
 esp_err_t config_store_favorite_add(const config_favorite_t *f)
@@ -643,35 +692,37 @@ esp_err_t config_store_favorite_add(const config_favorite_t *f)
     if (!f) return ESP_ERR_INVALID_ARG;
     int type = clampi(f->type, 0, 1);
     if (type == 1 && f->path[0] == '\0') return ESP_ERR_INVALID_ARG;
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_config.favorite_count >= CFG_MAX_FAVORITES) {
-        if (s_lock) xSemaphoreGive(s_lock);
+    config_t *candidate;
+    esp_err_t err = candidate_begin(&candidate);
+    if (err != ESP_OK) return err;
+    if (candidate->favorite_count >= CFG_MAX_FAVORITES) {
+        free(candidate);
+        xSemaphoreGive(s_lock);
         return ESP_ERR_NO_MEM;
     }
-    config_favorite_t *dst = &s_config.favorites[s_config.favorite_count++];
+    config_favorite_t *dst = &candidate->favorites[candidate->favorite_count++];
     dst->type = type;
     dst->radio_id = f->radio_id;
     strlcpy(dst->path, (type == 1) ? f->path : "", sizeof(dst->path));
     strlcpy(dst->title, f->title, sizeof(dst->title));
-    esp_err_t err = save_to_disk(&s_config);
-    if (s_lock) xSemaphoreGive(s_lock);
-    return err;
+    return candidate_finish(candidate);
 }
 
 esp_err_t config_store_favorite_remove(int index)
 {
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (index < 0 || (size_t)index >= s_config.favorite_count) {
-        if (s_lock) xSemaphoreGive(s_lock);
+    config_t *candidate;
+    esp_err_t err = candidate_begin(&candidate);
+    if (err != ESP_OK) return err;
+    if (index < 0 || (size_t)index >= candidate->favorite_count) {
+        free(candidate);
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_ARG;
     }
-    for (size_t i = (size_t)index; i + 1 < s_config.favorite_count; i++) {
-        s_config.favorites[i] = s_config.favorites[i + 1];
+    for (size_t i = (size_t)index; i + 1 < candidate->favorite_count; i++) {
+        candidate->favorites[i] = candidate->favorites[i + 1];
     }
-    s_config.favorite_count--;
-    esp_err_t err = save_to_disk(&s_config);
-    if (s_lock) xSemaphoreGive(s_lock);
-    return err;
+    candidate->favorite_count--;
+    return candidate_finish(candidate);
 }
 
 #define NVS_NAMESPACE   "bugne"
@@ -759,12 +810,15 @@ esp_err_t config_store_read_json(char *buf, size_t size, size_t *out_len)
 
 esp_err_t config_store_write_json(const char *json)
 {
+    if (!json) return ESP_ERR_INVALID_ARG;
+    if (!s_ready || !s_lock) return ESP_ERR_INVALID_STATE;
     cJSON *root = cJSON_Parse(json);
     if (!root) {
         return ESP_ERR_INVALID_ARG;
     }
     const cJSON *ver = cJSON_GetObjectItemCaseSensitive(root, "schema_version");
-    if (!cJSON_IsNumber(ver) || ver->valueint != CFG_SCHEMA_VERSION) {
+    if (!cJSON_IsNumber(ver) || ver->valueint != CFG_SCHEMA_VERSION ||
+        cJSON_HasObjectItem(root, "ha_token")) {
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
@@ -782,19 +836,8 @@ esp_err_t config_store_write_json(const char *json)
     load_from_json(scratch, root);
     cJSON_Delete(root);
 
-    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-    esp_err_t err = save_to_disk(scratch);
-    if (err == ESP_OK) {
-        // Atomic commit for readers on other tasks (they see old or new, never
-        // a half-parsed mix). schema_version is identical by construction.
-        memcpy(&s_config, scratch, sizeof(*scratch));
-    } else {
-        ESP_LOGE(TAG, "posted config not saved (%s), keeping the current one",
-                 esp_err_to_name(err));
-    }
-    if (s_lock) xSemaphoreGive(s_lock);
-    free(scratch);
-    return err;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    return candidate_finish(scratch);
 }
 
 static void hash_password(const uint8_t *salt, const char *plain, uint8_t *out)
@@ -889,6 +932,13 @@ esp_err_t config_store_get_ha_token(char *token, size_t max_len)
 
 esp_err_t config_store_set_ha_token(const char *token)
 {
+    if (!token) return ESP_ERR_INVALID_ARG;
+    size_t len = strnlen(token, CFG_HA_TOKEN_MAX);
+    if (len >= CFG_HA_TOKEN_MAX) return ESP_ERR_INVALID_SIZE;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)token[i];
+        if (c < 0x21 || c > 0x7e) return ESP_ERR_INVALID_ARG;
+    }
     nvs_handle_t h;
     ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
     esp_err_t err;

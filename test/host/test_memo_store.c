@@ -194,6 +194,99 @@ static void test_tk_create(void)
     CHECK(memo_count() == before, "tk invisible to count");
 }
 
+static long file_size(const char *name)
+{
+    char abs[MEMO_NAME_MAX + 64];
+    snprintf(abs, sizeof(abs), MEMO_ABS_DIR "/%s", name);
+    struct stat st;
+    return stat(abs, &st) == 0 ? st.st_size : -1;
+}
+
+static void test_keep_wrap_preserves(void)
+{
+    reset_dir();
+    touch("my-001.wav", 111);
+    touch("my-999.wav", 999);
+    touch(MEMO_REC_NAME, 222);
+    CHECK(memo_keep_rec() == 2, "wrap keep skips occupied 001");
+    CHECK(file_size("my-001.wav") == 155, "wrap preserves old 001 data");
+    CHECK(file_size("my-999.wav") == 1043, "wrap preserves old 999 data");
+    CHECK(file_size("my-002.wav") == 266, "wrap stores new capture in 002");
+    touch(MEMO_REC_NAME, 333);
+    CHECK(memo_keep_rec() == 3, "repeated keep skips both stored names");
+    CHECK(file_size("my-002.wav") == 266, "repeated keep preserves 002");
+    CHECK(file_size("my-003.wav") == 377, "repeated keep stores 003");
+    touch("my-004.wav.part", 444);
+    touch(MEMO_REC_NAME, 555);
+    CHECK(memo_keep_rec() == 5, "keep skips reserved name");
+    CHECK(file_size("my-004.wav.part") == 488, "keep preserves other reservation");
+    CHECK(file_size("my-005.wav") == 599, "keep stores 005");
+    CHECK(memo_keep_rec() == -1, "repeated keep without recording fails");
+    CHECK(file_size("my-001.wav") == 155, "failed keep preserves 001");
+    CHECK(!file_exists("my-006.wav.part"), "failed keep releases reservation");
+}
+
+static void test_keep_exhausted(void)
+{
+    reset_dir();
+    char name[32];
+    for (int seq = 1; seq <= 999; seq++) {
+        memo_name_mine(name, sizeof(name), seq);
+        touch(name, seq);
+    }
+    touch(MEMO_REC_NAME, 123);
+    CHECK(memo_keep_rec() == -1, "full namespace refuses keep");
+    CHECK(file_size(MEMO_REC_NAME) == 167, "pending capture survives exhausted namespace");
+    CHECK(file_size("my-001.wav") == 45, "exhausted namespace preserves 001");
+    CHECK(file_size("my-999.wav") == 1043, "exhausted namespace preserves 999");
+}
+
+static void test_rx_final_collisions(void)
+{
+    reset_dir();
+    touch("my-999.wav", 0);
+    touch("rx-Bench-001.new.wav", 111);
+    touch("rx-Bench-002.wav", 222);
+    touch("rx-Bench-003.new.wav.part", 333);
+    char final_abs[MEMO_NAME_MAX + 64], part_abs[MEMO_NAME_MAX + 64];
+    FILE *f = memo_rx_create("Bench", final_abs, sizeof(final_abs), part_abs, sizeof(part_abs));
+    CHECK(f != NULL, "receive after wrap with final and part collisions");
+    CHECK_STR(final_abs, MEMO_ABS_DIR "/rx-Bench-004.new.wav", "receive skips unread/read/part");
+    if (f) {
+        fputs("new data", f);
+        fclose(f);
+    }
+    char next_final[MEMO_NAME_MAX + 64], next_part[MEMO_NAME_MAX + 64];
+    FILE *next = memo_rx_create("Bench", next_final, sizeof(next_final), next_part, sizeof(next_part));
+    CHECK(next != NULL, "second in-flight receive allocates");
+    CHECK_STR(next_final, MEMO_ABS_DIR "/rx-Bench-005.new.wav", "second receive skips reservation");
+    if (next) fclose(next);
+    if (f) CHECK(rename(part_abs, final_abs) == 0, "receive promotes into absent final");
+    CHECK(file_size("rx-Bench-001.new.wav") == 155, "receive preserves unread final");
+    CHECK(file_size("rx-Bench-002.wav") == 266, "receive preserves read final");
+    CHECK(file_size("rx-Bench-003.new.wav.part") == 377, "receive preserves other part");
+    CHECK(!file_exists("rx-Bench-001.new.wav.part"), "collision releases acquired part");
+    CHECK(!file_exists("rx-Bench-002.new.wav.part"), "read collision releases part");
+    next = memo_rx_create("Bench", next_final, sizeof(next_final), next_part, sizeof(next_part));
+    CHECK(next != NULL, "receive after promotion allocates");
+    CHECK_STR(next_final, MEMO_ABS_DIR "/rx-Bench-006.new.wav", "receive skips promoted final");
+    if (next) fclose(next);
+}
+
+static void test_tk_final_collision(void)
+{
+    reset_dir();
+    touch("tk-001.wav", 111);
+    touch("tk-002.wav.part", 222);
+    char final_abs[MEMO_NAME_MAX + 64], part_abs[MEMO_NAME_MAX + 64];
+    FILE *f = memo_tk_create(final_abs, sizeof(final_abs), part_abs, sizeof(part_abs));
+    CHECK(f != NULL, "talkie skips final and part");
+    CHECK_STR(final_abs, MEMO_ABS_DIR "/tk-003.wav", "talkie unused name");
+    if (f) fclose(f);
+    CHECK(file_size("tk-001.wav") == 155, "talkie preserves final data");
+    CHECK(file_size("tk-002.wav.part") == 266, "talkie preserves reserved part");
+}
+
 static void test_clean(void)
 {
     reset_dir();
@@ -255,6 +348,10 @@ int main(void)
     test_keep_rec();
     test_rx_create();
     test_tk_create();
+    test_keep_wrap_preserves();
+    test_keep_exhausted();
+    test_rx_final_collisions();
+    test_tk_final_collision();
     test_clean();
     test_clean_many();
     reset_dir();

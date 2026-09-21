@@ -6,6 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -64,7 +65,8 @@ static bool s_want_sta;        // we have credentials and want to be a station
 static bool s_connected_once;  // first successful station connect happened
 static bool s_mdns_started;    // mDNS started once after connecting
 static bool s_sntp_started;    // SNTP started once after connecting
-static bool s_ap_up;           // the setup AP is running (provisioning or fallback)
+static atomic_bool s_ap_up;
+static atomic_bool s_ap_pending;
 static esp_timer_handle_t s_reconnect_timer;
 static esp_timer_handle_t s_roam_timer;
 static int64_t s_last_roam_us;   // when we last switched networks (dwell guard)
@@ -77,15 +79,16 @@ static int s_total_fails;  // total failures before first connect (drives AP fal
 
 static void start_mdns(void);    // defined below
 static esp_err_t configure_ap(void);  // defined below
-static void bring_up_ap(void);   // defined below
+static esp_err_t bring_up_ap(void);
+static void schedule_reconnect(uint64_t delay_us);
 
 // Apply the credentials of slot s_cur to the station interface.
-static void apply_sta_config(void)
+static esp_err_t apply_sta_config(void)
 {
     wifi_config_t sta = {0};
     strlcpy((char *)sta.sta.ssid, s_creds[s_cur].ssid, sizeof(sta.sta.ssid));
     strlcpy((char *)sta.sta.password, s_creds[s_cur].pass, sizeof(sta.sta.password));
-    esp_wifi_set_config(WIFI_IF_STA, &sta);
+    return esp_wifi_set_config(WIFI_IF_STA, &sta);
 }
 
 // After too many failures on the current network, pick the strongest VISIBLE
@@ -94,7 +97,7 @@ static void apply_sta_config(void)
 // much weaker backup, e.g. from the box at -68 dBm to a repeater at -80 dBm
 // (observed flip-flop on a fleet unit, 2026-07-10). Runs in a short-lived task:
 // the scan blocks and must not run on the event task.
-static volatile bool s_failover_running;  // one failover task at a time
+static atomic_bool s_failover_running;
 static int s_failover_stays;              // consecutive "stay on current" picks
 
 static void failover_task(void *arg)
@@ -137,7 +140,7 @@ static void failover_task(void *arg)
     s_fail_count = 0;
     apply_sta_config();
     s_failover_running = false;
-    esp_wifi_connect();
+    schedule_reconnect(s_ap_up ? AP_RETRY_DELAY_US : STA_RETRY_DELAY_US);
     vTaskDelete(NULL);
 }
 
@@ -146,28 +149,41 @@ static void failover_task(void *arg)
 static void ap_fallback_task(void *arg)
 {
     (void)arg;
-    bring_up_ap();
+    esp_err_t err = bring_up_ap();
+    s_ap_pending = false;
+    if (err != ESP_OK) ESP_LOGW(TAG, "setup AP start failed: %s", esp_err_to_name(err));
+    if (s_state != NET_STATE_CONNECTED) schedule_reconnect(AP_RETRY_DELAY_US);
     vTaskDelete(NULL);
 }
 
 static void reconnect_cb(void *arg)
 {
     (void)arg;
-    if (!s_want_sta) {
+    if (!s_want_sta || s_state == NET_STATE_CONNECTED || s_ap_pending || s_failover_running) {
         return;
     }
     // Could not reach any configured network: bring up the setup AP so the device
     // stays reachable, then keep retrying Wi-Fi in the background.
     if (!s_ap_up && s_total_fails >= AP_FALLBACK_ATTEMPTS) {
-        s_ap_up = true;  // commit now so we do not spawn this twice
-        xTaskCreate(ap_fallback_task, "ap_fallback", 4096, NULL, 5, NULL);
+        if (atomic_exchange(&s_ap_pending, true)) return;
+        if (xTaskCreate(ap_fallback_task, "ap_fallback", 4096, NULL, 5, NULL) != pdPASS) {
+            s_ap_pending = false;
+            ESP_LOGW(TAG, "setup AP task creation failed, retrying later");
+            schedule_reconnect(AP_RETRY_DELAY_US);
+            esp_wifi_connect();
+        }
         return;
     }
-    esp_wifi_connect();
+    if (esp_wifi_connect() != ESP_OK) {
+        schedule_reconnect(s_ap_up ? AP_RETRY_DELAY_US : STA_RETRY_DELAY_US);
+    }
 }
 
 static void schedule_reconnect(uint64_t delay_us)
 {
+    if (s_total_fails >= AP_FALLBACK_ATTEMPTS && delay_us < AP_RETRY_DELAY_US) {
+        delay_us = AP_RETRY_DELAY_US;
+    }
     esp_timer_stop(s_reconnect_timer);  // ignore error if not running
     esp_timer_start_once(s_reconnect_timer, delay_us);
 }
@@ -175,26 +191,35 @@ static void schedule_reconnect(uint64_t delay_us)
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        if (s_want_sta) esp_wifi_connect();  // first attempt immediately
+        if (s_want_sta && !s_ap_pending) {
+            if (esp_wifi_connect() != ESP_OK) schedule_reconnect(STA_RETRY_DELAY_US);
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_state = s_ap_up ? NET_STATE_PROVISIONING : (s_want_sta ? NET_STATE_CONNECTING : NET_STATE_BOOT);
+        if (s_ap_pending || s_failover_running) return;
         if (s_want_sta) {
             const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)data;
             int reason = d ? d->reason : 0;
             s_fail_count++;
             if (!s_connected_once) s_total_fails++;
-            if (s_cred_count >= 2 && s_fail_count >= FAILOVER_THRESHOLD) {
+            if (s_cred_count >= 2 && s_fail_count >= FAILOVER_THRESHOLD &&
+                (s_ap_up || s_connected_once || s_total_fails < AP_FALLBACK_ATTEMPTS)) {
                 // Repeated failures: let the failover task scan, pick the best
                 // configured network and reconnect (it clears s_fail_count).
-                if (!s_failover_running) {
-                    s_failover_running = true;
+                if (!atomic_exchange(&s_failover_running, true)) {
                     ESP_LOGW(TAG, "station disconnected (reason %d), failover scan", reason);
-                    xTaskCreate(failover_task, "wifi_failover", 4096, NULL, 5, NULL);
+                    if (xTaskCreate(failover_task, "wifi_failover", 4096, NULL, 5, NULL) != pdPASS) {
+                        s_failover_running = false;
+                        ESP_LOGW(TAG, "failover task creation failed, retrying later");
+                        schedule_reconnect(s_ap_up ? AP_RETRY_DELAY_US : STA_RETRY_DELAY_US);
+                    }
                 }
             } else if (s_connected_once) {
                 // Drop after a successful join: reconnect immediately for fast recovery.
                 ESP_LOGW(TAG, "station disconnected (reason %d), reconnecting", reason);
-                esp_wifi_connect();
+                if (esp_wifi_connect() != ESP_OK) {
+                    schedule_reconnect(s_ap_up ? AP_RETRY_DELAY_US : STA_RETRY_DELAY_US);
+                }
             } else {
                 // Never connected yet: retry fast (STA-only) until we fall back to
                 // the AP, then slowly so the AP keeps beaconing.
@@ -361,21 +386,32 @@ static esp_err_t configure_ap(void)
 // Switch from STA-only to APSTA to raise the setup AP as a fallback. A bare
 // set_mode does not reliably start the AP on this stack, so do a clean stop/start.
 // Keeps the station config so it keeps retrying once the AP is up.
-static void bring_up_ap(void)
+static esp_err_t bring_up_ap(void)
 {
-    if (s_state == NET_STATE_CONNECTED) {
-        return;  // connected in the meantime: no AP needed
-    }
+    if (s_state == NET_STATE_CONNECTED) return ESP_OK;
     ESP_LOGW(TAG, "no configured network reachable, raising setup AP");
-    esp_wifi_stop();
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    configure_ap();
-    apply_sta_config();
-    esp_wifi_start();  // STA_START fires and the connect retries resume
+    esp_err_t err = esp_wifi_stop();
+    if (err == ESP_OK) err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err == ESP_OK) err = configure_ap();
+    if (err == ESP_OK) err = apply_sta_config();
+    if (err == ESP_OK) err = esp_wifi_start();
+    if (err != ESP_OK) {
+        s_ap_up = false;
+        esp_wifi_stop();
+        if (esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK && apply_sta_config() == ESP_OK) {
+            esp_wifi_start();
+        }
+        if (s_state != NET_STATE_CONNECTED) s_state = NET_STATE_CONNECTING;
+        return err;
+    }
+    s_ap_up = true;
     esp_wifi_set_ps(WIFI_PS_NONE);
-    s_state = NET_STATE_PROVISIONING;
-    xTaskCreate(captive_dns_task, "captive_dns", 4096, NULL, 5, NULL);
+    if (s_state != NET_STATE_CONNECTED) s_state = NET_STATE_PROVISIONING;
+    if (xTaskCreate(captive_dns_task, "captive_dns", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "captive DNS task creation failed");
+    }
     ESP_LOGI(TAG, "setup AP up: SSID Bugne-Setup-%s (still retrying Wi-Fi)", board_device_id());
+    return ESP_OK;
 }
 
 // Reorder s_creds strongest-visible-first via a one-shot scan. Networks seen in
@@ -541,9 +577,9 @@ esp_err_t net_start(void)
         // No credentials: bring up the setup AP for initial provisioning.
         ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA mode failed");
         ESP_RETURN_ON_ERROR(configure_ap(), TAG, "set AP config failed");
+        ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
         s_ap_up = true;
         s_state = NET_STATE_PROVISIONING;
-        ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
         esp_wifi_set_ps(WIFI_PS_NONE);
         xTaskCreate(captive_dns_task, "captive_dns", 4096, NULL, 5, NULL);
         ESP_LOGI(TAG, "no stored credentials, provisioning AP up: SSID Bugne-Setup-%s",
