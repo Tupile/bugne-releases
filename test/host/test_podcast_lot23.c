@@ -17,6 +17,8 @@ static int fail_read, cancel_read, fail_seek, fail_tell, read_calls, seek_calls;
 static int fail_dir_read, dir_calls, fail_dir_close, stat_calls;
 static const char *fail_close_path, *cancel_close_path, *fail_write_path;
 static bool fail_remove_final, fail_rename_final, fail_input_close;
+static bool sd_absent;
+int lot23_alloc_calls, lot23_alloc_fail_nth;
 static struct {
     FILE *f;
     char path[512];
@@ -288,6 +290,11 @@ int64_t esp_timer_get_time(void)
     return net.clock;
 }
 
+bool source_sd_present(void)
+{
+    return !sd_absent;
+}
+
 FILE *source_sd_create(const char *rel)
 {
     char path[512];
@@ -330,6 +337,8 @@ static void reset(void)
     fail_dir_read = dir_calls = fail_dir_close = stat_calls = 0;
     fail_close_path = cancel_close_path = fail_write_path = NULL;
     fail_input_close = false;
+    sd_absent = false;
+    lot23_alloc_calls = lot23_alloc_fail_nth = 0;
     fail_remove_final = fail_rename_final = false;
     memset(&net, 0, sizeof(net));
     net.body = (const char *)audio;
@@ -530,6 +539,210 @@ static void test_cache_scan(void)
     cache_scan_done(&cs);
 }
 
+// Episodes the feed no longer lists --------------------------------------
+//
+// A refresh rewrites the manifest from the RSS alone, so an episode dropped by
+// the feed used to vanish from the list while its downloaded audio stayed on
+// the card forever, unreachable. The retention pass carries those entries over
+// verbatim as long as the file is really there.
+
+#define FEED_DIR "/sdcard/podcasts/Feed"
+#define EP_FIELDS(t) "{\"title\":\"" t "\",\"date\":\"Mon, 01 Jan 2026 00:00:00 GMT\"," \
+    "\"duration_seconds\":42,\"episode_url\":\"http://fixture/" t ".mp3\"," \
+    "\"cache_path\":\"" FEED_DIR "/" t ".mp3\",\"cached\":false"
+#define OLD_EP(t)          EP_FIELDS(t) "}"
+#define OLD_EP_RETAINED(t) EP_FIELDS(t) ",\"retained\":true}"
+
+static char mbuf[160000];
+
+static void old_manifest(const char *episodes)
+{
+    int n = snprintf(mbuf, sizeof(mbuf), "{\"schema_version\":1,\"podcast_title\":\"Feed\","
+                     "\"rss_url\":\"http://fixture/rss\",\"generated_at\":\"T\","
+                     "\"episodes\":[%s]}", episodes);
+    assert(n > 0 && n < (int)sizeof(mbuf));
+    put("/littlefs/podcasts/7.json", mbuf, (size_t)n);
+}
+
+// The manifest as written: the parsed form cannot show the retained marker
+// (the reader ignores it, like cached) nor the order of the entries.
+static const char *manifest_text(void)
+{
+    FILE *f = test_fopen("/littlefs/podcasts/7.json", "rb");
+    assert(f);
+    size_t n = test_fread(mbuf, 1, sizeof(mbuf) - 1, f);
+    mbuf[n] = '\0';
+    assert(test_fclose(f) == 0);
+    return mbuf;
+}
+
+static size_t read_eps(podcast_episode_t **eps)
+{
+    size_t cap = 0, count = 0;
+    *eps = NULL;
+    assert(podcast_read_manifest(7, eps, &cap, &count) == ESP_OK);
+    return count;
+}
+
+static void refresh_ok(void)
+{
+    assert(podcast_refresh_cancelable(7, "Feed", "http://fixture/rss", &cancelled) == ESP_OK);
+    assert(!exists("/littlefs/podcasts/7.json.tmp"));
+}
+
+static void test_retention(void)
+{
+    podcast_episode_t *eps;
+    size_t n;
+
+    // Dropped by the feed with its audio on the card: kept, after the feed's own
+    // episodes, every field byte-identical (recomputing cache_path would orphan
+    // the file, the collision suffix depends on the position in the feed).
+    refresh_setup();
+    old_manifest(OLD_EP("Gone"));
+    put(FEED_DIR "/Gone.mp3", "x", 1);
+    refresh_ok();
+    n = read_eps(&eps);
+    assert(n == 2);
+    assert(strcmp(eps[0].title, "Episode") == 0 && !eps[0].cached);
+    assert(strcmp(eps[1].title, "Gone") == 0 && eps[1].cached);
+    assert(strcmp(eps[1].episode_url, "http://fixture/Gone.mp3") == 0);
+    assert(strcmp(eps[1].cache_path, FEED_DIR "/Gone.mp3") == 0);
+    assert(strcmp(eps[1].date, "Mon, 01 Jan 2026 00:00:00 GMT") == 0);
+    assert(eps[1].duration_seconds == 42);
+    free(eps);
+    assert(strstr(manifest_text(), "\"retained\":true"));
+
+    // Never downloaded (or deleted since): it goes with the feed.
+    refresh_setup();
+    old_manifest(OLD_EP("Gone"));
+    assert(test_remove(FEED_DIR "/Gone.mp3") == 0);
+    refresh_ok();
+    n = read_eps(&eps);
+    assert(n == 1);
+    free(eps);
+    assert(!strstr(manifest_text(), "Gone"));
+
+    // Still listed by the feed: one row, no duplicate, no marker.
+    refresh_setup();
+    old_manifest(OLD_EP("Episode"));
+    put(FEED_DIR "/Episode.mp3", "x", 1);
+    refresh_ok();
+    n = read_eps(&eps);
+    assert(n == 1 && eps[0].cached);
+    free(eps);
+    assert(!strstr(manifest_text(), "retained"));
+    assert(test_remove(FEED_DIR "/Episode.mp3") == 0);
+
+    // No card: presence cannot be checked, so only an entry a previous refresh
+    // already marked survives. One refresh with the card pulled out must not
+    // cost the kept episodes, and a device that never had a card never
+    // accumulates dead rows.
+    refresh_setup();
+    old_manifest(OLD_EP_RETAINED("Kept") "," OLD_EP("Fresh"));
+    put(FEED_DIR "/Kept.mp3", "x", 1);
+    put(FEED_DIR "/Fresh.mp3", "x", 1);
+    sd_absent = true;
+    refresh_ok();
+    n = read_eps(&eps);
+    assert(n == 2 && strcmp(eps[1].title, "Kept") == 0);
+    free(eps);
+    assert(!strstr(manifest_text(), "Fresh"));
+
+    // Idempotent: a second refresh keeps the entry and does not stack markers.
+    refresh_setup();
+    old_manifest(OLD_EP_RETAINED("Kept"));
+    refresh_ok();
+    const char *first = strstr(manifest_text(), "\"retained\":true");
+    assert(first && !strstr(first + strlen("\"retained\":true"), "retained"));
+    n = read_eps(&eps);
+    assert(n == 2 && strcmp(eps[1].title, "Kept") == 0 && eps[1].cached);
+    free(eps);
+    assert(test_remove(FEED_DIR "/Kept.mp3") == 0);
+    assert(test_remove(FEED_DIR "/Fresh.mp3") == 0);
+
+    // Best effort, three ways: reset() leaves an unusable old manifest, then the
+    // dedup table and the retention scratch fail to allocate (they are the 1st
+    // and the 3rd PSRAM allocation of a refresh, the HTTP chunk is the 2nd).
+    // Each costs the carry-over and nothing else.
+    refresh_setup();
+    refresh_ok();
+    n = read_eps(&eps);
+    assert(n == 1);
+    free(eps);
+
+    put(FEED_DIR "/Gone.mp3", "x", 1);
+    for (int nth = 1; nth <= 3; nth += 2) {
+        refresh_setup();
+        old_manifest(OLD_EP("Gone"));
+        lot23_alloc_fail_nth = nth;
+        refresh_ok();
+        assert(lot23_alloc_calls > nth);
+        n = read_eps(&eps);
+        assert(n == 1);
+        free(eps);
+    }
+
+    // A worst-case entry (longest title, longest URL) grows by the marker on its
+    // first carry-over and must still fit PODCAST_OBJ_MAX when the NEXT refresh
+    // reads it back: an object over the limit makes manifest_next_object return
+    // -1, which would silently end the pass and drop every later entry too.
+    static char big[PODCAST_OBJ_MAX * 2];
+    char longt[PODCAST_TITLE_MAX], longu[PODCAST_URL_MAX];
+    memset(longt, 'T', sizeof(longt) - 1); longt[sizeof(longt) - 1] = '\0';
+    memset(longu, 'u', sizeof(longu) - 1); longu[sizeof(longu) - 1] = '\0';
+    snprintf(big, sizeof(big),
+             "{\"title\":\"%s\",\"date\":\"Mon, 01 Jan 2026 00:00:00 GMT\","
+             "\"duration_seconds\":42,\"episode_url\":\"http://fixture/%s\","
+             "\"cache_path\":\"" FEED_DIR "/%s.mp3\",\"cached\":false},"
+             OLD_EP("After"), longt, longu, longt);
+    char longp[PODCAST_PATH_MAX];
+    snprintf(longp, sizeof(longp), FEED_DIR "/%s.mp3", longt);
+    put(longp, "x", 1);
+    put(FEED_DIR "/After.mp3", "x", 1);
+    static char carried[sizeof(mbuf)];
+    for (int pass = 0; pass < 2; pass++) {
+        refresh_setup();  // it puts the "old-manifest" garbage back, so write after it
+        if (pass == 0) old_manifest(big);
+        else put("/littlefs/podcasts/7.json", carried, strlen(carried));
+        refresh_ok();
+        n = read_eps(&eps);
+        assert(n == 3);
+        assert(strcmp(eps[1].title, longt) == 0 && eps[1].cached);
+        assert(strcmp(eps[2].title, "After") == 0 && eps[2].cached);
+        free(eps);
+        strcpy(carried, manifest_text());  // the marked entry feeds the next refresh
+    }
+    assert(test_remove(longp) == 0);
+    assert(test_remove(FEED_DIR "/After.mp3") == 0);
+
+    // The safety cap still holds: the feed's episodes first, carry-over fills
+    // whatever is left.
+    static char many[PODCAST_MAX_EPISODES * 220];
+    size_t len = 0;
+    for (int i = 0; i < PODCAST_MAX_EPISODES; i++) {
+        char name[16], path[80];
+        snprintf(name, sizeof(name), "Old%03d", i);
+        snprintf(path, sizeof(path), FEED_DIR "/%s.mp3", name);
+        put(path, "x", 1);
+        int w = snprintf(many + len, sizeof(many) - len,
+                         "%s{\"title\":\"%s\",\"date\":\"D\",\"duration_seconds\":1,"
+                         "\"episode_url\":\"http://fixture/%s.mp3\","
+                         "\"cache_path\":\"%s\",\"cached\":false}",
+                         i ? "," : "", name, name, path);
+        assert(w > 0 && (len += (size_t)w) < sizeof(many));
+    }
+    refresh_setup();
+    old_manifest(many);
+    refresh_ok();
+    n = read_eps(&eps);
+    assert(n == PODCAST_MAX_EPISODES);
+    assert(strcmp(eps[0].title, "Episode") == 0);
+    assert(strcmp(eps[1].title, "Old000") == 0);
+    assert(strcmp(eps[PODCAST_MAX_EPISODES - 1].title, "Old298") == 0);
+    free(eps);
+}
+
 static void clean_tree(const char *path)
 {
     DIR *d = opendir(path);
@@ -564,8 +777,9 @@ int main(void)
     test_trim_success();
     test_refresh();
     test_cache_scan();
+    test_retention();
     reset();
     clean_tree(root);
-    puts("podcast_lot23: storage faults, trim, cache scan and refresh cancellation passed");
+    puts("podcast_lot23: storage faults, trim, cache scan, refresh cancellation and retention passed");
     return 0;
 }

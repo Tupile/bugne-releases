@@ -124,6 +124,7 @@ static uint32_t path_hash(const char *s)
 
 static void download_cover(const char *url, const char *podir, volatile bool *cancel,
                            int64_t deadline);
+static void mw_retain_dropped(manifest_writer_t *w, int id);
 
 static void mw_write_header(manifest_writer_t *w)
 {
@@ -307,6 +308,12 @@ esp_err_t podcast_refresh_cancelable(int id, const char *name, const char *rss_u
 
     esp_err_t ret = ESP_FAIL;
     bool good = net_ok && !w.failed && w.header_written && !transfer_stopped(cancel, deadline);
+    // Position is load-bearing: after the parse (w.seen holds every cache_path the
+    // feed emitted), while the array is still open and the OLD manifest is still
+    // readable at final_path (the rename is below). A refresh that failed for any
+    // other reason never gets here and keeps the old manifest whole, as before.
+    if (good) mw_retain_dropped(&w, id);
+    if (w.failed) good = false;
     if (good && fputs("]}", w.f) < 0) good = false;  // close the array + object
     // fclose flushes: on a full LittleFS it is where the write actually fails, so
     // a bad close must not promote a truncated manifest over the good one.
@@ -631,6 +638,78 @@ static int manifest_next_object(FILE *f, char *buf, size_t bufsz)
         else if (c == '}' && --depth == 0) { buf[n] = '\0'; return 1; }
     }
     return -1;  // truncated object
+}
+
+// Episodes the feed no longer lists: carry them over from the previous manifest
+// while their audio is on the card, so a downloaded episode never disappears
+// from the list (the file was never deleted, it just became unreachable). The
+// object text is copied VERBATIM: recomputing cache_path would move the
+// collision suffix, which is the episode's position in the feed, and orphan the
+// very file being kept. It also keeps the played and resume keys valid.
+//
+// Without a card the presence check is impossible, so only an entry a previous
+// refresh already marked survives. "retained" is written here and nowhere else,
+// so it can only come from a refresh that saw the file: a card pulled out for
+// one refresh costs nothing, and a device that never had one never accumulates
+// rows for episodes it does not hold.
+//
+// Best effort throughout: anything missing or failing on the READ side leaves
+// the refresh exactly as it would have been. Only a failed WRITE to the temp
+// manifest is fatal (a half-written object would be promoted otherwise).
+static void mw_retain_dropped(manifest_writer_t *w, int id)
+{
+    if (!w->seen) return;  // no "already emitted" set: a duplicate row is worse
+    FILE *f = manifest_open_array(id);
+    if (!f) return;        // no previous manifest, or an unusable one
+    char *obj = heap_caps_malloc(PODCAST_OBJ_MAX, MALLOC_CAP_SPIRAM);
+    if (!obj) { fclose(f); return; }
+
+    bool sd = source_sd_present();
+    int kept = 0, over_cap = 0;
+    while (manifest_next_object(f, obj, PODCAST_OBJ_MAX) == 1) {
+        cJSON *e = cJSON_Parse(obj);
+        if (!e) continue;  // skip a malformed object, same as the reader
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, "cache_path");
+        char path[PODCAST_PATH_MAX] = "";
+        if (v && cJSON_IsString(v)) strlcpy(path, v->valuestring, sizeof(path));
+        // Read the marker from the PARSED object, never from a substring of the
+        // text: titles are untrusted RSS and one containing the word "retained"
+        // would fake a marker the entry does not have.
+        bool marked = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(e, "retained"));
+        cJSON_Delete(e);
+        if (path[0] == '\0') continue;
+
+        uint32_t h = path_hash(path);
+        int seen_n = w->count < w->seen_max ? w->count : w->seen_max;
+        bool in_feed = false;
+        for (int i = 0; i < seen_n && !in_feed; i++) in_feed = w->seen[i] == h;
+        if (in_feed) continue;  // still in the feed, already written this round
+
+        if (sd) {
+            struct stat st;
+            if (stat(path, &st) != 0 || st.st_size <= 0) continue;
+        } else if (!marked) {
+            continue;
+        }
+        if (w->count >= PODCAST_MAX_EPISODES) { over_cap++; continue; }
+
+        size_t len = strlen(obj);
+        if (len < 2 || obj[len - 1] != '}') continue;
+        int r = fprintf(w->f, "%s", w->count ? "," : "");
+        if (r >= 0) {
+            r = marked ? fprintf(w->f, "%s", obj)
+                       : fprintf(w->f, "%.*s,\"retained\":true}", (int)len - 1, obj);
+        }
+        if (r < 0) { w->failed = true; break; }
+        if (w->count < w->seen_max) w->seen[w->count] = h;
+        w->count++;
+        kept++;
+    }
+
+    free(obj);
+    fclose(f);  // read-only: a failed close here must not cost the refresh
+    if (kept) ESP_LOGI(TAG, "kept %d downloaded episode(s) no longer in the feed", kept);
+    if (over_cap) ESP_LOGW(TAG, "%d downloaded episode(s) dropped: manifest full", over_cap);
 }
 
 static bool eps_grow(podcast_episode_t **eps, size_t *cap, size_t need)

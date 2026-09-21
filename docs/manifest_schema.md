@@ -51,6 +51,7 @@ reads the manifest only. It never reads the raw RSS.
 | `episodes[].episode_url` | string | Remote audio URL. The device streams it over HTTPS when the episode is not cached. |
 | `episodes[].cache_path` | string | Local SD path of the cached episode: `/sdcard/podcasts/<podcast title>/<episode title>.<ext>`. The writer sanitizes both name parts for FAT: it drops the illegal characters and bounds the length. |
 | `episodes[].cached` | bool | The writer always writes `false`. The reader ignores this field and derives the answer from a `stat()` of `cache_path`, so a refresh that rewrites the manifest cannot make it wrong. |
+| `episodes[].retained` | bool | Optional, absent means false. Set only on an episode the feed no longer lists that was carried over from the previous manifest because its cached file was on the card. The reader ignores it, like `cached`; it exists so a refresh that runs with no SD card still knows which entries to keep. |
 
 ## Rules
 
@@ -58,6 +59,13 @@ reads the manifest only. It never reads the raw RSS.
   text before you store it or show it.
 - Playback prefers the cached SD file. It streams `episode_url` over HTTPS when
   the file is absent, or when there is no SD card.
+- A refresh rewrites the manifest from the feed, then carries over the episodes the
+  feed no longer lists whose cached file is still on the card, appended after the
+  feed's own episodes and marked `retained`. So a downloaded episode stays playable
+  and stays in the list for as long as its file exists. With no SD card mounted the
+  writer cannot check, and keeps the entries already marked `retained`.
+- The device never deletes cached episode audio. Freeing that space is the user's
+  call, through the web file manager.
 - A download to the SD card never runs during playback. The download engine
   starts only after the device stays idle, and it stops as soon as a play
   starts. The web page starts a download job, and the idle auto-maintenance
