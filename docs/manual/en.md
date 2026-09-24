@@ -119,9 +119,10 @@ comes back, so you can correct the configuration.
 
 ![Home screen](img/en/home.png)
 
-The home screen shows big colored tiles: Web radios, Podcasts, Library, SD card
-and Memos. Four more tiles appear when the parents switch them on: Times tables
-(the game), Favorites, Tuner (experimental) and Lamp (experimental). The gear at
+The home screen shows big colored tiles: Radio (a radio tower), Podcasts,
+Library, SD card and Memos. Four more tiles appear when the parents switch them
+on: Tables (the game, a calculator), Faves (favorites, a star), Tuner
+(experimental) and Lamp (experimental). The gear at
 the top right opens the settings. The time shows at the bottom when nothing
 plays and the clock is set.
 
@@ -144,6 +145,9 @@ each episode tells you how it plays:
   device is offline.
 - Grey row with a checkmark: you listened to it already.
 
+Under each title, a line gives the episode's date and length, for example
+"8 Sep · 52 min".
+
 The round arrows button at the top right refreshes the episode list from the
 internet.
 
@@ -159,10 +163,10 @@ and previous buttons move between tracks.
 
 ![Favorites](img/en/favorites.png)
 
-While something plays, tap the round + button on the now-playing screen to keep
-it as a favorite. Web radios, tracks and downloaded episodes can be favorites,
+While something plays, tap the round star button on the now-playing screen to
+keep it as a favorite. Web radios, tracks and downloaded episodes can be favorites,
 up to 12. The Favorites tile plays them back with one tap. To remove a
-favorite, tap the same button again. It shows a minus sign.
+favorite, tap the star again. It then sits on a colored background.
 
 ### The now-playing screen
 
@@ -173,7 +177,9 @@ favorite, tap the same button again. It shows a minus sign.
 - Previous and next move between tracks or episodes. They do nothing on a web
   radio.
 - The slider changes the volume. A parent can cap the maximum.
-- The + button adds or removes a favorite.
+- The star button adds or removes a favorite.
+- On a web radio, the line under the name shows the current song. It scrolls
+  when the title is too long.
 - The eye button is the sleep timer. Each tap moves to the next value: off, 15,
   30, 45, 60 minutes, then "end of track". The music stops by itself at the end
   of that time. This is useful at bedtime.
@@ -254,7 +260,8 @@ the bottom sets the volume.
 
 ![Settings](img/en/settings.png) ![Theme](img/en/settings_theme.png)
 
-The gear on the home screen opens the settings. It has seven rows:
+The gear on the home screen opens the settings: a list of seven rows that
+scrolls with your finger:
 
 - "Config page (QR)": the QR code of the web page address.
 - "Setup hotspot (QR)": the QR code that joins the setup hotspot.
@@ -299,7 +306,8 @@ bottom on a phone and at the top on a computer.
 <img src="img/en/web-play.png" width="300">
 
 This tab is a remote control. You see what plays. You pause, stop, skip, change
-the volume and set the sleep timer. You also start any web radio, or any track
+the volume and set the sleep timer (the menu next to the moon). Above eight
+radios, a field over the list filters the stations by name. You also start any web radio, or any track
 from the library.
 
 ### Podcasts

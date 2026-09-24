@@ -156,6 +156,20 @@ typedef enum {
     STR_UPD_INSTALL_FAILED, // status: install failed
     STR_UPD_NEED_WIFI,      // status: offline
     STR_UPD_UNAVAILABLE,    // status: web_config not up (fn pointers NULL)
+    STR_UPD_BUSY,           // status: another update (web page) is already running
+    STR_ALARM_SNOOZE_BTN,   // alarm-ringing snooze button label
+    // Home tile labels: short on purpose (a landscape tile leaves ~62 px of
+    // text), the full names stay the screen titles.
+    STR_UPD_HINT,           // update screen, before the first check
+    STR_TILE_RADIOS,
+    STR_TILE_PODCASTS,
+    STR_TILE_LIBRARY,
+    STR_TILE_SD,
+    STR_TILE_GAME,
+    STR_TILE_FAVORITES,
+    STR_TILE_TUNER,
+    STR_TILE_LAMP,
+    STR_TILE_MEMOS,
     STR_SAVE_FAILED,
     STR__COUNT
 } str_id_t;

@@ -22,6 +22,16 @@ function extract(name) {
     return html.slice(start, end + 1);
 }
 async function main() {
+    // Radio filter (Play tab): case- and accent-insensitive, keeps each
+    // radio's ORIGINAL index (pbRadio(i) plays by config position).
+    const rctx = vm.createContext({});
+    vm.runInContext(extract('radNorm') + extract('radFilter'), rctx);
+    const radios = [{name: 'France Inter'}, {name: 'FIP Électro'}, {name: 'OUI FM'}, {}];
+    assert.deepEqual(rctx.radFilter(radios, '').map(o => o.i), [0, 1, 2, 3]);
+    assert.deepEqual(rctx.radFilter(radios, 'electro').map(o => o.i), [1]);
+    assert.deepEqual(rctx.radFilter(radios, 'FI').map(o => o.i), [1]);
+    assert.deepEqual(rctx.radFilter(radios, ' inter ').map(o => o.i), [0]);
+    assert.deepEqual(rctx.radFilter(radios, 'zzz').map(o => o.i), []);
     let response, rejected = false, reboot = 0, message, calls = [];
     const elements = {ghinst: {disabled: false}, hatokensave: {disabled: false}, ha_token: {value: 'test-token'}};
     const cfg = {device: {name: 'unchanged'}};

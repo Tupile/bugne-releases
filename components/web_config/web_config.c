@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdatomic.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -483,9 +484,30 @@ static esp_err_t stats_reset_post(httpd_req_t *req)
 
 // Firmware update over Wi-Fi: stream the uploaded .bin into the inactive OTA
 // partition, then boot it. The body is the raw firmware image.
+// One OTA writer at a time. The local upload, the web GitHub install and the
+// device-side update screen (its own task, not httpd) all target the same
+// inactive slot, and esp_ota_begin erases it: two concurrent writers would
+// interleave into a corrupt image. Taken for the whole write; released only on
+// failure (a success reboots, and must not let a second OTA start meanwhile).
+static atomic_flag s_ota_busy = ATOMIC_FLAG_INIT;
+
+static esp_err_t ota_post_locked(httpd_req_t *req);
+
 static esp_err_t ota_post(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
+    if (atomic_flag_test_and_set(&s_ota_busy)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "update already running");
+        return ESP_FAIL;
+    }
+    esp_err_t err = ota_post_locked(req);  // reboots on success
+    atomic_flag_clear(&s_ota_busy);
+    return err;
+}
+
+static esp_err_t ota_post_locked(httpd_req_t *req)
+{
     // Stop playback before touching flash: esp_ota_begin/write disable the flash
     // cache, and a non-IRAM ISR from active SD/I2S playback firing in that window
     // crashes (#32). Request a stop and wait for it to take effect.
@@ -624,7 +646,17 @@ bool web_config_gh_status(char *latest, size_t cap, bool *update)
 // release into the inactive slot and validate it. Does NOT reboot: the web
 // handler answers first, the device UI shows its status line first. Blocking,
 // up to a minute; callers keep it off PSRAM stacks.
+static esp_err_t gh_install_locked(void);
+
 esp_err_t web_config_gh_install(void)
+{
+    if (atomic_flag_test_and_set(&s_ota_busy)) return ESP_ERR_NOT_FINISHED;
+    esp_err_t err = gh_install_locked();
+    if (err != ESP_OK) atomic_flag_clear(&s_ota_busy);  // success: the caller reboots
+    return err;
+}
+
+static esp_err_t gh_install_locked(void)
 {
     ui_remote(UI_REMOTE_STOP, 0);
     for (int i = 0; i < 30; i++) {
@@ -709,6 +741,11 @@ static esp_err_t gh_ota_post(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
     esp_err_t err = web_config_gh_install();
+    if (err == ESP_ERR_NOT_FINISHED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "update already running");
+        return ESP_FAIL;
+    }
     if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no release");
         return ESP_FAIL;
@@ -846,8 +883,25 @@ static esp_err_t wifi_post(httpd_req_t *req)
         }
     }
 
+    // Validate every row before writing any slot: NVS stores a string of any
+    // length, but the boot-time read uses fixed buffers and FAILS (no
+    // truncation) on an oversized value, so a too-long SSID or password would
+    // be "saved" and then silently vanish at the reboot below.
+    int count = cJSON_GetArraySize(nets);
+    for (int i = 0; i < count; i++) {
+        const cJSON *n = cJSON_GetArrayItem(nets, i);
+        const cJSON *js = cJSON_GetObjectItemCaseSensitive(n, "ssid");
+        const cJSON *jp = cJSON_GetObjectItemCaseSensitive(n, "pass");
+        if ((cJSON_IsString(js) && js->valuestring && strlen(js->valuestring) >= CFG_WIFI_SSID_MAX) ||
+            (cJSON_IsString(jp) && jp->valuestring && strlen(jp->valuestring) >= CFG_WIFI_PASS_MAX)) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "SSID max 32 bytes, password max 63 characters");
+            return ESP_OK;
+        }
+    }
     esp_err_t err = ESP_OK;
-    int slot = 0, count = cJSON_GetArraySize(nets);
+    int slot = 0;
     for (int i = 0; i < count && slot < CFG_WIFI_SLOTS && err == ESP_OK; i++) {
         const cJSON *n = cJSON_GetArrayItem(nets, i);
         const cJSON *js = cJSON_GetObjectItemCaseSensitive(n, "ssid");
@@ -1155,6 +1209,16 @@ static esp_err_t sd_download_get(httpd_req_t *req)
 // name sanitized, storage path chosen here. See docs/config_schema.md.
 static esp_err_t memo_post(httpd_req_t *req)
 {
+    // Size first, and ESP_FAIL: returning ESP_OK makes httpd drain the whole
+    // declared Content-Length (up to 4 GB) before the single web task serves
+    // anyone else. A chunked request has content_len 0 and is rejected here too.
+    if (req->content_len <= MEMO_WAV_HEADER_BYTES || req->content_len > MEMO_RX_MAX_BYTES) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad memo size");
+        return ESP_FAIL;
+    }
+    // The 403 and 503 below keep ESP_OK on purpose: the body is now bounded
+    // (2 MB), and the sending peer's write loop must survive to read the status
+    // (a closed socket mid-body would lose it).
     if (config_store_get()->ui.memo_rx == 0) {
         httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "memo receiving disabled");
         return ESP_OK;
@@ -1164,12 +1228,6 @@ static esp_err_t memo_post(httpd_req_t *req)
         httpd_resp_sendstr(req, "no sd card");
         return ESP_OK;
     }
-    // A chunked request has content_len 0 and is rejected by the same check.
-    if (req->content_len <= MEMO_WAV_HEADER_BYTES || req->content_len > MEMO_RX_MAX_BYTES) {
-        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "bad memo size");
-        return ESP_OK;
-    }
-
     char query[96] = "", raw_from[64] = "", talkie_v[4] = "", from[MEMO_SENDER_MAX];
     httpd_req_get_url_query_str(req, query, sizeof(query));
     httpd_query_key_value(query, "from", raw_from, sizeof(raw_from));
@@ -1297,7 +1355,7 @@ static esp_err_t playback_get(httpd_req_t *req)
 // POST /api/playback: {"action":"toggle|stop|next|prev|volume|radio|path|sleep|seek","value":N|str}
 static esp_err_t playback_post(httpd_req_t *req)
 {
-    REQUIRE_AUTH(req, ESP_OK);
+    REQUIRE_AUTH(req, ESP_FAIL);  // body not read yet
     char body[512];  // "path" carries a library path up to LIB_PATH_MAX chars
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
@@ -1373,9 +1431,10 @@ static esp_err_t podcasts_refresh_get(httpd_req_t *req)
 // SD card and is refused while audio plays.
 static esp_err_t podcasts_download_post(httpd_req_t *req)
 {
-    REQUIRE_AUTH(req, ESP_OK);
+    REQUIRE_AUTH(req, ESP_FAIL);  // body not read yet
     if (!source_sd_present()) {
-        return httpd_resp_sendstr(req, "Insert an SD card first.");
+        httpd_resp_sendstr(req, "Insert an SD card first.");
+        return ESP_FAIL;  // body not consumed: close instead of parsing leftovers
     }
     char body[64];
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
@@ -1562,7 +1621,7 @@ static esp_err_t screenshot_get(httpd_req_t *req)
 // name (ui_remote_nav validates against its screen table).
 static esp_err_t debug_nav_post(httpd_req_t *req)
 {
-    REQUIRE_AUTH(req, ESP_OK);
+    REQUIRE_AUTH(req, ESP_FAIL);  // body not read yet
     char body[128];
     if (read_body(req, body, sizeof(body), NULL) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");

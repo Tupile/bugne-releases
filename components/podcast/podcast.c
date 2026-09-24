@@ -9,6 +9,7 @@
 #include <strings.h>  // strncasecmp
 #include <time.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -109,6 +110,7 @@ typedef struct {
     char        generated_at[32];
     const rss_parser_t *p;          // for the feed's <title> at header time
     uint32_t   *seen;               // hash of each cache_path already emitted
+    uint32_t   *seen_url;           // hash of each episode_url, same index (same block)
     int         seen_max;           // 0 when the allocation failed (dedup off)
 } manifest_writer_t;
 
@@ -181,9 +183,15 @@ static void mw_on_episode(const rss_episode_t *ep, void *ctx)
     if (w->failed) return;
 
     const char *ext = url_ext(ep->url);
+    // Stable per-episode key for the untitled fallback and the collision
+    // suffix: the pubDate, or the URL when the feed has no date. Never the
+    // position in the feed: a new episode shifts every position, which moved
+    // the path of an already-downloaded file (orphaned, re-downloaded, and
+    // carried over as a duplicate row by mw_retain_dropped).
+    uint32_t key = path_hash(ep->date[0] ? ep->date : ep->url);
     char epname[128];
-    char fallback[16];
-    snprintf(fallback, sizeof(fallback), "episode_%d", w->count);
+    char fallback[24];
+    snprintf(fallback, sizeof(fallback), "episode_%08" PRIx32, key);
     sanitize_name(ep->title, epname, sizeof(epname), fallback);
     char cache_path[PODCAST_PATH_MAX];
     snprintf(cache_path, sizeof(cache_path), "/sdcard/podcasts/%s/%s.%s", w->podir, epname, ext);
@@ -195,14 +203,22 @@ static void mw_on_episode(const rss_episode_t *ep, void *ctx)
     // is a stat() of cache_path, so a blanket renaming would orphan them all).
     if (w->seen && w->count < w->seen_max) {
         uint32_t h = path_hash(cache_path);
-        for (int i = 0; i < w->count; i++) {
-            if (w->seen[i] != h) continue;
-            snprintf(cache_path, sizeof(cache_path), "/sdcard/podcasts/%s/%s_%d.%s",
-                     w->podir, epname, w->count, ext);
+        // Pass 0 tries the stable suffix; pass 1 (same title AND same date,
+        // pathological) falls back to the position so paths stay unique.
+        for (int pass = 0; pass < 2; pass++) {
+            bool hit = false;
+            for (int i = 0; i < w->count && !hit; i++) hit = w->seen[i] == h;
+            if (!hit) break;
+            if (pass == 0)
+                snprintf(cache_path, sizeof(cache_path), "/sdcard/podcasts/%s/%s_%08" PRIx32 ".%s",
+                         w->podir, epname, key, ext);
+            else
+                snprintf(cache_path, sizeof(cache_path), "/sdcard/podcasts/%s/%s_%08" PRIx32 "_%d.%s",
+                         w->podir, epname, key, w->count, ext);
             h = path_hash(cache_path);
-            break;
         }
         w->seen[w->count] = h;
+        w->seen_url[w->count] = path_hash(ep->url);
     }
 
     cJSON *e = cJSON_CreateObject();
@@ -251,7 +267,9 @@ esp_err_t podcast_refresh_cancelable(int id, const char *name, const char *rss_u
     w.p = p;
     // Cache-path dedup table (1.2 KB, PSRAM). Best effort: without it the writer
     // simply behaves as before, so a failed allocation must not fail the refresh.
-    w.seen = heap_caps_malloc(RSS_MAX_EPISODES * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    // One block holds both tables (cache_path hashes, then episode_url hashes).
+    w.seen = heap_caps_malloc(2 * RSS_MAX_EPISODES * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    w.seen_url = w.seen ? w.seen + RSS_MAX_EPISODES : NULL;
     w.seen_max = w.seen ? RSS_MAX_EPISODES : 0;
     time_t now = time(NULL);
     struct tm tm_utc;
@@ -656,13 +674,44 @@ static int manifest_next_object(FILE *f, char *buf, size_t bufsz)
 // Best effort throughout: anything missing or failing on the READ side leaves
 // the refresh exactly as it would have been. Only a failed WRITE to the temp
 // manifest is fatal (a half-written object would be promoted otherwise).
+// True when the manifest file for this id was written for the same feed. The
+// web page gives a new podcast id max+1, so deleting the last podcast and
+// adding another reuses its id, and its old manifest is still on flash: without
+// this check the new feed inherited every downloaded episode of the deleted one.
+// Reads the header (everything before "episodes") into buf and parses it; an
+// unreadable or unrecognizable header counts as "not the same feed".
+static bool manifest_same_feed(int id, const char *rss_url, char *buf, size_t bufsz)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/littlefs/podcasts/%d.json", id);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(buf, 1, bufsz - 1, f);
+    fclose(f);  // read-only
+    buf[n] = '\0';
+    // Same argument as manifest_open_array: the bytes "episodes" with their
+    // quotes can only be the key, never inside an escaped string value.
+    char *k = strstr(buf, "\"episodes\"");
+    if (!k) return false;
+    while (k > buf && k[-1] != ',') k--;
+    if (k == buf) return false;
+    k[-1] = '}';  // the header object, closed where "episodes" started
+    *k = '\0';
+    cJSON *h = cJSON_Parse(buf);
+    const cJSON *u = h ? cJSON_GetObjectItemCaseSensitive(h, "rss_url") : NULL;
+    bool same = u && cJSON_IsString(u) && strcmp(u->valuestring, rss_url ? rss_url : "") == 0;
+    cJSON_Delete(h);
+    return same;
+}
+
 static void mw_retain_dropped(manifest_writer_t *w, int id)
 {
     if (!w->seen) return;  // no "already emitted" set: a duplicate row is worse
-    FILE *f = manifest_open_array(id);
-    if (!f) return;        // no previous manifest, or an unusable one
     char *obj = heap_caps_malloc(PODCAST_OBJ_MAX, MALLOC_CAP_SPIRAM);
-    if (!obj) { fclose(f); return; }
+    if (!obj) return;
+    if (!manifest_same_feed(id, w->rss_url, obj, PODCAST_OBJ_MAX)) { free(obj); return; }
+    FILE *f = manifest_open_array(id);
+    if (!f) { free(obj); return; }  // no previous manifest, or an unusable one
 
     bool sd = source_sd_present();
     int kept = 0, over_cap = 0;
@@ -672,6 +721,8 @@ static void mw_retain_dropped(manifest_writer_t *w, int id)
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, "cache_path");
         char path[PODCAST_PATH_MAX] = "";
         if (v && cJSON_IsString(v)) strlcpy(path, v->valuestring, sizeof(path));
+        const cJSON *u = cJSON_GetObjectItemCaseSensitive(e, "episode_url");
+        uint32_t uh = path_hash(u && cJSON_IsString(u) ? u->valuestring : "");
         // Read the marker from the PARSED object, never from a substring of the
         // text: titles are untrusted RSS and one containing the word "retained"
         // would fake a marker the entry does not have.
@@ -682,8 +733,12 @@ static void mw_retain_dropped(manifest_writer_t *w, int id)
         uint32_t h = path_hash(path);
         int seen_n = w->count < w->seen_max ? w->count : w->seen_max;
         bool in_feed = false;
-        for (int i = 0; i < seen_n && !in_feed; i++) in_feed = w->seen[i] == h;
-        if (in_feed) continue;  // still in the feed, already written this round
+        // Still in the feed, already written this round: same path, or same
+        // episode URL under a path that changed (e.g. a pre-2026-09-23
+        // position suffix; that old file is orphaned, a re-download follows).
+        for (int i = 0; i < seen_n && !in_feed; i++)
+            in_feed = w->seen[i] == h || w->seen_url[i] == uh;
+        if (in_feed) continue;
 
         if (sd) {
             struct stat st;
@@ -701,7 +756,10 @@ static void mw_retain_dropped(manifest_writer_t *w, int id)
                        : fprintf(w->f, "%.*s,\"retained\":true}", (int)len - 1, obj);
         }
         if (r < 0) { w->failed = true; break; }
-        if (w->count < w->seen_max) w->seen[w->count] = h;
+        if (w->count < w->seen_max) {
+            w->seen[w->count] = h;
+            w->seen_url[w->count] = uh;
+        }
         w->count++;
         kept++;
     }

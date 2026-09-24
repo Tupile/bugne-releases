@@ -124,10 +124,11 @@ la configuration.
 
 ![Écran d'accueil](img/fr/home.png)
 
-L'écran d'accueil affiche de grandes tuiles colorées : Radios web, Podcasts,
-Bibliothèque, Carte SD et Mémos. Quatre autres tuiles apparaissent quand les
-parents les activent : Multiplications (le jeu), Favoris, Accordeur
-(expérimental) et Lampe (expérimentale). La roue dentée en haut à droite ouvre
+L'écran d'accueil affiche de grandes tuiles colorées : Radios (une antenne),
+Podcasts, Musique (la bibliothèque), Carte SD et Mémos. Quatre autres tuiles
+apparaissent quand les parents les activent : Tables (le jeu, une calculette),
+Favoris (une étoile), Accord (l'accordeur, expérimental) et Lampe
+(expérimentale). La roue dentée en haut à droite ouvre
 les réglages. L'heure s'affiche en bas quand rien ne joue et que l'heure est
 réglée.
 
@@ -151,6 +152,9 @@ devant chaque épisode indique comment il sera lu :
   sont grisées quand l'appareil est hors ligne.
 - Ligne grise avec une coche : vous l'avez déjà écouté.
 
+Sous chaque titre, une ligne donne la date de l'épisode et sa durée, par
+exemple « 8 sept. · 52 min ».
+
 Le bouton aux flèches rondes en haut à droite actualise la liste des épisodes
 depuis internet.
 
@@ -166,10 +170,11 @@ album, les boutons suivant et précédent passent d'un morceau à l'autre.
 
 ![Favoris](img/fr/favorites.png)
 
-Pendant une écoute, touchez le bouton rond + de l'écran de lecture pour la
-garder en favori. Les radios web, les morceaux et les épisodes téléchargés
+Pendant une écoute, touchez le bouton rond à l'étoile de l'écran de lecture
+pour la garder en favori. Les radios web, les morceaux et les épisodes téléchargés
 peuvent être des favoris, 12 au maximum. La tuile Favoris les relance en un
-geste. Pour retirer un favori, touchez le même bouton, devenu un moins.
+geste. Pour retirer un favori, touchez de nouveau l'étoile, qui est alors sur
+un fond coloré.
 
 ### L'écran de lecture
 
@@ -180,7 +185,9 @@ geste. Pour retirer un favori, touchez le même bouton, devenu un moins.
 - Précédent et suivant changent de morceau ou d'épisode. Ils n'ont pas d'effet
   sur une radio web.
 - Le curseur règle le volume. Les parents peuvent plafonner le maximum.
-- Le bouton + ajoute ou retire un favori.
+- Le bouton étoile ajoute ou retire un favori.
+- Sur une radio web, la ligne sous le nom affiche le morceau en cours. Elle
+  défile quand le titre est trop long.
 - Le bouton œil est la minuterie de sommeil. Chaque appui passe à la valeur
   suivante : arrêté, 15, 30, 45, 60 minutes, puis « fin de piste ». La
   musique s'arrête toute seule au bout du temps choisi. C'est pratique au
@@ -263,7 +270,8 @@ talkie-walkie. Le curseur en bas règle le volume.
 
 ![Réglages](img/fr/settings.png) ![Thème](img/fr/settings_theme.png)
 
-La roue dentée de l'accueil ouvre les réglages. Ils comptent sept lignes :
+La roue dentée de l'accueil ouvre les réglages : une liste de sept lignes qui
+défile avec le doigt :
 
 - « Page de config (QR) » : le QR code de l'adresse de la page web.
 - « Hotspot de config (QR) » : le QR code qui rejoint le point d'accès
@@ -314,7 +322,8 @@ téléphone, en haut sur un ordinateur.
 
 Cet onglet est une télécommande. Vous voyez ce qui joue. Vous mettez en pause,
 vous arrêtez, vous passez au suivant, vous changez le volume et vous réglez la
-minuterie de sommeil. Vous lancez aussi n'importe quelle radio web, ou
+minuterie de sommeil (le menu à côté de la lune). Au-delà de huit radios, un
+champ au-dessus de la liste filtre les stations par leur nom. Vous lancez aussi n'importe quelle radio web, ou
 n'importe quel morceau de la bibliothèque.
 
 ### Podcasts

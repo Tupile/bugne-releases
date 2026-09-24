@@ -60,6 +60,11 @@ static volatile bool s_refresh_cancel;
 static bool s_play_worker_busy, s_downloading, s_dl_queued;
 static int s_play_ctx, s_memo_peer_count, s_memo_state, s_memo_peers[8], s_play_q;
 static char s_art_pending_path[PODCAST_PATH_MAX];
+static volatile bool s_talkie_active, s_talkie_rx_pending;
+static char s_talkie_rx_path[96];
+static int removed;
+static int test_remove(const char *p) { (void)p; removed++; return 0; }
+#define remove test_remove
 static uint32_t sd_generation, stream_generation, observed_generation;
 static int calls, refresh_calls, queued, hook, source_result, art_count, delay_calls, session_clear_at;
 static bool source_completed, session;
@@ -247,8 +252,23 @@ int main(int argc, char **argv) {
     session = true; arbiter = AUDIO_SOURCE_SENDSPIN;
     req_post(&req); cancel_play(); run();
     assert(calls == 0 && !s_advance && !s_play_failed && !s_play_retrying);
+    // A dropped talkie auto-play goes back to the tick, unless a newer message
+    // is pending (keep-latest) or the session ended: then its file is deleted.
+    play_req_t tk = {.kind = REQ_TALKIE_PLAY};
+    strlcpy(tk.target, "tk-1.wav", sizeof(tk.target));
+    play_req_t over = {.kind = REQ_PLAY, .is_file = true};
+    reset(); removed = 0; s_talkie_active = true; s_talkie_rx_pending = false;
+    req_post(&tk); req_post(&over);
+    assert(s_talkie_rx_pending && !strcmp(s_talkie_rx_path, "tk-1.wav") && removed == 0);
+    reset(); removed = 0; s_talkie_rx_pending = true;
+    strlcpy(s_talkie_rx_path, "tk-2.wav", sizeof(s_talkie_rx_path));
+    req_post(&tk); req_post(&over);
+    assert(!strcmp(s_talkie_rx_path, "tk-2.wav") && removed == 1);
+    reset(); removed = 0; s_talkie_active = false; s_talkie_rx_pending = false;
+    req_post(&tk); req_post(&over);
+    assert(!s_talkie_rx_pending && removed == 1);
     audio_unused(audio_is_active);
-    puts("review queue/worker cancellation: 17 cases passed");
+    puts("review queue/worker cancellation: 20 cases passed");
 }
 '''
 def test(ui_text):

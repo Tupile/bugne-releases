@@ -157,9 +157,28 @@ static void ha_client_send_request(const char *service, const char *payload)
     }
 }
 
+// ha.entity_id comes from config.json unescaped and goes into a hand-built
+// JSON body. Refuse only what would break out of the JSON string (a quote, a
+// backslash, a control character): Home Assistant itself lowercases ids, so a
+// stricter whitelist would break configs that work today. Logged once, the
+// lamp sliders call this on every drag tick.
+static bool entity_ok(const char *id)
+{
+    static bool warned;
+    if (!id[0]) return false;
+    for (const char *p = id; *p; p++) {
+        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) {
+            if (!warned) ESP_LOGW(TAG, "ha.entity_id has a character that breaks JSON, request skipped");
+            warned = true;
+            return false;
+        }
+    }
+    return true;
+}
+
 void ha_client_toggle_light(void) {
     const config_t *cfg = config_store_get();
-    if (!cfg || !cfg->ha.entity_id[0]) return;
+    if (!cfg || !entity_ok(cfg->ha.entity_id)) return;
 
     char payload[HA_PAYLOAD_MAX];
     snprintf(payload, sizeof(payload), "{\"entity_id\":\"%s\"}", cfg->ha.entity_id);
@@ -168,7 +187,7 @@ void ha_client_toggle_light(void) {
 
 void ha_client_set_light_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
     const config_t *cfg = config_store_get();
-    if (!cfg || !cfg->ha.entity_id[0]) return;
+    if (!cfg || !entity_ok(cfg->ha.entity_id)) return;
 
     char payload[HA_PAYLOAD_MAX];
     snprintf(payload, sizeof(payload),

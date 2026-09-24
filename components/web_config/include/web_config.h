@@ -34,7 +34,8 @@ bool web_config_gh_status(char *latest, size_t cap, bool *update);
 // EXPECTED FROM THE CALLER (the web handler must answer before restarting;
 // the device UI wants a moment to show its status line). Errors:
 // ESP_ERR_NOT_FOUND (no release reachable), ESP_ERR_INVALID_STATE (invalid
-// image), ESP_FAIL (download failed). Blocking, up to a minute: run it on a
+// image), ESP_ERR_NOT_FINISHED (another OTA is running), ESP_FAIL (download
+// failed). Blocking, up to a minute: run it on a
 // task with an INTERNAL stack (flash writes) of ~12 KB (the size these
 // handlers use on httpd).
 esp_err_t web_config_gh_install(void);

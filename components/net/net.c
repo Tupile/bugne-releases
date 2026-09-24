@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -97,6 +98,12 @@ static esp_err_t apply_sta_config(void)
 // much weaker backup, e.g. from the box at -68 dBm to a repeater at -80 dBm
 // (observed flip-flop on a fleet unit, 2026-07-10). Runs in a short-lived task:
 // the scan blocks and must not run on the event task.
+// One scan at a time. failover_task, roam_task and GET /api/scan (httpd) can
+// all scan, and they share the driver's single result list: a second scan
+// started meanwhile fails busy, which made failover fall back to a blind
+// round-robin. Bounded wait: /api/scan runs on the one web task.
+static SemaphoreHandle_t s_scan_lock;
+
 static atomic_bool s_failover_running;
 static int s_failover_stays;              // consecutive "stay on current" picks
 
@@ -351,6 +358,7 @@ static void captive_dns_task(void *arg)
         buf[2] |= 0x80;  // mark as response
         buf[3] = 0x00;   // no error
         buf[6] = 0x00; buf[7] = 0x01;  // one answer
+        buf[8] = buf[9] = buf[10] = buf[11] = 0x00;  // no authority/additional records (e.g. a query's EDNS OPT)
 
         int p = 12;  // walk past the question name
         while (p < len && buf[p] != 0) {
@@ -463,6 +471,11 @@ static void roam_scan_and_switch(void)
     if (net_scan(aps, sizeof(aps) / sizeof(aps[0]), &n) != ESP_OK) {
         return;
     }
+    // The scan blocked for seconds: the link may have dropped meanwhile and the
+    // failover or AP fallback taken over s_cur. Switching now would race them.
+    if (s_state != NET_STATE_CONNECTED || s_failover_running || s_ap_pending) {
+        return;
+    }
     for (size_t i = 0; i < n; i++) {  // strongest first: first qualifying is best
         if (strcmp(aps[i].ssid, (const char *)cur.ssid) == 0) {
             continue;  // that is the network we are already on
@@ -514,6 +527,8 @@ static void roam_check_cb(void *arg)
 
 esp_err_t net_start(void)
 {
+    s_scan_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_scan_lock, ESP_ERR_NO_MEM, TAG, "scan lock alloc failed");
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init failed");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop failed");
     esp_netif_create_default_wifi_sta();
@@ -608,9 +623,21 @@ bool net_ip(char *buf, size_t size)
     return true;
 }
 
+static esp_err_t net_scan_locked(net_ap_t *out, size_t max, size_t *count);
+
 esp_err_t net_scan(net_ap_t *out, size_t max, size_t *count)
 {
     *count = 0;
+    if (!s_scan_lock || xSemaphoreTake(s_scan_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err = net_scan_locked(out, max, count);
+    xSemaphoreGive(s_scan_lock);
+    return err;
+}
+
+static esp_err_t net_scan_locked(net_ap_t *out, size_t max, size_t *count)
+{
     // Scanning needs the STA interface. In AP provisioning we run plain AP, so
     // switch to APSTA for the scan, then restore AP.
     wifi_mode_t mode = WIFI_MODE_NULL;
@@ -628,6 +655,8 @@ esp_err_t net_scan(net_ap_t *out, size_t max, size_t *count)
             recs = calloc(num, sizeof(wifi_ap_record_t));
             if (recs) {
                 esp_wifi_scan_get_ap_records(&num, recs);  // sorted by RSSI, strongest first
+            } else {
+                esp_wifi_clear_ap_list();  // the driver's own list is freed only by a read or this
             }
         }
     }

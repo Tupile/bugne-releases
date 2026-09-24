@@ -17,6 +17,7 @@
 #include "audio_arbiter.h"
 #include "decode.h"
 #include "tags.h"  // tags_utf8_trim_partial
+#include "epmeta.h"
 #include "library.h"
 #include "quiet.h"
 #include "usage.h"
@@ -71,6 +72,14 @@ LV_FONT_DECLARE(bugne_font_14);
 LV_FONT_DECLARE(bugne_font_20);
 // Big clock digits (digits, colon, space only) for the alarm-ringing screen.
 LV_FONT_DECLARE(bugne_font_48);
+// Tile icon fonts: three Font Awesome glyphs the built-in symbol font lacks,
+// with montserrat_28/_20 as fallback so every LV_SYMBOL_* still renders
+// through them (fonts/bugne_icons_28.c header has the regeneration command).
+LV_FONT_DECLARE(bugne_icons_28);
+LV_FONT_DECLARE(bugne_icons_20);
+#define BUGNE_SYM_STAR  "\xEF\x80\x85"  // U+F005
+#define BUGNE_SYM_TOWER "\xEF\x94\x99"  // U+F519 broadcast tower
+#define BUGNE_SYM_CALC  "\xEF\x87\xAC"  // U+F1EC calculator
 
 #define LCD_HRES        240
 #define LCD_VRES        320
@@ -1524,10 +1533,25 @@ static void req_abandoned(const play_req_t *req)
     case REQ_MEMO_RECORD:
         s_memo_state = MEMO_UI_IDLE;  // the capture never started
         break;
+    case REQ_TALKIE_PLAY: {
+        // The tick cleared s_talkie_rx_pending when it posted this request, so
+        // a dropped one would never play: hand the file back to the tick,
+        // unless a newer message is already pending or the session ended
+        // (keep-latest: the older ephemeral file is deleted instead).
+        bool restore;
+        taskENTER_CRITICAL(&s_talkie_rx_mux);
+        restore = s_talkie_active && !s_talkie_rx_pending;
+        if (restore) {
+            strlcpy(s_talkie_rx_path, req->target, sizeof(s_talkie_rx_path));
+            s_talkie_rx_pending = true;
+        }
+        taskEXIT_CRITICAL(&s_talkie_rx_mux);
+        if (!restore) remove(req->target);
+        break;
+    }
     case REQ_PLAY:
     case REQ_BEEP:            // the alarm retries on its own (s_alarm_beep_confirmed)
     case REQ_MEMO_PLAY:
-    case REQ_TALKIE_PLAY:
         break;                // nothing was latched by the producer
     }
 }
@@ -1587,6 +1611,7 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
         source_sendspin_command(SENDSPIN_CMD_STOP);
     }
     strlcpy(s_now_title, title, sizeof(s_now_title));
+    tags_utf8_trim_partial(s_now_title);  // a long accented title must not end mid-character
     strlcpy(s_now_target, target, sizeof(s_now_target));  // favorite identity (star button)
     s_now_is_file = is_file;
     // Drop the previous track's tags so they do not show before the new file is
@@ -1647,8 +1672,24 @@ typedef void (*screen_builder_t)(lv_obj_t *scr);
 
 static screen_builder_t s_active_builder;  // which builder made the live screen
 
+// The one open top-layer modal (resume or update confirmation), or NULL.
+// Top-layer objects outlive screens, so show() closes it: otherwise it would
+// sit over the next screen (the alarm-ringing one included) and eat taps.
+// Every close goes through modal_close(): the async delete is safe from the
+// modal's own button events, and clearing the pointer at once means a handler
+// that closes AND triggers a show() cannot delete the backdrop twice.
+static lv_obj_t *s_modal;
+
+static void modal_close(void)
+{
+    if (!s_modal) return;
+    lv_obj_delete_async(s_modal);
+    s_modal = NULL;
+}
+
 static void show(screen_builder_t builder)
 {
+    modal_close();  // a modal belongs to the screen that opened it
     s_active_builder = builder;
     s_np_vol = NULL;  // the previous screen's slider is about to be freed
     s_tuner_note_lbl = NULL;  // same for the tuner widgets (rebuilt by build_tuner)
@@ -1716,8 +1757,6 @@ static bool play_denied(void)
     if (limit_hit())    { toast(T(STR_LIMIT_REACHED)); return true; }
     return false;
 }
-static lv_obj_t *add_menu_button(lv_obj_t *scr, const char *text, int x, int y, int h, lv_event_cb_t cb);
-static lv_obj_t *add_menu_button_t(lv_obj_t *scr, const char *icon, str_id_t id, int x, int y, int h, lv_event_cb_t cb);
 static lv_obj_t *make_tile(lv_obj_t *scr, const char *icon, str_id_t label_id,
                             int x, int y, int w, int h, bool horizontal, lv_event_cb_t cb);
 static void on_prev(lv_event_t *e);  // defined with the local playback context
@@ -2041,18 +2080,18 @@ static void on_fav_toggle(lv_event_t *e)
 
 // Round favorite toggle in the top-left column, under the back button (the
 // top-right corner belongs to the sleep timer, A2). Created only when the
-// playing content has a stable identity. Stock montserrat carries no
-// star/heart glyph (checked lv_symbol_def.h), so the state is carried by a
-// plus (not in favorites: tap adds) versus an accent-filled minus (in
-// favorites: tap removes). The SD-tag artist line is narrowed to the title's
-// scr_w()-112 span so this button never underlaps it (see build_now_playing).
+// playing content has a stable identity. A star from bugne_icons_20: on an
+// accent-filled button when the content is a favorite (tap removes), on a
+// plain surface button otherwise (tap adds). The SD-tag artist line is
+// narrowed to the title's scr_w()-112 span so this button never underlaps it
+// (see build_now_playing).
 static void add_fav_button(lv_obj_t *scr)
 {
     config_favorite_t f;
     if (!fav_current(&f)) return;
     bool isfav = fav_find(&f) >= 0;
-    lv_obj_t *b = make_round_btn(scr, isfav ? LV_SYMBOL_MINUS : LV_SYMBOL_PLUS, 44,
-                                 isfav, on_fav_toggle);
+    lv_obj_t *b = make_round_btn(scr, BUGNE_SYM_STAR, 44, isfav, on_fav_toggle);
+    lv_obj_set_style_text_font(lv_obj_get_child(b, 0), &bugne_icons_20, 0);
     lv_obj_align(b, LV_ALIGN_TOP_LEFT, 8, 60);  // below back (bottom edge 52)
 }
 
@@ -2108,7 +2147,8 @@ static void build_now_playing(lv_obj_t *scr)
     lv_obj_set_style_text_font(name, &bugne_font_20, 0);  // big bold title
     // Bounded height: LONG_DOT wraps inside the box and ellipsizes past the
     // last line (same trick as add_title), so a long title never runs into
-    // the rows below. Radios have no progress row, so they get an extra line.
+    // the rows below. Radios have no progress row, so they get an extra line
+    // (2 lines in portrait clipped common names like "OUI FM Classic Rock").
     const int tlines = ls ? (has_prog ? 1 : 2) : (has_prog ? 2 : 3);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     // Width narrowed to clear both corner buttons (back at left, sleep timer at
@@ -2170,13 +2210,15 @@ static void build_now_playing(lv_obj_t *scr)
         source_stream_title(icy, sizeof(icy));
         lv_obj_t *icyl = lv_label_create(scr);
         lv_obj_set_style_text_font(icyl, &bugne_font_14, 0);
-        lv_label_set_long_mode(icyl, LV_LABEL_LONG_DOT);
-        // One line: LONG_DOT truncates only once the height is bounded too.
+        // One line that scrolls instead of clipping "ARTIST - TITLE". The
+        // scroll is dropped to LONG_DOT while the screen sleeps (tick_now_playing):
+        // no animation should keep rendering into a powered-off panel.
+        lv_label_set_long_mode(icyl, s_asleep ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_obj_set_size(icyl, has_art ? art_col_w : scr_w() - 2 * PAD_SIDE, lv_font_get_line_height(&bugne_font_14));
         lv_obj_set_style_text_align(icyl, LV_TEXT_ALIGN_CENTER, 0);
         muted(icyl);
         lv_label_set_text(icyl, icy);
-        lv_obj_align(icyl, LV_ALIGN_TOP_MID, art_dx, ls ? 108 : 118);  // under the taller radio title
+        lv_obj_align(icyl, LV_ALIGN_TOP_MID, art_dx, ls ? 108 : 118);  // under the taller radio title, clear of the star (bottom 104)
         s_np_icy_lbl = icyl;
     }
 
@@ -2923,48 +2965,39 @@ static void sd_dir_pop(void)
 
 static void on_resume_dlg_reprendre(lv_event_t *e)
 {
-    lv_obj_t *btn = lv_event_get_target(e);
-    lv_obj_t *backdrop = lv_obj_get_user_data(btn);
+    (void)e;
+    modal_close();
     s_play_ctx = s_resume_dlg.play_ctx;
     play_ctx_at_ex_skip(s_resume_dlg.index, true, (int)s_resume_dlg.pos_ms);
-    if (backdrop) {
-        lv_obj_delete(backdrop);
-    }
 }
 
 static void on_resume_dlg_debut(lv_event_t *e)
 {
-    lv_obj_t *btn = lv_event_get_target(e);
-    lv_obj_t *backdrop = lv_obj_get_user_data(btn);
+    (void)e;
+    modal_close();
     podcast_resume_clear(s_resume_dlg.path_or_url);
     s_play_ctx = s_resume_dlg.play_ctx;
     play_ctx_at_ex_skip(s_resume_dlg.index, true, 0);
-    if (backdrop) {
-        lv_obj_delete(backdrop);
-    }
 }
 
 static void on_resume_dlg_close(lv_event_t *e)
 {
-    lv_obj_t *btn = lv_event_get_target(e);
-    lv_obj_t *backdrop = lv_obj_get_user_data(btn);
-    if (backdrop) {
-        lv_obj_delete(backdrop);
-    }
+    (void)e;
+    modal_close();
 }
 
 static void on_backdrop_clicked(lv_event_t *e)
 {
-    lv_obj_t *backdrop = lv_event_get_current_target(e);
-    lv_obj_t *target = lv_event_get_target(e);
-    if (target == backdrop) {
-        lv_obj_delete(backdrop);
+    if (lv_event_get_target(e) == lv_event_get_current_target(e)) {
+        modal_close();
     }
 }
 
 static void show_resume_modal(void)
 {
+    modal_close();
     lv_obj_t *backdrop = lv_obj_create(lv_layer_top());
+    s_modal = backdrop;
     lv_obj_set_size(backdrop, scr_w(), scr_h());
     lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
@@ -3510,12 +3543,24 @@ static void build_episodes(lv_obj_t *scr)
     lv_table_set_column_count(list, 1);
     lv_table_set_column_width(list, 0, scr_w());
     lv_table_set_row_count(list, s_ep_count);
+    // Second line per row: date and duration ("1 sept. · 12 min"), the year
+    // only when it is not the current one (unknown before the first SNTP sync).
+    const bool fr = strcmp(lang_code(), "fr") == 0;
+    int cur_year = 0;
+    if (time_valid()) {
+        time_t now = time(NULL);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        cur_year = lt.tm_year + 1900;
+    }
     for (size_t i = 0; i < s_ep_count; i++) {
         // A3: an already-played episode shows OK instead of its cached/download icon.
         const char *icon = played_contains(s_episodes[i].episode_url) ? LV_SYMBOL_OK
                           : s_episodes[i].cached ? LV_SYMBOL_SD_CARD : LV_SYMBOL_DOWNLOAD;
-        char line[PODCAST_TITLE_MAX + 8];
-        snprintf(line, sizeof(line), "%s %s", icon, s_episodes[i].title);
+        char meta[40];
+        ep_meta_fmt(meta, sizeof(meta), s_episodes[i].date, s_episodes[i].duration_seconds, fr, cur_year);
+        char line[PODCAST_TITLE_MAX + 8 + sizeof(meta)];
+        snprintf(line, sizeof(line), "%s %s%s%s", icon, s_episodes[i].title, meta[0] ? "\n" : "", meta);
         lv_table_set_cell_value(list, i, 0, line);
         // No TEXT_CROP: long titles wrap onto multiple lines. The table caches each
         // row's height once, so the wrap does not bring back the scroll lag.
@@ -5094,74 +5139,6 @@ static void build_favorites(lv_obj_t *scr)
 static void on_open_favorites(lv_event_t *e) { (void)e; show(build_favorites); }
 static void on_open_settings(lv_event_t *e)  { (void)e; show(build_settings); }
 
-// Position of menu button idx on a menu screen of `count` items. Since the
-// 2026-07-03 tile redesign only the settings screen uses this (6 items since
-// the usage screen, 7 since the update screen); the count == 4 spacing is
-// kept for a future 4-item menu.
-// Portrait = one column, landscape = a 2-column grid.
-static void menu_pos(int idx, int count, int *x, int *y)
-{
-    // The band runs from below the 44 px round back button (bottom edge at
-    // 52, so rows start at 56) down to the floating mini bar; the row spacing
-    // derives from those two limits. Button heights match add_menu_button's
-    // callers: menu_h() on settings-style menus, 50 px on 4-item ones.
-    const int limit = scr_h() - MINI_CLEAR;
-    const bool land = scr_w() > scr_h();
-    const int h = !land ? ((count == 6) ? 32 : (count >= 7) ? 28 : (count >= 5) ? 38 : 50)
-                 : ((count >= 7) ? 30 : (count >= 5) ? 38 : 50);
-    if (land) {
-        // 2x2 grid (4 items), 2+2+1 with a centered last (5 items, 3 rows),
-        // a full 3x2 grid (6 items), or a 2x4 grid with a centered last
-        // (7 items, 4 rows: 240 px of height only fit 30 px buttons).
-        *x = ((count == 5 && idx == 4) || (count == 7 && idx == 6)) ? 0 : (idx % 2) ? 80 : -80;
-        const int y0 = (count >= 5) ? 56 : 60;
-        const int rows = (count >= 7) ? 4 : (count >= 5) ? 3 : 2;
-        *y = y0 + (idx / 2) * ((limit - y0 - h) / (rows - 1));
-    } else {
-        *x = 0;
-        // 6/7 portrait rows only fit with thinner buttons (32/28 px) and a
-        // slightly higher start (the title ends well above 52).
-        const int y0 = (count >= 6) ? 52 : 56;
-        *y = y0 + idx * ((limit - y0 - h) / (count - 1));
-    }
-}
-
-// Button height matching menu_pos's spacing for the settings-style menus.
-static int menu_h(int count)
-{
-    return (scr_w() > scr_h()) ? ((count >= 7) ? 30 : 38)
-                               : ((count >= 7) ? 28 : (count == 6) ? 32 : 38);
-}
-
-static lv_obj_t *add_menu_button(lv_obj_t *scr, const char *text, int x, int y, int h, lv_event_cb_t cb)
-{
-    // 150 px wide in landscape so two fit side by side (2x2 grid); 180 portrait.
-    // Height: 50 on 4-item menus, 40 on the 5-item settings (clears the mini bar).
-    int w = (scr_w() > scr_h()) ? 150 : 180;
-    lv_obj_t *b = lv_button_create(scr);
-    lv_obj_set_size(b, w, h);
-    lv_obj_align(b, LV_ALIGN_TOP_MID, x, y);
-    lv_obj_t *l = lv_label_create(b);
-    // Wrap within the button so longer labels (e.g. French translations) do not
-    // overflow; centered on both axes.
-    lv_obj_set_width(l, w - 16);
-    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(l, text);
-    lv_obj_center(l);
-    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
-    return b;
-}
-
-// Menu button whose label is "<icon> <translated text>". add_menu_button copies the
-// text immediately, so the shared format buffer is safe to reuse across calls.
-static lv_obj_t *add_menu_button_t(lv_obj_t *scr, const char *icon, str_id_t id, int x, int y, int h, lv_event_cb_t cb)
-{
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%s %s", icon, T(id));
-    return add_menu_button(scr, buf, x, y, h, cb);
-}
-
 // A centered caption that wraps within the given width, so longer translations
 // (e.g. French) do not run off the edge. Portrait uses the full screen width;
 // landscape uses the column right of the QR. Always secondary text (muted),
@@ -5209,25 +5186,36 @@ static lv_obj_t *make_tile(lv_obj_t *scr, const char *icon, str_id_t label_id,
     const int line_h = lv_font_get_line_height(&bugne_font_14);
 
     if (horizontal) {
-        lv_obj_set_style_text_font(icon_l, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_font(icon_l, &bugne_icons_28, 0);
         lv_obj_align(icon_l, LV_ALIGN_LEFT_MID, 12, 0);
         const int text_x = 46;  // 12 pad + ~30 icon glyph + 4 gap
         lv_obj_set_size(text_l, w - text_x - 6, line_h);
         lv_obj_set_style_text_align(text_l, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_long_mode(text_l, LV_LABEL_LONG_DOT);
         lv_obj_align(text_l, LV_ALIGN_LEFT_MID, text_x, 0);
+    } else if (h / 2 < 2 * line_h && w >= 90) {
+        // Short but wide (portrait big tiles with all five extras): icon
+        // beside the text, a stacked layout would overlap them.
+        lv_obj_set_style_text_font(icon_l, &bugne_icons_20, 0);
+        lv_obj_align(icon_l, LV_ALIGN_LEFT_MID, 8, 0);
+        const int text_x = 37;  // 8 pad + 25 px (the widest glyph, the tower) + 4 gap
+        lv_obj_set_size(text_l, w - text_x - 2, line_h);
+        lv_obj_set_style_text_align(text_l, LV_TEXT_ALIGN_LEFT, 0);
+        lv_label_set_long_mode(text_l, LV_LABEL_LONG_DOT);
+        lv_obj_align(text_l, LV_ALIGN_LEFT_MID, text_x, 0);
     } else if (h / 2 < 2 * line_h) {
         // Cramped: smaller icon pinned top, one LONG_DOT line pinned bottom.
-        lv_obj_set_style_text_font(icon_l, &lv_font_montserrat_20, 0);
+        // w - 4: a 4-column landscape tile needs every pixel for "Podcasts".
+        lv_obj_set_style_text_font(icon_l, &bugne_icons_20, 0);
         lv_obj_align(icon_l, LV_ALIGN_TOP_MID, 0, 5);
-        lv_obj_set_size(text_l, w - 8, line_h);
+        lv_obj_set_size(text_l, w - 4, line_h);
         lv_obj_set_style_text_align(text_l, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(text_l, LV_LABEL_LONG_DOT);
         lv_obj_align(text_l, LV_ALIGN_BOTTOM_MID, 0, -5);
     } else {
-        lv_obj_set_style_text_font(icon_l, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_font(icon_l, &bugne_icons_28, 0);
         lv_obj_align(icon_l, LV_ALIGN_TOP_MID, 0,
-                     (h / 2 - lv_font_get_line_height(&lv_font_montserrat_28)) / 2);
+                     (h / 2 - lv_font_get_line_height(&bugne_icons_28)) / 2);
         lv_obj_set_width(text_l, w - 8);
         lv_obj_set_style_text_align(text_l, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(text_l, LV_LABEL_LONG_WRAP);
@@ -5280,22 +5268,22 @@ static void build_home(lv_obj_t *scr)
     lv_obj_t **ex_out[5];
     int nb = 0;
     if (game_on) {
-        ex_icon[nb] = LV_SYMBOL_EDIT; ex_id[nb] = STR_GAME;
+        ex_icon[nb] = BUGNE_SYM_CALC; ex_id[nb] = STR_TILE_GAME;
         ex_cb[nb] = on_open_game; ex_out[nb] = &game; nb++;
     }
     if (fav_on) {
-        ex_icon[nb] = LV_SYMBOL_CHARGE; ex_id[nb] = STR_FAVORITES;
+        ex_icon[nb] = BUGNE_SYM_STAR; ex_id[nb] = STR_TILE_FAVORITES;
         ex_cb[nb] = on_open_favorites; ex_out[nb] = &fav; nb++;
     }
     if (tuner_on) {
-        ex_icon[nb] = LV_SYMBOL_VOLUME_MID; ex_id[nb] = STR_TUNER;
+        ex_icon[nb] = LV_SYMBOL_VOLUME_MID; ex_id[nb] = STR_TILE_TUNER;
         ex_cb[nb] = on_open_tuner; ex_out[nb] = NULL; nb++;
     }
     if (hc && hc->ha.url[0] && hc->ha.entity_id[0]) {
-        ex_icon[nb] = LV_SYMBOL_POWER; ex_id[nb] = STR_LAMP;
+        ex_icon[nb] = LV_SYMBOL_POWER; ex_id[nb] = STR_TILE_LAMP;
         ex_cb[nb] = on_open_lamp; ex_out[nb] = NULL; nb++;
     }
-    ex_icon[nb] = LV_SYMBOL_ENVELOPE; ex_id[nb] = STR_MEMOS;
+    ex_icon[nb] = LV_SYMBOL_ENVELOPE; ex_id[nb] = STR_TILE_MEMOS;
     ex_cb[nb] = on_open_memos; ex_out[nb] = &mem; nb++;
 
     if (!ls) {
@@ -5308,10 +5296,10 @@ static void build_home(lv_obj_t *scr)
         const int banner_h = (rows >= 3) ? 30 : (rows == 2) ? 34 : 38;
         const int w2 = (scr_w() - 2 * M - Gp) / 2;
         const int h2 = (limit - Y0 - (1 + rows) * Gp - rows * banner_h) / 2;
-        wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, w2, h2, false, on_open_webradios);
-        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + w2 + Gp, Y0, w2, h2, false, on_open_podcasts);
-        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M, Y0 + h2 + Gp, w2, h2, false, on_open_library);
-        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + w2 + Gp, Y0 + h2 + Gp, w2, h2, false, on_open_sd);
+        wr = make_tile(scr, BUGNE_SYM_TOWER, STR_TILE_RADIOS, M, Y0, w2, h2, false, on_open_webradios);
+        pod = make_tile(scr, LV_SYMBOL_LIST, STR_TILE_PODCASTS, M + w2 + Gp, Y0, w2, h2, false, on_open_podcasts);
+        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_TILE_LIBRARY, M, Y0 + h2 + Gp, w2, h2, false, on_open_library);
+        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_TILE_SD, M + w2 + Gp, Y0 + h2 + Gp, w2, h2, false, on_open_sd);
         const int by = Y0 + 2 * (h2 + Gp);
         for (int i = 0; i < nb; i++) {
             const bool lone = (i == nb - 1) && (nb % 2 == 1);  // odd count: last row is full width
@@ -5330,23 +5318,25 @@ static void build_home(lv_obj_t *scr)
         const bool e4 = (nb >= 4);
         const bool e5 = (nb == 5);
         const int w3 = (scr_w() - 2 * M - 2 * G) / 3;
-        const int w4 = (scr_w() - 2 * M - 3 * G) / 4;
+        const int G4 = 6;  // 4-column rows: a tighter gutter buys the labels ~3 px each
+        const int w4 = (scr_w() - 2 * M - 3 * G4) / 4;
         const int w5 = (scr_w() - 2 * M - 4 * 6) / 5; // Use 6px gutter for 5 cells
         const int wt = e4 ? w4 : w3;               // top-row cell width
         const int w2b = e5 ? w5 : (nb >= 3) ? w4 : w3; // row-2 cell width
-        const int G2 = e5 ? 6 : G;                 // row-2 gutter
+        const int GT = e4 ? G4 : G;                // top-row gutter
+        const int G2 = e5 ? 6 : (nb >= 3) ? G4 : G; // row-2 gutter
         const int h3 = (limit - Y0 - G) / 2;
         const int row2_off = (nb == 1) ? (w3 + G) / 2 : 0;  // centers a 2-tile row
-        wr = make_tile(scr, LV_SYMBOL_AUDIO, STR_WEBRADIOS, M, Y0, wt, h3, false, on_open_webradios);
-        pod = make_tile(scr, LV_SYMBOL_LIST, STR_PODCASTS, M + wt + G, Y0, wt, h3, false, on_open_podcasts);
-        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_LIBRARY, M + 2 * (wt + G), Y0, wt, h3, false, on_open_library);
+        wr = make_tile(scr, BUGNE_SYM_TOWER, STR_TILE_RADIOS, M, Y0, wt, h3, false, on_open_webradios);
+        pod = make_tile(scr, LV_SYMBOL_LIST, STR_TILE_PODCASTS, M + wt + GT, Y0, wt, h3, false, on_open_podcasts);
+        lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_TILE_LIBRARY, M + 2 * (wt + GT), Y0, wt, h3, false, on_open_library);
         const int n_row2 = e4 ? nb - 1 : nb;
         if (e4) {  // memos (always the last extra) joins the top row
             lv_obj_t *b = make_tile(scr, ex_icon[nb - 1], ex_id[nb - 1],
-                                    M + 3 * (wt + G), Y0, wt, h3, false, ex_cb[nb - 1]);
+                                    M + 3 * (wt + GT), Y0, wt, h3, false, ex_cb[nb - 1]);
             if (ex_out[nb - 1]) *ex_out[nb - 1] = b;
         }
-        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_SDCARD, M + row2_off, Y0 + h3 + G, w2b, h3, false, on_open_sd);
+        sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_TILE_SD, M + row2_off, Y0 + h3 + G, w2b, h3, false, on_open_sd);
         int x5 = M + row2_off + w2b + G2;
         for (int i = 0; i < n_row2; i++) {
             lv_obj_t *b = make_tile(scr, ex_icon[i], ex_id[i], x5, Y0 + h3 + G, w2b, h3,
@@ -5856,7 +5846,7 @@ static void build_alarm_ringing(lv_obj_t *scr)
     lv_obj_t *snooze = lv_button_create(scr);
     lv_obj_set_size(snooze, 130, 44);
     lv_obj_t *sl = lv_label_create(snooze);
-    lv_label_set_text(sl, "+10 min");
+    lv_label_set_text(sl, T(STR_ALARM_SNOOZE_BTN));
     lv_obj_center(sl);
     lv_obj_add_event_cb(snooze, on_alarm_snooze, LV_EVENT_CLICKED, NULL);
 
@@ -6360,6 +6350,7 @@ typedef enum {
     UPD_INSTALLING,
     UPD_REBOOTING,       // installed; the task restarts the device momentarily
     UPD_INSTALL_FAILED,
+    UPD_BUSY,            // another OTA (web page) holds the flash slot
 } upd_state_t;
 
 static volatile upd_state_t s_upd_state = UPD_IDLE;
@@ -6399,7 +6390,9 @@ static void upd_ota_task(void *arg)
         }
     } else {
         esp_err_t err = s_ghota_install_fn ? s_ghota_install_fn() : ESP_ERR_INVALID_STATE;
-        if (err != ESP_OK) {
+        if (err == ESP_ERR_NOT_FINISHED) {
+            s_upd_state = UPD_BUSY;
+        } else if (err != ESP_OK) {
             s_upd_state = UPD_INSTALL_FAILED;
         } else {
             s_upd_state = UPD_REBOOTING;
@@ -6439,14 +6432,14 @@ static void on_upd_check(lv_event_t *e)
 
 static void on_upd_cancel(lv_event_t *e)
 {
-    lv_obj_t *backdrop = lv_obj_get_user_data(lv_event_get_target(e));
-    if (backdrop) lv_obj_delete(backdrop);
+    (void)e;
+    modal_close();
 }
 
 static void on_upd_confirm(lv_event_t *e)
 {
-    lv_obj_t *backdrop = lv_obj_get_user_data(lv_event_get_target(e));
-    if (backdrop) lv_obj_delete(backdrop);
+    (void)e;
+    modal_close();
     // Surface a changed situation instead of closing silently (Wi-Fi may have
     // dropped between "Install" and this tap).
     if (!s_ghota_install_fn) { s_upd_state = UPD_NO_SERVICE; return; }
@@ -6459,7 +6452,9 @@ static void on_upd_confirm(lv_event_t *e)
 // explicit bugne_font_14 (top-layer widgets do not inherit screen fonts).
 static void show_upd_modal(void)
 {
+    modal_close();
     lv_obj_t *backdrop = lv_obj_create(lv_layer_top());
+    s_modal = backdrop;
     lv_obj_set_size(backdrop, scr_w(), scr_h());
     lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
@@ -6589,7 +6584,7 @@ static void upd_screen_refresh(void)
 
     static char txt[80];
     switch (s_upd_state) {
-    case UPD_IDLE:           txt[0] = '\0'; break;
+    case UPD_IDLE:           strlcpy(txt, T(STR_UPD_HINT), sizeof(txt)); break;
     case UPD_NEED_WIFI:      strlcpy(txt, T(STR_UPD_NEED_WIFI), sizeof(txt)); break;
     case UPD_NO_SERVICE:     strlcpy(txt, T(STR_UPD_UNAVAILABLE), sizeof(txt)); break;
     case UPD_CHECKING:       strlcpy(txt, T(STR_UPD_CHECKING), sizeof(txt)); break;
@@ -6599,6 +6594,7 @@ static void upd_screen_refresh(void)
     case UPD_INSTALLING:     strlcpy(txt, T(STR_UPD_INSTALLING), sizeof(txt)); break;
     case UPD_REBOOTING:      strlcpy(txt, T(STR_UPD_REBOOTING), sizeof(txt)); break;
     case UPD_INSTALL_FAILED: strlcpy(txt, T(STR_UPD_INSTALL_FAILED), sizeof(txt)); break;
+    case UPD_BUSY:           strlcpy(txt, T(STR_UPD_BUSY), sizeof(txt)); break;
     }
     if (strcmp(lv_label_get_text(s_upd_status_lbl), txt) != 0) {
         lv_label_set_text(s_upd_status_lbl, txt);
@@ -6622,35 +6618,44 @@ static void build_settings(lv_obj_t *scr)
 {
     add_back_button(scr);
     add_title_wide(scr, T(STR_SETTINGS));
-    int bx, by;
-    const int h = menu_h(7);
-    menu_pos(0, 7, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_CONFIG_PAGE_QR, bx, by, h, on_set_web);
-    menu_pos(1, 7, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_WIFI, STR_SETUP_HOTSPOT_QR, bx, by, h, on_set_ap);
-    menu_pos(2, 7, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_BELL, STR_ALARM, bx, by, h, on_open_settings_alarm);
-    menu_pos(3, 7, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_TINT, STR_THEME, bx, by, h, on_open_theme);
-    menu_pos(4, 7, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_LOOP, STR_ORIENTATION, bx, by, h, on_toggle_orientation);
-    menu_pos(5, 7, &bx, &by);
-    add_menu_button_t(scr, LV_SYMBOL_BARS, STR_LISTEN_TIME, bx, by, h, on_open_usage);
-    menu_pos(6, 7, &bx, &by);
-    lv_obj_t *upd_row = add_menu_button_t(scr, LV_SYMBOL_DOWNLOAD, STR_UPDATE, bx, by, h, on_open_update);
+    // A scrolling card list, like the other list screens: 7 entries no longer
+    // fit the band above the mini bar as buttons of a usable size (they had
+    // shrunk to 28 px as rows were added), while list rows keep the 44 px tap
+    // target and the full labels in both orientations.
+    static const struct { const char *icon; str_id_t id; lv_event_cb_t cb; } ROWS[] = {
+        { LV_SYMBOL_WIFI,     STR_CONFIG_PAGE_QR,   on_set_web },
+        { LV_SYMBOL_WIFI,     STR_SETUP_HOTSPOT_QR, on_set_ap },
+        { LV_SYMBOL_BELL,     STR_ALARM,            on_open_settings_alarm },
+        { LV_SYMBOL_TINT,     STR_THEME,            on_open_theme },
+        { LV_SYMBOL_LOOP,     STR_ORIENTATION,      on_toggle_orientation },
+        { LV_SYMBOL_BARS,     STR_LISTEN_TIME,      on_open_usage },
+        { LV_SYMBOL_DOWNLOAD, STR_UPDATE,           on_open_update },
+    };
+    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
+    lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);  // last row scrolls clear of the floating mini bar
+    lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_t *upd_row = NULL;
+    for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
+        lv_obj_t *btn = lv_list_add_button(list, ROWS[i].icon, T(ROWS[i].id));
+        lv_obj_add_event_cb(btn, ROWS[i].cb, LV_EVENT_CLICKED, NULL);
+        if (ROWS[i].cb == on_open_update) upd_row = btn;
+    }
+    list_titles_static(list);  // before the dot below: it expects the label last
     // Red dot when the last GitHub check (manual or daily auto-check) already
     // knows about an update; refreshed by the tick edge in upd_screen_refresh.
     s_upd_badge = upd_cache_update();
-    if (s_upd_badge) {
+    if (s_upd_badge && upd_row) {
         lv_obj_t *dot = lv_obj_create(upd_row);
+        lv_obj_add_flag(dot, LV_OBJ_FLAG_IGNORE_LAYOUT);  // list rows are flex rows
         lv_obj_set_size(dot, 12, 12);
         lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(dot, lv_color_hex(0xE53935), 0);  // notification red
         lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(dot, lv_color_white(), 0);    // ring: visible on any accent
+        lv_obj_set_style_border_color(dot, lv_color_white(), 0);    // ring: visible on any surface
         lv_obj_set_style_border_width(dot, 2, 0);
         lv_obj_set_style_pad_all(dot, 0, 0);
-        lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -6, 6);
+        lv_obj_align(dot, LV_ALIGN_RIGHT_MID, -4, 0);
         lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     }
 }
@@ -7522,10 +7527,14 @@ static void tick_memo_talkie(void)
 static void tick_sd_presence(void)
 {
     // Hot insert/remove probe. Only when nothing can hold the card busy: the
-    // poll's unmount-on-vanish path must never race an open FILE*. Radio
-    // playback touches no SD file, so it does not block the probe.
+    // poll's unmount-on-vanish path must never race an open FILE*. Any active
+    // playback blocks it, radio included (audio_is_active and the worker flag
+    // cannot tell sources apart), so a card pulled during a radio is noticed
+    // when it stops. Memo playback holds the arbiter from before its fopen to
+    // after its fclose, a window audio_is_active does not cover.
     if (!audio_is_active() && !s_downloading && !s_refreshing && !s_play_worker_busy &&
-        uxQueueMessagesWaiting(s_play_q) == 0 && s_memo_state == MEMO_UI_IDLE) {
+        uxQueueMessagesWaiting(s_play_q) == 0 && s_memo_state == MEMO_UI_IDLE &&
+        audio_arbiter_active() != AUDIO_SOURCE_MEMO) {
         source_sd_poll();
     }
     static int s_sd_present_applied = -1;
@@ -7673,6 +7682,14 @@ static void tick_now_playing(void)
         if (strcmp(lv_label_get_text(s_np_icy_lbl), icy) != 0) {
             lv_label_set_text(s_np_icy_lbl, icy);
         }
+    }
+
+    // The ICY line scrolls only while the panel is on: a circular scroll is a
+    // running animation, and asleep it would keep rendering and SPI-flushing
+    // that strip into a powered-off panel (same reason as the slider below).
+    if (s_active_builder == build_now_playing && s_np_icy_lbl) {
+        lv_label_long_mode_t want = s_asleep ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_SCROLL_CIRCULAR;
+        if (lv_label_get_long_mode(s_np_icy_lbl) != want) lv_label_set_long_mode(s_np_icy_lbl, want);
     }
 
     // Live-update the SD file progress slider/time (unless the user is dragging,

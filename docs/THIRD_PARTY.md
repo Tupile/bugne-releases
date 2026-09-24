@@ -16,6 +16,7 @@ copy this file next to it or link to it.
 | minimp4 | lieff | CC0 | https://github.com/lieff/minimp4 |
 | yxml | Yoran Heling | MIT | https://dev.yorhel.nl/yxml |
 | DejaVu Sans (converted bitmap font, components/ui/fonts) | DejaVu Fonts project, Bitstream Inc. | Bitstream Vera / DejaVu Fonts license | https://dejavu-fonts.github.io/ |
+| Font Awesome 5 Free Solid, 3 glyphs (converted bitmap font, components/ui/fonts/bugne_icons_*.c) | Fonticons, Inc. | SIL OFL 1.1 | https://fontawesome.com/license/free |
 
 ## Fetched by the IDF component manager (main/idf_component.yml)
 

@@ -38,6 +38,16 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_usage"
 
+echo "=== building epmeta host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -I ../../components/decode/include -I ../../components/decode \
+    -o "$OUT/test_epmeta" \
+    test_epmeta.c ../../components/ui/epmeta.c ../../components/decode/tags.c
+
+echo "=== running ==="
+"$OUT/test_epmeta"
+
 echo "=== building alarm_next host tests ==="
 # config_store.h (included by alarm_next.h) pulls in esp_err.h and podcast.h
 # just for a typedef and PODCAST_URL_MAX; stubs/ satisfies both without IDF.
@@ -227,6 +237,7 @@ for t in test_review_playback_worker.py \
          test_review_playback_cancel.py \
          test_review_source_startup.py \
          test_review_ui_save_feedback.py \
+         test_review_web_body_rules.py \
          test_review_net_task_faults.py \
          test_review_ha_tls.py \
          test_lot4_config_transactions.py; do

@@ -623,6 +623,28 @@ static void test_retention(void)
     free(eps);
     assert(!strstr(manifest_text(), "Gone"));
 
+    // An old manifest from ANOTHER feed (a deleted podcast whose id the web page
+    // handed out again: new ids are max+1) must not graft its downloaded
+    // episodes into this one, with or without the card, marked or not.
+    for (int absent = 0; absent < 2; absent++) {
+        refresh_setup();
+        int m = snprintf(mbuf, sizeof(mbuf), "{\"schema_version\":1,\"podcast_title\":\"Old\","
+                         "\"rss_url\":\"http://other/rss\",\"generated_at\":\"T\","
+                         "\"episodes\":[%s]}", OLD_EP("Gone") "," OLD_EP_RETAINED("Kept"));
+        put("/littlefs/podcasts/7.json", mbuf, (size_t)m);
+        put(FEED_DIR "/Gone.mp3", "x", 1);
+        put(FEED_DIR "/Kept.mp3", "x", 1);
+        sd_absent = absent;
+        refresh_ok();
+        sd_absent = false;
+        n = read_eps(&eps);
+        assert(n == 1 && strcmp(eps[0].title, "Episode") == 0);
+        free(eps);
+        assert(!strstr(manifest_text(), "retained"));
+    }
+    assert(test_remove(FEED_DIR "/Gone.mp3") == 0);
+    assert(test_remove(FEED_DIR "/Kept.mp3") == 0);
+
     // Still listed by the feed: one row, no duplicate, no marker.
     refresh_setup();
     old_manifest(OLD_EP("Episode"));
@@ -743,6 +765,52 @@ static void test_retention(void)
     free(eps);
 }
 
+// Collision suffixes must not move with the feed. A same-title pair (and an
+// untitled episode) keep their cache_path when a new episode is published
+// ahead of them: a position-based suffix moved, so the downloaded file was
+// orphaned, re-downloaded under the new name, and the retention pass carried
+// the old row over as a duplicate. One refresh per new episode, forever.
+#define ITEM(t, d, u) "<item><title>" t "</title><pubDate>" d "</pubDate>" \
+    "<enclosure url=\"http://fixture/" u "\"/></item>"
+static const char rss_pair[] = "<rss><channel><title>Feed</title>"
+    ITEM("Same", "D1", "a.mp3") ITEM("Same", "D2", "b.mp3") ITEM("", "D3", "c.mp3")
+    "</channel></rss>";
+static const char rss_pair_shifted[] = "<rss><channel><title>Feed</title>"
+    ITEM("New", "D0", "n.mp3")
+    ITEM("Same", "D1", "a.mp3") ITEM("Same", "D2", "b.mp3") ITEM("", "D3", "c.mp3")
+    "</channel></rss>";
+
+static void test_stable_collision_suffix(void)
+{
+    podcast_episode_t *eps;
+    char second[PODCAST_PATH_MAX], untitled[PODCAST_PATH_MAX];
+
+    refresh_setup();
+    net.body = rss_pair; net.len = strlen(rss_pair);
+    refresh_ok();
+    assert(read_eps(&eps) == 3);
+    assert(strcmp(eps[0].cache_path, FEED_DIR "/Same.mp3") == 0);
+    assert(strcmp(eps[1].cache_path, eps[0].cache_path) != 0);
+    strcpy(second, eps[1].cache_path);
+    strcpy(untitled, eps[2].cache_path);
+    free(eps);
+    put(second, "x", 1);    // both downloaded
+    put(untitled, "x", 1);
+
+    for (int pass = 0; pass < 2; pass++) {  // twice: the retained rows must not stack
+        net.body = rss_pair_shifted; net.len = strlen(rss_pair_shifted);
+        refresh_ok();
+        assert(read_eps(&eps) == 4);  // no duplicate row
+        assert(strcmp(eps[2].episode_url, "http://fixture/b.mp3") == 0);
+        assert(strcmp(eps[2].cache_path, second) == 0 && eps[2].cached);
+        assert(strcmp(eps[3].cache_path, untitled) == 0 && eps[3].cached);
+        free(eps);
+        assert(!strstr(manifest_text(), "retained"));
+    }
+    assert(test_remove(second) == 0);
+    assert(test_remove(untitled) == 0);
+}
+
 static void clean_tree(const char *path)
 {
     DIR *d = opendir(path);
@@ -778,6 +846,7 @@ int main(void)
     test_refresh();
     test_cache_scan();
     test_retention();
+    test_stable_collision_suffix();
     reset();
     clean_tree(root);
     puts("podcast_lot23: storage faults, trim, cache scan, refresh cancellation and retention passed");
