@@ -119,9 +119,8 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 # attached and the log ring lives in PSRAM, so it does not survive a reset: a
 # spontaneous reboot was only classifiable through reset_reason. With this, the
 # crashed task, PC and backtrace are readable afterwards over GET /api/coredump.
-# ELF format is required by esp_core_dump_get_summary().
+# esp_core_dump_get_summary() needs the ELF format, the only one since IDF 6.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 # Only a few tasks: the partition cannot grow (it would move littlefs, so a USB
 # reflash and a config reformat), a dumped task carries its whole stack (ui_play
 # alone has 16 KB), and the summary API only reports the crashed task anyway. A

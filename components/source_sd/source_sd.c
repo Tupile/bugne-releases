@@ -344,7 +344,7 @@ esp_err_t source_sd_list(const char *dir, char names[][SOURCE_SD_NAME_MAX], size
 static bool sd_safe_path(const char *rel, char *out, size_t out_size)
 {
     if (!rel) rel = "";
-    if (rel[0] == '/' || strstr(rel, "..")) {
+    if (!source_sd_rel_path_safe(rel)) {
         return false;  // no absolute paths, no parent traversal
     }
     int n = snprintf(out, out_size, "%s/%s", SD_MOUNT_POINT, rel);

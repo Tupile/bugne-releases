@@ -10,6 +10,28 @@
 #include <stdio.h>
 #include "esp_err.h"
 
+// Whether a path relative to the SD root is safe to use: not absolute, and no
+// segment made only of dots ("..", "..."). Both '/' and '\\' separate
+// segments (FatFs accepts either). A name that merely contains dots, like an
+// episode title with an ellipsis ("sympa... tique.m4a"), is allowed: a plain
+// strstr(rel, "..") used to refuse it. Shared by every source_sd path entry
+// point and by web_config's /api/playback path check.
+static inline bool source_sd_rel_path_safe(const char *rel)
+{
+    if (!rel || rel[0] == '/' || rel[0] == '\\') return false;
+    size_t dots = 0, len = 0;
+    for (const char *p = rel;; p++) {
+        if (*p == '/' || *p == '\\' || *p == '\0') {
+            if (len >= 2 && dots == len) return false;
+            if (*p == '\0') return true;
+            dots = len = 0;
+        } else {
+            len++;
+            if (*p == '.') dots++;
+        }
+    }
+}
+
 // Mount the SD card. Always returns ESP_OK so boot continues without a card;
 // use source_sd_present() to check availability.
 esp_err_t source_sd_init(void);

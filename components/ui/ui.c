@@ -633,7 +633,6 @@ static esp_err_t bl_init(void)
         .gpio_num = BOARD_LCD_BL_GPIO,
         .speed_mode = BL_LEDC_MODE,
         .channel = BL_LEDC_CHANNEL,
-        .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = BL_LEDC_TIMER,
         .duty = 0,     // attach dark: duty 0 keeps the pin at a constant low
         .hpoint = 0,

@@ -1,5 +1,4 @@
 from pathlib import Path
-import os
 import re
 import subprocess
 import tempfile
@@ -7,8 +6,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 STORE = (ROOT / 'components/config_store/config_store.c').read_text()
 WEB = (ROOT / 'components/web_config/web_config.c').read_text()
-IDF = Path(os.environ.get('IDF_PATH', Path.home() / 'esp/esp-idf'))
-CJSON = IDF / 'components/json/cJSON'
+# Registry cJSON (ESP-IDF 6 removed its json component), fetched by idf.py reconfigure.
+CJSON = ROOT / 'managed_components/espressif__cjson/cJSON'
 
 
 def function(text, name):

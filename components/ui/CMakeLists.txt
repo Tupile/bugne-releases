@@ -2,8 +2,8 @@
 idf_component_register(
     SRCS "ui.c" "lang.c" "quiet.c" "usage.c" "alarm_next.c" "epmeta.c" "fonts/bugne_font_14.c" "fonts/bugne_font_20.c" "fonts/bugne_font_48.c" "fonts/bugne_icons_28.c" "fonts/bugne_icons_20.c" "lv_mem_psram.c"
     INCLUDE_DIRS "include"
-    REQUIRES driver
-    PRIV_REQUIRES esp_lcd esp_lcd_touch esp_driver_spi esp_timer esp_app_format
+    REQUIRES esp_driver_i2c
+    PRIV_REQUIRES esp_lcd esp_lcd_touch esp_driver_spi esp_driver_ledc esp_driver_gpio esp_timer esp_app_format
                   espressif__esp_lcd_ili9341 espressif__esp_lcd_touch_ft5x06
                   espressif__esp_lvgl_port lvgl__lvgl
                   espressif__esp_jpeg

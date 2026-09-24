@@ -13,7 +13,7 @@ copy this file next to it or link to it.
 |---|---|---|---|
 | dr_mp3 | David Reid | Public domain or MIT-0 (choice) | https://github.com/mackron/dr_libs |
 | dr_flac | David Reid | Public domain or MIT-0 (choice) | https://github.com/mackron/dr_libs |
-| minimp4 | lieff | CC0 | https://github.com/lieff/minimp4 |
+| minimp4 (upstream commit 5a212a1, 2026-07-27, no release tags) | lieff | CC0 | https://github.com/lieff/minimp4 |
 | yxml | Yoran Heling | MIT | https://dev.yorhel.nl/yxml |
 | DejaVu Sans (converted bitmap font, components/ui/fonts) | DejaVu Fonts project, Bitstream Inc. | Bitstream Vera / DejaVu Fonts license | https://dejavu-fonts.github.io/ |
 | Font Awesome 5 Free Solid, 3 glyphs (converted bitmap font, components/ui/fonts/bugne_icons_*.c) | Fonticons, Inc. | SIL OFL 1.1 | https://fontawesome.com/license/free |

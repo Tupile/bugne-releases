@@ -23,8 +23,16 @@
 // AAC: the .m4a (MP4) container is demuxed by the vendored minimp4 (Radio France
 // .m4a keeps moov at the end, which only random access can parse); the AAC-LC
 // frames are decoded by the esp_audio_codec component.
+// Upstream code relies on deliberate unannotated switch fall-through, which
+// IDF 6's -Wextra rejects, and carries a few unused helpers. Silenced for the
+// vendored header only.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-function"
 #define MINIMP4_IMPLEMENTATION
 #include "minimp4.h"
+#pragma GCC diagnostic pop
 #include "esp_aac_dec.h"
 #include "esp_heap_caps.h"
 
@@ -540,7 +548,7 @@ static esp_err_t run_aac_mp4(const decode_source_t *src, uint32_t skip_ms)
         if (fbytes == 0) continue;
         // Same bound as mp4_read_cb: a sample past 2 GB would wrap negative in
         // the int cast below and fail every seek with an opaque stop.
-        if (off < 0 || off > INT32_MAX) break;
+        if (off > INT32_MAX) break;
         if (fbytes > in_cap) {
             uint8_t *nb = heap_caps_realloc(inbuf, fbytes, MALLOC_CAP_SPIRAM);
             if (!nb) break;

@@ -1,11 +1,17 @@
 # External dependencies for Bugne, resolved by the IDF component manager.
-# Versions confirmed against the ESP Component Registry on 2026-09-21.
-# Single-file libraries (dr_mp3, dr_flac, yxml, qrcodegen) are vendored into
-# their own component directories, so they are not listed here.
+# Versions confirmed against the ESP Component Registry on 2026-09-24.
+# Single-file libraries (dr_mp3, dr_flac, minimp4, yxml) are vendored into
+# their own component directories, so they are not listed here. qrcodegen
+# ships inside lvgl.
 dependencies:
-  # ESP-IDF floor. Raised to 5.5 because sendspin-cpp requires it.
+  # ESP-IDF floor. 6.1 since 2026-09 (5.5 was the sendspin-cpp minimum).
   idf:
-    version: ">=5.5"
+    version: ">=6.1"
+
+  # cJSON. ESP-IDF 6 removed its built-in json component; this is the same
+  # library from the registry.
+  espressif/cjson:
+    version: "^1.7.19"
 
   # ES8311 codec support. Mature.
   espressif/esp_codec_dev:
@@ -50,4 +56,4 @@ dependencies:
   # Music Assistant protocol. Pinned to an exact version on purpose.
   # Requires ESP-IDF >= 5.5 (the project baseline).
   sendspin/sendspin-cpp:
-    version: "==0.7.2"
+    version: "==0.8.0"

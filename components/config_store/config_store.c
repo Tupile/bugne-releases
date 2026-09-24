@@ -15,7 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "cJSON.h"
-#include "mbedtls/sha256.h"
+#include "psa/crypto.h"
 
 static const char *TAG = "config_store";
 
@@ -840,15 +840,23 @@ esp_err_t config_store_write_json(const char *json)
     return candidate_finish(scratch);
 }
 
-static void hash_password(const uint8_t *salt, const char *plain, uint8_t *out)
+static bool hash_password(const uint8_t *salt, const char *plain, uint8_t *out)
 {
-    mbedtls_sha256_context c;
-    mbedtls_sha256_init(&c);
-    mbedtls_sha256_starts(&c, 0); // 0 selects SHA-256
-    mbedtls_sha256_update(&c, salt, PW_SALT_LEN);
-    mbedtls_sha256_update(&c, (const uint8_t *)plain, strlen(plain));
-    mbedtls_sha256_finish(&c, out);
-    mbedtls_sha256_free(&c);
+    // SHA-256(salt || plain), byte-identical to the pre-IDF-6 mbedtls_sha256
+    // code, so stored hashes stay valid. psa_crypto_init is idempotent (IDF
+    // already ran it at startup).
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    size_t len = 0;
+    if (psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_setup(&op, PSA_ALG_SHA_256) != PSA_SUCCESS ||
+        psa_hash_update(&op, salt, PW_SALT_LEN) != PSA_SUCCESS ||
+        psa_hash_update(&op, (const uint8_t *)plain, strlen(plain)) != PSA_SUCCESS ||
+        psa_hash_finish(&op, out, PW_HASH_LEN, &len) != PSA_SUCCESS) {
+        psa_hash_abort(&op);
+        ESP_LOGE(TAG, "password hash failed");
+        return false;
+    }
+    return len == PW_HASH_LEN;
 }
 
 bool config_store_has_password(void)
@@ -868,7 +876,7 @@ esp_err_t config_store_set_password(const char *plain)
     uint8_t salt[PW_SALT_LEN];
     esp_fill_random(salt, sizeof(salt));
     uint8_t hash[PW_HASH_LEN];
-    hash_password(salt, plain, hash);
+    if (!hash_password(salt, plain, hash)) return ESP_FAIL;
 
     nvs_handle_t h;
     ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open failed");
@@ -909,7 +917,7 @@ esp_err_t config_store_check_password(const char *plain)
         return ESP_ERR_NOT_FOUND;
     }
     uint8_t calc[PW_HASH_LEN];
-    hash_password(salt, plain, calc);
+    if (!hash_password(salt, plain, calc)) return ESP_FAIL;  // reject, never "no password"
     // Constant-time compare to avoid leaking the hash via timing.
     uint8_t diff = 0;
     for (int i = 0; i < PW_HASH_LEN; i++) {

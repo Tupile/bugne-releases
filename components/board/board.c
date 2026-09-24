@@ -15,7 +15,7 @@ static const char *TAG = "board";
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static char s_device_id[5] = "0000";     // 4 hex chars from the MAC, plus null
-static char s_ap_password[13] = "0000000000000"; // 12 hex chars, plus null
+static char s_ap_password[13] = "000000000000";  // 12 hex chars, plus null
 
 // FNV-1a 64-bit hash, used to derive a stable per-device AP password from the
 // full MAC. Not cryptographic: the MAC is not secret, this only makes each unit

@@ -347,8 +347,8 @@ extern "C" esp_err_t source_sendspin_init(void)
 
     g_client->set_network_provider(&g_net_provider);
 
-    if (!g_client->start_server()) {
-        ESP_LOGE(TAG, "sendspin start_server failed");
+    if (!g_client->start()) {
+        ESP_LOGE(TAG, "sendspin start failed");
         return ESP_FAIL;
     }
     // mDNS is advertised by sendspin_task once the station connects (mDNS is not

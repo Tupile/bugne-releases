@@ -30,7 +30,7 @@ The firmware was developed with substantial help from AI coding assistants.
 
 Version 1.9.6. Feature-complete and validated on real hardware: display, touch,
 audio, SD card, Wi-Fi, Sendspin sync, and firmware update with rollback. It
-builds with ESP-IDF 5.5. The implemented feature set:
+builds with ESP-IDF 6.1. The implemented feature set:
 
 **Storage**
 
@@ -196,7 +196,7 @@ the case and delivers it. For the seventies model, order
 
 ## Build
 
-The build needs ESP-IDF v5.5 or newer.
+The build needs ESP-IDF v6.1 or newer.
 
 ```
 idf.py set-target esp32s3

@@ -336,7 +336,8 @@ static esp_err_t config_get(httpd_req_t *req)
 // coredump partition (see sdkconfig.defaults) and these routes read its summary
 // back: crashed task, PC, exception cause and backtrace. Feed the backtrace
 // addresses to addr2line against the matching build to get file:line.
-#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+// The summary API needs the ELF data format, the only one since IDF 6.
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 #define COREDUMP_SUPPORTED 1
 // Cached: esp_core_dump_image_check reads the whole dump from flash and checks
 // its CRC, while /api/status is polled on a timer (Home Assistant). The answer
@@ -1383,7 +1384,7 @@ static esp_err_t playback_post(httpd_req_t *req)
         else if (!strcmp(a, "path")) {
             size_t len = cJSON_IsString(value) ? strlen(value->valuestring) : 0;
             if (cJSON_IsString(value) && len > 0 && len < LIB_PATH_MAX &&
-                value->valuestring[0] != '/' && !strstr(value->valuestring, "..")) {
+                source_sd_rel_path_safe(value->valuestring)) {
                 // Optional display title (the library tag title); falls back to
                 // the file name inside ui_remote_play_path when absent.
                 const cJSON *title = cJSON_GetObjectItemCaseSensitive(root, "title");

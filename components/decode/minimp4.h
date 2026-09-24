@@ -268,9 +268,31 @@ typedef struct
     unsigned chunk_count;
     MP4D_file_offset_t *chunk_offset;
 
+    // sample_to_chunk() resume point for the last query, valid whenever a
+    // caller queries nsample in non-decreasing order (the only pattern any
+    // caller in this codebase uses -- see sample_to_chunk()'s comment).
+    unsigned stc_cache_group;
+    unsigned stc_cache_nc;
+    unsigned stc_cache_sum;
+
+    // MP4D_frame_offset()'s in-chunk byte-offset resume point -- see that
+    // function's comment. Independent of stc_cache_* above: this caches
+    // the accumulated offset *within whatever chunk the previous query
+    // landed in*, which matters even when sample_to_chunk() never has to
+    // rescan (e.g. a single giant chunk holding every sample).
+    unsigned fo_cache_valid;
+    unsigned fo_cache_nsample;
+    MP4D_file_offset_t fo_cache_offset;
+
 #if MP4D_TIMESTAMPS_SUPPORTED
     unsigned *timestamp;
     unsigned *duration;
+    // Allocated length of timestamp/duration, tracked separately from any
+    // publicly exposed sample count: a malformed file's stsz sample_count
+    // can exceed the total sample count its own stts box declared, and
+    // MP4D_frame_offset() must bound-check against what was actually
+    // allocated, not what stsz merely claims.
+    unsigned timestamp_count;
 #endif
 
 } MP4D_track_t;
@@ -2525,7 +2547,32 @@ static void my_fseek(MP4D_demux_t *mp4, boxsize_t pos, int *eof_flag)
 
 #define READ(n) read_payload(mp4, n, &payload_bytes, &eof_flag)
 #define SKIP(n) { boxsize_t t = MINIMP4_MIN(payload_bytes, n); my_fseek(mp4, t, &eof_flag); payload_bytes -= t; }
-#define MALLOC(t, p, size) p = (t)malloc(size); if (!(p)) { ERROR("out of memory"); }
+
+/**
+*   Several box handlers (stsc, stts, stco/co64, DSI/tag buffers, ...) use a
+*   count or size field read directly from the file as a malloc()/realloc()
+*   size, with no bound against how much data the file could actually back.
+*   Fuzzing the demuxer's open/parse path found multiple ~3GB and ~16GB
+*   allocation requests derived from a few hundred bytes of crafted input.
+*   Route every parse-time (re)allocation through one sanity ceiling instead
+*   of auditing (and re-auditing) each call site individually: no legitimate
+*   Hap MOV needs anywhere near this much memory for a single metadata
+*   table.
+*/
+enum { MINIMP4_MAX_ALLOC_BYTES = 256u * 1024u * 1024u };
+
+static void *minimp4_bounded_malloc(size_t size)
+{
+    if (size > MINIMP4_MAX_ALLOC_BYTES)
+        return NULL;
+    return malloc(size);
+}
+
+// A malformed file can carry the same table box (stsc, stco/co64, ...)
+// twice for one track; re-running a MALLOC for a field that's already
+// populated would leak the earlier block. free() is a no-op on NULL, so
+// this is free for the (common) single-occurrence case.
+#define MALLOC(t, p, size) { free(p); p = (t)minimp4_bounded_malloc(size); if (!(p)) { ERROR("out of memory"); } }
 
 /*
 *   On error: release resources.
@@ -2805,9 +2852,24 @@ broken_android_meta_hack:
         case BOX_stsz:
             {
                 int size = 0;
-                uint32_t sample_size = READ(4);
+                uint32_t sample_size;
+                // Hardening fix: g_fullbox[]'s use_track_flag check only
+                // hard-aborts via RETURN_ERROR at depth > 0 -- at depth 0
+                // (this box appearing with no enclosing moov/trak) ERROR()
+                // just breaks out of that unrelated lookup loop and parsing
+                // continues into this case with tr still NULL. Fuzzer
+                // found this as a null-pointer deref from a lone top-level
+                // "stsz" box.
+                if (!tr)
+                    break;
+                sample_size = READ(4);
                 tr->sample_count = READ(4);
-                MALLOC(unsigned int*, tr->entry_size, tr->sample_count*4);
+                // (uint64_t) cast: sample_count*4 as native 32-bit
+                // arithmetic can itself overflow/wrap before reaching
+                // minimp4_bounded_malloc's size check, allocating far
+                // fewer bytes than the loop below then writes -- a
+                // fuzzer-found heap-buffer-overflow.
+                MALLOC(unsigned int*, tr->entry_size, (uint64_t)tr->sample_count*4);
                 for (i = 0; i < tr->sample_count; i++)
                 {
                     if (box_name == BOX_stsz)
@@ -2840,6 +2902,9 @@ broken_android_meta_hack:
             break;
 
         case BOX_stsc:  //ISO/IEC 14496-12 Page 38. Section 8.18 - Sample To Chunk Box.
+            // Same depth-0 use_track_flag gap as BOX_stsz above.
+            if (!tr)
+                break;
             tr->sample_to_chunk_count = READ(4);
             MALLOC(MP4D_sample_to_chunk_t*, tr->sample_to_chunk, tr->sample_to_chunk_count*sizeof(tr->sample_to_chunk[0]));
             for (i = 0; i < tr->sample_to_chunk_count; i++)
@@ -2852,24 +2917,79 @@ broken_android_meta_hack:
 #if MP4D_TRACE_TIMESTAMPS || MP4D_TIMESTAMPS_SUPPORTED
         case BOX_stts:
             {
-                unsigned count = READ(4);
-                unsigned j, k = 0, ts = 0, ts_count = count;
+                unsigned count, j, k = 0, ts = 0, ts_capacity;
+                // Hardening fix: g_fullbox[] registers BOX_stts with
+                // use_track_flag=0 (no active-track requirement enforced
+                // before this case runs), but the MP4D_TIMESTAMPS_SUPPORTED
+                // branch below unconditionally writes through tr -- a
+                // top-level "stts" box with no enclosing trak (tr still
+                // NULL) reaches this with no track allocated yet. Fuzzer
+                // found this as a null-pointer deref from an 8-byte file.
+                if (!tr)
+                    break;
+                count = READ(4);
+                ts_capacity = count;
 #if MP4D_TIMESTAMPS_SUPPORTED
-                MALLOC(unsigned int*, tr->timestamp, ts_count*4);
-                MALLOC(unsigned int*, tr->duration, ts_count*4);
+                // (uint64_t) cast: same native-arithmetic-overflow gap as
+                // BOX_stsz's entry_size MALLOC above, on this box's own
+                // unbounded, file-declared count.
+                MALLOC(unsigned int*, tr->timestamp, (uint64_t)ts_capacity*4);
+                MALLOC(unsigned int*, tr->duration, (uint64_t)ts_capacity*4);
+                tr->timestamp_count = 0;
 #endif
 
                 for (i = 0; i < count; i++)
                 {
                     unsigned sc = READ(4);
                     int d =  READ(4);
+                    uint64_t new_k = (uint64_t)k + sc; // avoid 32-bit wraparound below
                     TRACE(("sample %8d count %8d duration %8d\n", i, sc, d));
 #if MP4D_TIMESTAMPS_SUPPORTED
-                    if (k + sc > ts_count)
+                    if (new_k > ts_capacity)
                     {
-                        ts_count = k + sc;
-                        tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_count * sizeof(unsigned));
-                        tr->duration  = (unsigned int*)realloc(tr->duration,  ts_count * sizeof(unsigned));
+                        // sc is an attacker-controlled per-entry sample
+                        // count; k + sc as plain "unsigned" arithmetic can
+                        // wrap past ts_capacity, skipping this resize while
+                        // the write loop below still walks `sc` entries --
+                        // a fuzzer-found heap-buffer-overflow. Widening the
+                        // addition avoids the wrap.
+                        //
+                        // Growing to exactly new_k on every entry (rather
+                        // than with slack) meant a file with many entries
+                        // that each grow the running total by only a
+                        // little forced a full realloc -- and full copy --
+                        // on every single one: a fuzzer-found multi-second
+                        // "realloc thrashing" hang distinct from a single
+                        // oversized allocation. Double capacity instead
+                        // (still bounded to MINIMP4_MAX_ALLOC_BYTES, which
+                        // is what catches the ~16GB single-request case
+                        // fuzzing also found), same amortized-growth
+                        // rationale as std::vector.
+                        //
+                        // Checking the bound *before* reallocating matters
+                        // too: rejecting after the fact would mean
+                        // overwriting one perfectly good pointer (from the
+                        // MALLOC above) with the other realloc's NULL
+                        // result, leaking the one that had succeeded.
+                        // Leaving both pointers untouched on rejection lets
+                        // MP4D_close() free them normally, same as any
+                        // other error path.
+                        uint64_t new_capacity = (uint64_t)ts_capacity * 2;
+                        if (new_capacity < new_k)
+                            new_capacity = new_k;
+                        if (new_capacity * sizeof(unsigned) > MINIMP4_MAX_ALLOC_BYTES)
+                            new_capacity = MINIMP4_MAX_ALLOC_BYTES / sizeof(unsigned);
+                        if (new_capacity < new_k)
+                        {
+                            ERROR("out of memory");
+                        }
+                        ts_capacity = (unsigned)new_capacity;
+                        tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_capacity * sizeof(unsigned));
+                        tr->duration  = (unsigned int*)realloc(tr->duration,  ts_capacity * sizeof(unsigned));
+                        if (!tr->timestamp || !tr->duration)
+                        {
+                            ERROR("out of memory");
+                        }
                     }
                     for (j = 0; j < sc; j++)
                     {
@@ -2877,6 +2997,7 @@ broken_android_meta_hack:
                         tr->timestamp[k++] = ts;
                         ts += d;
                     }
+                    tr->timestamp_count = k;
 #endif
                 }
             }
@@ -2886,8 +3007,19 @@ broken_android_meta_hack:
                 unsigned count = READ(4);
                 for (i = 0; i < count; i++)
                 {
-                    int sc = READ(4);
-                    int d =  READ(4);
+                    int sc, d;
+                    // count is an unbounded, file-declared value with no
+                    // backing allocation to size-check against (unlike
+                    // stsz/stsc/stco/stts above); once the box's actual
+                    // payload is exhausted, READ() keeps returning
+                    // zero-padding forever rather than stopping the loop,
+                    // so a file can claim ~4 billion entries in a few
+                    // bytes on disk. Fuzzer found this as a multi-second
+                    // hang (pure wasted CPU, not memory-unsafe on its own).
+                    if (payload_bytes == 0)
+                        break;
+                    sc = READ(4);
+                    d =  READ(4);
                     (void)sc;
                     (void)d;
                     TRACE(("sample %8d count %8d decoding to composition offset %8d\n", i, sc, d));
@@ -2897,6 +3029,9 @@ broken_android_meta_hack:
 #endif
         case BOX_stco:  //ISO/IEC 14496-12 Page 39. Section 8.19 - Chunk Offset Box.
         case BOX_co64:
+            // Same depth-0 use_track_flag gap as BOX_stsz above.
+            if (!tr)
+                break;
             tr->chunk_count = READ(4);
             MALLOC(MP4D_file_offset_t*, tr->chunk_offset, tr->chunk_count*sizeof(MP4D_file_offset_t));
             for (i = 0; i < tr->chunk_count; i++)
@@ -2926,6 +3061,9 @@ broken_android_meta_hack:
             break;
 
         case BOX_mdhd:
+            // Same depth-0 use_track_flag gap as BOX_stsz above.
+            if (!tr)
+                break;
             SKIP(((FullAtomVersionAndFlags >> 24) == 1) ? 8 + 8 : 4 + 4);
             tr->timescale = READ(4);
             tr->duration_hi = ((FullAtomVersionAndFlags >> 24) == 1) ? READ(4) : 0;
@@ -3028,8 +3166,17 @@ broken_android_meta_hack:
         case BOX_avcC:  // AVCDecoderConfigurationRecord()
             // hack: AAC-specific DSI field reused (for it have same purpoose as sps/pps)
             // TODO: check this hack if BOX_esds co-exist with BOX_avcC
+            // Hardening fix: unlike its sibling cases (mp4s/mp4a/avc1/mp4v),
+            // this one had no tr-null guard at all -- a lone top-level
+            // "avcC" box reaches this with tr still NULL.
+            if (!tr)
+                break;
             tr->object_type_indication = MP4_OBJECT_TYPE_AVC;
-            tr->dsi = (unsigned char*)malloc((size_t)box_bytes);
+            tr->dsi = (unsigned char*)minimp4_bounded_malloc((size_t)box_bytes);
+            if (!tr->dsi)
+            {
+                ERROR("out of memory");
+            }
             tr->dsi_bytes = (unsigned)box_bytes;
             {
                 int spspps;
@@ -3091,7 +3238,13 @@ broken_android_meta_hack:
             }
 
         case OD_DCD:        //ISO/IEC 14496-1 Page 28. Section 8.6.5 - DecoderConfigDescriptor.
-            assert(tr);     // ensured by g_fullbox[] check
+            // g_fullbox[] doesn't actually gate OD_DCD/OD_DSI (that table
+            // covers ISOBMFF full boxes, not MPEG-4 object descriptors), so
+            // a DecoderConfigDescriptor/DecSpecificInfo can be reached with
+            // no active track (asserts are compiled out under NDEBUG) --
+            // hardening fix for a fuzzer-found null-pointer deref.
+            if (!tr)
+                break;
             tr->object_type_indication = READ(1);
 #if MP4D_INFO_SUPPORTED
             tr->stream_type = READ(1) >> 2;
@@ -3103,10 +3256,18 @@ broken_android_meta_hack:
             break;
 
         case OD_DSI:        //ISO/IEC 14496-1 Page 28. Section 8.6.5 - DecoderConfigDescriptor.
-            assert(tr);     // ensured by g_fullbox[] check
+            if (!tr)
+                break;
             if (!tr->dsi && payload_bytes)
             {
-                MALLOC(unsigned char*, tr->dsi, (int)payload_bytes);
+                // (uint64_t) cast, not (int): truncating a large
+                // payload_bytes to int before minimp4_bounded_malloc's
+                // size check can produce a small (or, if negative,
+                // implementation-defined-but-typically-huge-when-
+                // reinterpreted-as-size_t) allocation while the write loop
+                // below still walks the untruncated payload_bytes count --
+                // a fuzzer-found heap-buffer-overflow.
+                MALLOC(unsigned char*, tr->dsi, (uint64_t)payload_bytes);
                 for (i = 0; i < payload_bytes; i++)
                 {
                     tr->dsi[i] = minimp4_read(mp4, 1, &eof_flag);    // These bytes available due to check above
@@ -3133,7 +3294,9 @@ broken_android_meta_hack:
 #else
             SKIP(4 + 4 + 4 + 4);
 #endif
-            MALLOC(unsigned char*, *ptag, (unsigned)payload_bytes + 1);
+            // (uint64_t) cast: same truncate-before-size-check gap as
+            // OD_DSI's dsi buffer above.
+            MALLOC(unsigned char*, *ptag, (uint64_t)payload_bytes + 1);
             for (i = 0; payload_bytes != 0; i++)
             {
                 (*ptag)[i] = READ(1);
@@ -3212,14 +3375,55 @@ broken_android_meta_hack:
 */
 static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_sample_in_chunk)
 {
-    unsigned chunk_group = 0, nc;
-    unsigned sum = 0;
+    unsigned chunk_group, nc, sum;
     *nfirst_sample_in_chunk = 0;
-    if (tr->chunk_count <= 1)
+    if (tr->chunk_count == 0)
+    {
+        // Hardening fix: a track can declare samples (stsz) with no chunk
+        // offset table (missing/empty stco/co64) in a malformed file. The
+        // original "<= 1" fast path treated this the same as the legitimate
+        // single-chunk case and returned chunk 0, which made callers index
+        // into a chunk_offset array that was never allocated.
+        return -1;
+    }
+    if (tr->chunk_count == 1)
     {
         return 0;
     }
-    for (nc = 0; nc < tr->chunk_count; nc++)
+    if (!tr->sample_to_chunk || tr->sample_to_chunk_count == 0)
+    {
+        // Hardening fix: a track can have a stco/co64 (chunk_count > 1)
+        // with no stsc box at all (tr->sample_to_chunk NULL), or a stsc
+        // box declaring zero entries. The loop below dereferences
+        // tr->sample_to_chunk[chunk_group] unconditionally on its very
+        // first iteration regardless of tr->sample_to_chunk_count --
+        // fuzzer found the NULL case as a null-pointer deref.
+        return -1;
+    }
+
+    // Sequential demuxing queries nsample in strictly increasing order,
+    // once per sample -- rescanning from nc=0 every time (the original
+    // behavior, and its own "TODO: this can be calculated once per file"
+    // above) makes a full demux O(chunk_count * sample_count). Fuzzing
+    // found this as a multi-second hang from a crafted file with a
+    // large-but-not-otherwise-invalid chunk count. Resume from the last
+    // call's stopping point whenever this query doesn't need to look
+    // earlier than it did.
+    if (nsample >= tr->stc_cache_sum && tr->stc_cache_nc < tr->chunk_count)
+    {
+        chunk_group = tr->stc_cache_group;
+        nc = tr->stc_cache_nc;
+        sum = tr->stc_cache_sum;
+        *nfirst_sample_in_chunk = sum;
+    }
+    else
+    {
+        chunk_group = 0;
+        nc = 0;
+        sum = 0;
+    }
+
+    for (; nc < tr->chunk_count; nc++)
     {
         if (chunk_group + 1 < tr->sample_to_chunk_count     // stuck at last entry till EOF
             && nc + 1 ==    // Chunks counted starting with '1'
@@ -3230,11 +3434,19 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
 
         sum += tr->sample_to_chunk[chunk_group].samples_per_chunk;
         if (nsample < sum)
+        {
+            tr->stc_cache_group = chunk_group;
+            tr->stc_cache_nc = nc + 1;
+            tr->stc_cache_sum = sum;
             return nc;
+        }
 
-        // TODO: this can be calculated once per file
         *nfirst_sample_in_chunk = sum;
     }
+
+    tr->stc_cache_group = chunk_group;
+    tr->stc_cache_nc = nc;
+    tr->stc_cache_sum = sum;
     return -1;
 }
 
@@ -3246,13 +3458,39 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     int nchunk = sample_to_chunk(tr, nsample, &ns);
     MP4D_file_offset_t offset;
 
-    if (nchunk < 0)
+    if (nchunk < 0 || !tr->chunk_offset || !tr->entry_size)
     {
+        // Hardening fix: chunk_count/sample_count and their matching
+        // chunk_offset/entry_size arrays are set together within a single
+        // box handler, but a malformed file can hit that handler's
+        // out-of-memory ERROR() path (e.g. a duplicate stco/stsz declaring
+        // an oversized count the second time around) after already
+        // free()-ing the previous, valid allocation -- and, at depth 0,
+        // ERROR() doesn't actually abort the parse (see the box handlers'
+        // own comments on this), so a later chunk_count/sample_count can
+        // end up numerically valid while its array stayed NULL. Fuzzer
+        // found this as a null-pointer deref.
         *frame_bytes = 0;
         return 0;
     }
 
-    offset = tr->chunk_offset[nchunk];
+    // Resuming from a per-track cache the same way sample_to_chunk() does
+    // above: summing entry_size from the chunk's first sample up to
+    // `nsample` on every single call makes a demux with a few large chunks
+    // (e.g. one giant chunk holding every sample) O(chunk_size^2) even
+    // though sample_to_chunk() itself never has to rescan in that case.
+    // Fuzzing found this as a multi-second hang distinct from (and not
+    // fixed by) the sample_to_chunk() memoization.
+    if (tr->fo_cache_valid && nsample == tr->fo_cache_nsample + 1 && ns <= tr->fo_cache_nsample)
+    {
+        offset = tr->fo_cache_offset;
+        ns = nsample;
+    }
+    else
+    {
+        offset = tr->chunk_offset[nchunk];
+    }
+
     for (; ns < nsample; ns++)
     {
         offset += tr->entry_size[ns];
@@ -3260,10 +3498,20 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
 
     *frame_bytes = tr->entry_size[ns];
 
+    tr->fo_cache_valid = 1;
+    tr->fo_cache_nsample = nsample;
+    tr->fo_cache_offset = offset + tr->entry_size[ns];
+
     if (timestamp)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *timestamp = tr->timestamp[ns];
+        // Hardening fix: a track can have samples (from stsz) but no stts
+        // box at all, leaving tr->timestamp/tr->duration NULL from the
+        // MP4D_track_t's zero-init; or a malformed file's stsz sample_count
+        // can simply exceed the total sample count its own stts box
+        // declared, leaving `ns` past the end of both arrays even though
+        // they're non-NULL. Fuzzer found both as reads on a malformed file.
+        *timestamp = (tr->timestamp && ns < tr->timestamp_count) ? tr->timestamp[ns] : 0;
 #else
         *timestamp = 0;
 #endif
@@ -3271,7 +3519,7 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     if (duration)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *duration = tr->duration[ns];
+        *duration = (tr->duration && ns < tr->timestamp_count) ? tr->duration[ns] : 0;
 #else
         *duration = 0;
 #endif

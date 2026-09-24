@@ -20,6 +20,17 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_rss_parse"
 
+echo "=== building sd_path host tests ==="
+# The real source_sd.h comes first so the podcast stub of the same name in
+# stubs/ does not shadow it; stubs/ only provides esp_err.h.
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/source_sd/include -I stubs \
+    -o "$OUT/test_sd_path" \
+    test_sd_path.c
+
+echo "=== running ==="
+"$OUT/test_sd_path"
+
 echo "=== building quiet host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -208,7 +219,10 @@ echo "=== building podcast storage/cancellation tests ==="
 # cache scan and every cancellation point can be driven deterministically.
 # podcast_lot23_stubs/ provides the ESP headers; stubs/podcast.h must NOT be on
 # the include path here (it would shadow the real podcast.h).
-CJSON="${IDF_PATH:-$HOME/esp/esp-idf}/components/json/cJSON"
+# cJSON comes from the registry since ESP-IDF 6 (espressif/cjson), fetched into
+# managed_components/ by the first idf.py reconfigure or build.
+CJSON="../../managed_components/espressif__cjson/cJSON"
+[ -f "$CJSON/cJSON.c" ] || { echo "missing $CJSON: run idf.py reconfigure first"; exit 1; }
 LOT23_INC="$OUT/lot23_inc"
 rm -rf "$LOT23_INC"; mkdir -p "$LOT23_INC"
 for f in stubs/*; do
