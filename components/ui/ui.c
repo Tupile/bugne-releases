@@ -136,6 +136,7 @@ static int s_limit_warn_date;      // yyyymmdd of the last "5 minutes left" warn
 static lv_style_t s_th_scr;                                        // screen wash
 static lv_style_t s_th_btn, s_th_btn_pr, s_th_btn_dis;             // plain buttons
 static lv_style_t s_th_list, s_th_row, s_th_row_pr;                // lists + rounded rows
+static lv_style_t s_th_lrow, s_th_lrow_pr, s_th_ltext;             // list_add_row/_text only
 static lv_style_t s_th_table, s_th_table_items;                    // episodes table
 static lv_style_t s_th_btnm, s_th_btnm_items, s_th_btnm_items_pr;  // game keypad
 static lv_style_t s_th_muted;                                      // secondary text, see muted()
@@ -152,7 +153,7 @@ static lv_style_t *const THEME_STYLES[] = {
     &s_th_row_pr, &s_th_table, &s_th_table_items, &s_th_btnm, &s_th_btnm_items,
     &s_th_btnm_items_pr, &s_th_muted, &s_tile, &s_tile_pr, &s_tile_dis,
     &s_round_accent, &s_round_accent_pr, &s_round_surface, &s_round_surface_pr,
-    &s_chip_ck,
+    &s_chip_ck, &s_th_lrow, &s_th_lrow_pr, &s_th_ltext,
 };
 #define THEME_STYLE_COUNT ((int)(sizeof(THEME_STYLES) / sizeof(THEME_STYLES[0])))
 
@@ -814,9 +815,9 @@ static lv_color_t col_muted(void)      { return th_dark() ? lv_color_hex(0x9AA0A
 // per-theme layer. Screens (no parent) get the wash; buttons, list rows,
 // tables and buttonmatrices get the "playful tiles" look. Builder-set local
 // styles (e.g. the theme picker swatches) still override this layer.
-// lv_obj_check_type matches the exact class, so plain buttons and the derived
-// lv_list_button_class rows get distinct styles (rows must stay readable, not
-// white-on-accent).
+// lv_obj_check_type matches the exact class. List rows are plain buttons, so
+// list_add_row strips this layer and attaches the row styles itself (rows must
+// stay readable, not white-on-accent).
 static void bugne_theme_apply(lv_theme_t *th, lv_obj_t *obj)
 {
     (void)th;
@@ -826,11 +827,6 @@ static void bugne_theme_apply(lv_theme_t *th, lv_obj_t *obj)
         lv_obj_add_style(obj, &s_th_btn, 0);
         lv_obj_add_style(obj, &s_th_btn_pr, LV_STATE_PRESSED);
         lv_obj_add_style(obj, &s_th_btn_dis, LV_STATE_DISABLED);
-    } else if (lv_obj_check_type(obj, &lv_list_button_class)) {
-        lv_obj_add_style(obj, &s_th_row, 0);
-        lv_obj_add_style(obj, &s_th_row_pr, LV_STATE_PRESSED);
-    } else if (lv_obj_check_type(obj, &lv_list_class)) {
-        lv_obj_add_style(obj, &s_th_list, 0);
     } else if (lv_obj_check_type(obj, &lv_table_class)) {
         lv_obj_add_style(obj, &s_th_table, 0);
         lv_obj_add_style(obj, &s_th_table_items, LV_PART_ITEMS);
@@ -896,6 +892,21 @@ static void apply_theme(bool dark, int accent)
     lv_style_set_pad_ver(&s_th_row, 14);
     lv_style_set_pad_hor(&s_th_row, 14);
     lv_style_set_bg_color(&s_th_row_pr, surface_pr);
+    // What the default theme gave the deprecated lv_list classes and our
+    // layer above does not override (lv_theme_default.c list_bg, list_btn,
+    // pressed, list_item_grow, bg_color_grey), so list_create/list_add_row/
+    // list_add_text render exactly like lv_list did.
+    lv_style_set_pad_ver(&s_th_list, 0);
+    lv_style_set_pad_column(&s_th_list, 0);
+    lv_style_set_clip_corner(&s_th_list, true);
+    lv_style_set_pad_column(&s_th_lrow, lv_dpx(10));
+    lv_style_set_recolor(&s_th_lrow_pr, lv_color_black());
+    lv_style_set_recolor_opa(&s_th_lrow_pr, 35);
+    lv_style_set_transform_width(&s_th_lrow_pr, lv_dpx(16));
+    lv_style_set_bg_color(&s_th_ltext, dark ? lv_color_hex(0x2f3237)
+                                            : lv_palette_lighten(LV_PALETTE_GREY, 2));
+    lv_style_set_bg_opa(&s_th_ltext, LV_OPA_COVER);
+    lv_style_set_transform_width(&s_th_ltext, lv_dpx(16));
 
     // Episodes table: flat with hairline separators (an lv_table cannot do
     // per-row cards; see ep_table_draw_cb for the offline greying).
@@ -1938,10 +1949,10 @@ static void sleep_label_refresh(void)
 {
     if (!s_sleep_lbl) return;
     if (s_sleep_choice == 0) {
-        lv_obj_add_flag(s_sleep_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_hidden(s_sleep_lbl, true);
         return;
     }
-    lv_obj_remove_flag(s_sleep_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_hidden(s_sleep_lbl, false);
     char buf[24];
     if (s_sleep_end_of_track) {
         strlcpy(buf, T(STR_SLEEP_REMAIN_EOT), sizeof(buf));
@@ -2192,7 +2203,7 @@ static void build_now_playing(lv_obj_t *scr)
             lv_obj_add_event_cb(prog, on_seek_pressed, LV_EVENT_PRESSED, NULL);
             lv_obj_add_event_cb(prog, on_seek_released, LV_EVENT_RELEASED, NULL);
         } else {
-            lv_obj_remove_flag(prog, LV_OBJ_FLAG_CLICKABLE);  // read-only bar
+            lv_obj_set_clickable(prog, false);  // read-only bar
             // Visual cue that this one cannot seek: hide the drag knob.
             lv_obj_set_style_bg_opa(prog, LV_OPA_TRANSP, LV_PART_KNOB);
         }
@@ -2327,10 +2338,10 @@ static void on_ss_seek_released(lv_event_t *e)
 static void ss_apply_seekable(lv_obj_t *slider, bool seekable)
 {
     if (seekable) {
-        lv_obj_add_flag(slider, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_clickable(slider, true);
         lv_obj_set_style_bg_opa(slider, LV_OPA_COVER, LV_PART_KNOB);
     } else {
-        lv_obj_remove_flag(slider, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_clickable(slider, false);
         lv_obj_set_style_bg_opa(slider, LV_OPA_TRANSP, LV_PART_KNOB);
     }
 }
@@ -2462,7 +2473,7 @@ static void ss_refresh(void)
         // Follow the server's per-track seek offer (edge-triggered on the
         // clickable flag so the styles are not rewritten every tick).
         bool seekable = source_sendspin_seek_max() > 0;
-        if (seekable != lv_obj_has_flag(s_ss_bar, LV_OBJ_FLAG_CLICKABLE)) {
+        if (seekable != lv_obj_is_clickable(s_ss_bar)) {
             ss_apply_seekable(s_ss_bar, seekable);
         }
         if (!s_ss_seeking) {
@@ -2515,10 +2526,54 @@ static void on_webradio(lv_event_t *e)
     }
 }
 
+// Lists. LVGL 9.6 deprecates lv_list; these three rebuild it one to one (same
+// structure, same default-theme styles via s_th_lrow/_pr/_ltext) so the screens
+// render exactly as before. A plain container gets the same default-theme card
+// and scrollbar styles lv_list_class got.
+static lv_obj_t *list_create(lv_obj_t *parent)
+{
+    lv_obj_t *list = lv_obj_create(parent);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_style(list, &s_th_list, 0);
+    return list;
+}
+
+// icon: an LV_SYMBOL_* string or NULL. The label is the last child (see
+// list_titles_static).
+static lv_obj_t *list_add_row(lv_obj_t *list, const char *icon, const char *txt)
+{
+    lv_obj_t *row = lv_button_create(list);
+    lv_obj_remove_style_all(row);  // drop the plain-button accent look
+    lv_obj_add_style(row, &s_th_lrow, 0);
+    lv_obj_add_style(row, &s_th_row, 0);
+    lv_obj_add_style(row, &s_th_lrow_pr, LV_STATE_PRESSED);
+    lv_obj_add_style(row, &s_th_row_pr, LV_STATE_PRESSED);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    if (icon) {
+        lv_obj_t *img = lv_image_create(row);
+        lv_image_set_src(img, icon);
+    }
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, txt);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);  // as lv_list did
+    lv_obj_set_flex_grow(label, 1);
+    return row;
+}
+
+static lv_obj_t *list_add_text(lv_obj_t *list, const char *txt)
+{
+    lv_obj_t *label = lv_label_create(list);
+    lv_obj_add_style(label, &s_th_ltext, 0);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_label_set_text(label, txt);
+    return label;
+}
+
 // Row titles in lists are statically truncated with an ellipsis. By default
-// LVGL gives list-button labels a continuous circular scroll animation; with
-// many long rows that keeps the render task busy and looks visually busy, which
-// is what made long lists feel sluggish. We turn it off so every row shows a
+// list_add_row (like lv_list before it) gives labels a continuous circular
+// scroll animation; with many long rows that keeps the render task busy and
+// looks visually busy, which is what made long lists feel sluggish. We turn it off so every row shows a
 // fixed, truncated title: consistent whether the list is idle or scrolling.
 static void list_titles_static(lv_obj_t *list)
 {
@@ -2538,12 +2593,12 @@ static void build_webradios(lv_obj_t *scr)
         empty_state_label(scr, STR_NO_WEBRADIOS);
         return;
     }
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);  // last row scrolls clear of the floating mini bar
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     for (size_t i = 0; c && i < c->webradio_count; i++) {
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_AUDIO, c->webradios[i].name);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_AUDIO, c->webradios[i].name);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_webradio, LV_EVENT_CLICKED, NULL);
     }
@@ -3003,7 +3058,7 @@ static void show_resume_modal(void)
     lv_obj_set_style_border_width(backdrop, 0, 0);
     lv_obj_set_style_radius(backdrop, 0, 0);
     lv_obj_align(backdrop, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(backdrop, true);
     lv_obj_add_event_cb(backdrop, on_backdrop_clicked, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *modal = lv_obj_create(backdrop);
@@ -3014,7 +3069,7 @@ static void show_resume_modal(void)
     lv_obj_set_style_radius(modal, RADIUS_BTN, 0);
     lv_obj_set_style_pad_all(modal, 16, 0);
     lv_obj_align(modal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_remove_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(modal, false);
 
     lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -3073,7 +3128,7 @@ static void show_resume_modal(void)
 
     // Close button (X) in top right
     lv_obj_t *close_btn = lv_button_create(modal);
-    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_floating(close_btn, true);
     lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -4, 4);
     lv_obj_set_size(close_btn, 24, 24);
     lv_obj_set_style_bg_opa(close_btn, LV_OPA_TRANSP, 0);
@@ -3166,19 +3221,19 @@ static void build_sd(lv_obj_t *scr)
         source_sd_browse(s_sd_dir, s_sd_entries, SD_BROWSE_MAX, &s_sd_entry_count, false);
     }
 
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);  // last row scrolls clear of the floating mini bar
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
 
     if (s_sd_dir[0]) {  // a way back to the parent folder
-        lv_obj_t *up = lv_list_add_button(list, LV_SYMBOL_LEFT, "..");
+        lv_obj_t *up = list_add_row(list, LV_SYMBOL_LEFT, "..");
         lv_obj_add_event_cb(up, on_sd_up, LV_EVENT_CLICKED, NULL);
     }
     // Folders first (tap to enter).
     for (size_t i = 0; i < s_sd_entry_count; i++) {
         if (!s_sd_entries[i].is_dir) continue;
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_DIRECTORY, s_sd_entries[i].name);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_DIRECTORY, s_sd_entries[i].name);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_sd_dir, LV_EVENT_CLICKED, NULL);
     }
@@ -3189,7 +3244,7 @@ static void build_sd(lv_obj_t *scr)
         if (s_sd_entries[i].is_dir) { shown++; continue; }
         if (!sd_playable(s_sd_entries[i].name)) continue;
         strlcpy(s_sd_names[s_sd_count], s_sd_entries[i].name, SOURCE_SD_NAME_MAX);
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_FILE, s_sd_names[s_sd_count]);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_FILE, s_sd_names[s_sd_count]);
         lv_obj_set_user_data(btn, (void *)(intptr_t)s_sd_count);
         lv_obj_add_event_cb(btn, on_sd_file, LV_EVENT_CLICKED, NULL);
         s_sd_count++;
@@ -3198,7 +3253,7 @@ static void build_sd(lv_obj_t *scr)
     if (shown == 0) {
         // Nothing visible (no subfolders, no playable files): say so instead of
         // leaving a blank frame.
-        lv_list_add_text(list, T(STR_EMPTY_FOLDER));
+        list_add_text(list, T(STR_EMPTY_FOLDER));
     }
     list_titles_static(list);
 }
@@ -3290,12 +3345,12 @@ static void on_lib_track(lv_event_t *e)
 // Render a list of s_lib_names (artists or albums) as tappable buttons.
 static void lib_list_names(lv_obj_t *scr, lv_event_cb_t cb)
 {
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     for (size_t i = 0; i < s_lib_name_count; i++) {
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_AUDIO, s_lib_names[i]);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_AUDIO, s_lib_names[i]);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
     }
@@ -3371,12 +3426,12 @@ static void build_library_tracks(lv_obj_t *scr)
     if (!lib_alloc()) return;
     s_lib_track_count = library_album_tracks(s_lib_artist, s_lib_album,
                                              s_lib_titles, s_lib_paths, LIB_DISP_MAX);
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     for (size_t i = 0; i < s_lib_track_count; i++) {
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_FILE, s_lib_titles[i]);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_FILE, s_lib_titles[i]);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_lib_track, LV_EVENT_CLICKED, NULL);
     }
@@ -3570,7 +3625,7 @@ static void build_episodes(lv_obj_t *scr)
     lv_obj_add_event_cb(list, on_episode, LV_EVENT_VALUE_CHANGED, NULL);
     // Offline greying of non-downloaded rows (no-op while connected).
     lv_obj_add_event_cb(list, ep_table_draw_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
-    lv_obj_add_flag(list, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    lv_obj_set_send_draw_task_events(list, true);
     lv_obj_move_foreground(msg);  // the status line draws over the table
 }
 
@@ -3597,12 +3652,12 @@ static void build_podcasts(lv_obj_t *scr)
         empty_state_label(scr, STR_NO_PODCASTS);
         return;
     }
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);  // last row scrolls clear of the floating mini bar
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     for (size_t i = 0; c && i < c->podcast_count; i++) {
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_LIST, c->podcasts[i].title);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_LIST, c->podcasts[i].title);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_podcast, LV_EVENT_CLICKED, NULL);
     }
@@ -4029,7 +4084,7 @@ static void build_game_setup(lv_obj_t *scr)
     lv_obj_t *row_tbl = lv_obj_create(content);
     lv_obj_set_width(row_tbl, LV_PCT(100));
     lv_obj_set_height(row_tbl, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(row_tbl, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(row_tbl, false);
     lv_obj_set_style_bg_opa(row_tbl, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row_tbl, 0, 0);
     lv_obj_set_flex_flow(row_tbl, LV_FLEX_FLOW_ROW_WRAP);
@@ -4039,7 +4094,7 @@ static void build_game_setup(lv_obj_t *scr)
     for (int i = 0; i < 10; i++) {
         lv_obj_t *chip = lv_button_create(row_tbl);
         lv_obj_set_size(chip, 40, 40);
-        lv_obj_add_flag(chip, LV_OBJ_FLAG_CHECKABLE);
+        lv_obj_set_checkable(chip, true);
         lv_obj_add_style(chip, &s_round_surface, 0);
         lv_obj_add_style(chip, &s_round_surface_pr, LV_STATE_PRESSED);
         lv_obj_add_style(chip, &s_chip_ck, LV_STATE_CHECKED);
@@ -4058,7 +4113,7 @@ static void build_game_setup(lv_obj_t *scr)
     lv_obj_set_height(rev_chip, 40);
     lv_obj_set_width(rev_chip, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_hor(rev_chip, 10, 0);
-    lv_obj_add_flag(rev_chip, LV_OBJ_FLAG_CHECKABLE);
+    lv_obj_set_checkable(rev_chip, true);
     lv_obj_add_style(rev_chip, &s_round_surface, 0);
     lv_obj_add_style(rev_chip, &s_round_surface_pr, LV_STATE_PRESSED);
     lv_obj_add_style(rev_chip, &s_chip_ck, LV_STATE_CHECKED);
@@ -4729,16 +4784,16 @@ static void build_memo_record(lv_obj_t *scr)
         } else if (s_memo_peer_count == 0) {
             empty_state_label(scr, STR_MEMO_NO_PEERS);
         } else {
-            lv_obj_t *list = lv_list_create(scr);
+            lv_obj_t *list = list_create(scr);
             lv_obj_set_size(list, scr_w(), scr_h() - 56);
             lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
             if (s_memo_peer_count > 1) {
-                lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_UPLOAD, T(STR_MEMO_SEND_ALL));
+                lv_obj_t *btn = list_add_row(list, LV_SYMBOL_UPLOAD, T(STR_MEMO_SEND_ALL));
                 lv_obj_set_user_data(btn, (void *)(intptr_t)-1);
                 lv_obj_add_event_cb(btn, on_memo_peer, LV_EVENT_CLICKED, NULL);
             }
             for (int i = 0; i < s_memo_peer_count; i++) {
-                lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_UPLOAD, s_memo_peers[i].name);
+                lv_obj_t *btn = list_add_row(list, LV_SYMBOL_UPLOAD, s_memo_peers[i].name);
                 lv_obj_set_user_data(btn, (void *)(intptr_t)i);
                 lv_obj_add_event_cb(btn, on_memo_peer, LV_EVENT_CLICKED, NULL);
             }
@@ -4872,7 +4927,7 @@ static void build_memos(lv_obj_t *scr)
         empty_state_label(scr, STR_MEMO_EMPTY);
         return;
     }
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the round corner buttons
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
@@ -4884,7 +4939,7 @@ static void build_memos(lv_obj_t *scr)
                  en->duration_s / 60, en->duration_s % 60);
         const char *icon = en->unread ? LV_SYMBOL_BELL
                          : en->is_mine ? LV_SYMBOL_AUDIO : LV_SYMBOL_ENVELOPE;
-        lv_obj_t *btn = lv_list_add_button(list, icon, line);
+        lv_obj_t *btn = list_add_row(list, icon, line);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_memo_row, LV_EVENT_CLICKED, NULL);
     }
@@ -5003,11 +5058,11 @@ static void build_talkie(lv_obj_t *scr)
         } else if (s_memo_peer_count == 0) {
             empty_state_label(scr, STR_MEMO_NO_PEERS);
         } else {
-            lv_obj_t *list = lv_list_create(scr);
+            lv_obj_t *list = list_create(scr);
             lv_obj_set_size(list, scr_w(), scr_h() - 56);
             lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
             for (int i = 0; i < s_memo_peer_count; i++) {
-                lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_CALL, s_memo_peers[i].name);
+                lv_obj_t *btn = list_add_row(list, LV_SYMBOL_CALL, s_memo_peers[i].name);
                 lv_obj_set_user_data(btn, (void *)(intptr_t)i);
                 lv_obj_add_event_cb(btn, on_talkie_peer, LV_EVENT_CLICKED, NULL);
             }
@@ -5111,7 +5166,7 @@ static void build_favorites(lv_obj_t *scr)
         empty_state_label(scr, STR_NO_FAVORITES);
         return;
     }
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);  // last row scrolls clear of the mini bar
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
@@ -5122,7 +5177,7 @@ static void build_favorites(lv_obj_t *scr)
         const char *title = f->title[0] ? f->title
                           : (f->type == 0) ? (r ? r->name : "?")
                           : (slash ? slash + 1 : f->path);
-        lv_obj_t *btn = lv_list_add_button(list, (f->type == 0) ? LV_SYMBOL_AUDIO : LV_SYMBOL_SD_CARD, title);
+        lv_obj_t *btn = list_add_row(list, (f->type == 0) ? LV_SYMBOL_AUDIO : LV_SYMBOL_SD_CARD, title);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_favorite_row, LV_EVENT_CLICKED, NULL);
         // Grey unavailable rows (deleted radio, offline radio, missing SD
@@ -5373,7 +5428,8 @@ static void build_home(lv_obj_t *scr)
         lv_obj_set_style_border_width(dot, 2, 0);
         lv_obj_set_style_pad_all(dot, 0, 0);
         lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -4, 4);
-        lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_clickable(dot, false);
+        lv_obj_set_scrollable(dot, false);
     }
     if (net_state() != NET_STATE_CONNECTED) {
         lv_obj_t *hint = lv_label_create(scr);
@@ -5390,7 +5446,7 @@ static void build_home(lv_obj_t *scr)
         s_home_clock = lv_label_create(scr);
         lv_obj_set_style_text_font(s_home_clock, &bugne_font_20, 0);
         lv_obj_align(s_home_clock, LV_ALIGN_BOTTOM_MID, 0, -(MINI_BAR_GAP + 12));
-        lv_obj_add_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_hidden(s_home_clock, true);
     }
 
     // When the alarm is snoozed, a muted reminder sits just above the clock.
@@ -5426,7 +5482,7 @@ static lv_obj_t *make_qr(lv_obj_t *parent, const char *data, int size)
     lv_obj_set_style_border_width(card, 0, 0);
     lv_obj_set_style_radius(card, 14, 0);
     lv_obj_set_style_pad_all(card, 0, 0);
-    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(card, false);
 
     const int margin = 10;  // quiet zone around the QR modules
     lv_obj_t *qr = lv_qrcode_create(card);
@@ -5901,7 +5957,7 @@ static lv_obj_t *alarm_row(lv_obj_t *parent, lv_flex_align_t main_align)
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_set_width(row, LV_PCT(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(row, false);
     lv_obj_add_style(row, &s_th_row, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
@@ -6106,7 +6162,7 @@ static void build_alarm_edit(lv_obj_t *scr)
     for (int i = 0; i < 7; i++) {
         lv_obj_t *chip = lv_button_create(row_days);
         lv_obj_set_size(chip, 28, 28);
-        lv_obj_add_flag(chip, LV_OBJ_FLAG_CHECKABLE);
+        lv_obj_set_checkable(chip, true);
         lv_obj_add_style(chip, &s_round_surface, 0);
         lv_obj_add_style(chip, &s_round_surface_pr, LV_STATE_PRESSED);
         lv_obj_add_style(chip, &s_chip_ck, LV_STATE_CHECKED);
@@ -6231,10 +6287,10 @@ static void build_settings_alarm(lv_obj_t *scr)
     lv_obj_set_style_pad_row(content, 10, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
 
-    lv_obj_t *list = lv_list_create(content);
+    lv_obj_t *list = list_create(content);
     lv_obj_set_width(list, LV_PCT(100));
     lv_obj_set_height(list, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(list, false);
 
     const char *letters = T(STR_DAY_LETTERS);
     for (int i = 0; i < CFG_MAX_ALARMS; i++) {
@@ -6253,7 +6309,7 @@ static void build_settings_alarm(lv_obj_t *scr)
             days[di] = '\0';
             snprintf(label, sizeof(label), "%s  %02d:%02d  %s", name, ca->hour, ca->minute, days);
         }
-        lv_obj_t *btn = lv_list_add_button(list, LV_SYMBOL_BELL, label);
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_BELL, label);
         lv_obj_add_event_cb(btn, on_alarm_row_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
 }
@@ -6459,7 +6515,7 @@ static void show_upd_modal(void)
     lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
     lv_obj_set_style_border_width(backdrop, 0, 0);
     lv_obj_align(backdrop, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_clickable(backdrop, true);
     lv_obj_add_event_cb(backdrop, on_backdrop_clicked, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *modal = lv_obj_create(backdrop);
@@ -6470,7 +6526,7 @@ static void show_upd_modal(void)
     lv_obj_set_style_radius(modal, RADIUS_BTN, 0);
     lv_obj_set_style_pad_all(modal, 16, 0);
     lv_obj_align(modal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_remove_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(modal, false);
     lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(modal, 12, 0);
@@ -6552,7 +6608,7 @@ static void build_settings_update(lv_obj_t *scr)
     lv_obj_t *inst = lv_button_create(scr);
     lv_obj_set_size(inst, 190, 44);
     lv_obj_align(inst, LV_ALIGN_TOP_MID, 0, 160);
-    lv_obj_add_flag(inst, LV_OBJ_FLAG_HIDDEN);  // shown when a check finds one
+    lv_obj_set_hidden(inst, true);  // shown when a check finds one
     lv_obj_add_event_cb(inst, on_upd_install_click, LV_EVENT_CLICKED, NULL);
     lv_obj_t *il = lv_label_create(inst);
     lv_label_set_text(il, T(STR_UPD_INSTALL));
@@ -6606,8 +6662,8 @@ static void upd_screen_refresh(void)
         else lv_obj_remove_state(s_upd_check_btn, LV_STATE_DISABLED);
     }
     if (s_upd_install_btn) {
-        if (s_upd_state == UPD_AVAILABLE) lv_obj_remove_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+        if (s_upd_state == UPD_AVAILABLE) lv_obj_set_hidden(s_upd_install_btn, false);
+        else lv_obj_set_hidden(s_upd_install_btn, true);
     }
 }
 
@@ -6630,13 +6686,13 @@ static void build_settings(lv_obj_t *scr)
         { LV_SYMBOL_BARS,     STR_LISTEN_TIME,      on_open_usage },
         { LV_SYMBOL_DOWNLOAD, STR_UPDATE,           on_open_update },
     };
-    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_t *list = list_create(scr);
     lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
     lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);  // last row scrolls clear of the floating mini bar
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_t *upd_row = NULL;
     for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
-        lv_obj_t *btn = lv_list_add_button(list, ROWS[i].icon, T(ROWS[i].id));
+        lv_obj_t *btn = list_add_row(list, ROWS[i].icon, T(ROWS[i].id));
         lv_obj_add_event_cb(btn, ROWS[i].cb, LV_EVENT_CLICKED, NULL);
         if (ROWS[i].cb == on_open_update) upd_row = btn;
     }
@@ -6646,7 +6702,7 @@ static void build_settings(lv_obj_t *scr)
     s_upd_badge = upd_cache_update();
     if (s_upd_badge && upd_row) {
         lv_obj_t *dot = lv_obj_create(upd_row);
-        lv_obj_add_flag(dot, LV_OBJ_FLAG_IGNORE_LAYOUT);  // list rows are flex rows
+        lv_obj_set_ignore_layout(dot, true);  // list rows are flex rows
         lv_obj_set_size(dot, 12, 12);
         lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(dot, lv_color_hex(0xE53935), 0);  // notification red
@@ -6655,7 +6711,8 @@ static void build_settings(lv_obj_t *scr)
         lv_obj_set_style_border_width(dot, 2, 0);
         lv_obj_set_style_pad_all(dot, 0, 0);
         lv_obj_align(dot, LV_ALIGN_RIGHT_MID, -4, 0);
-        lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_clickable(dot, false);
+        lv_obj_set_scrollable(dot, false);
     }
 }
 
@@ -6680,7 +6737,7 @@ static void toast(const char *text)
     lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_max_width(box, scr_w() - 20, 0);
     lv_obj_align(box, LV_ALIGN_BOTTOM_MID, 0, -MINI_CLEAR);  // clear of the mini bar
-    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(box, false);
     lv_obj_t *l = lv_label_create(box);
     lv_label_set_text(l, text);
     lv_obj_center(l);
@@ -6764,9 +6821,9 @@ static void create_mini_bar(void)
     lv_obj_set_style_radius(s_mini, RADIUS_BAR, 0);
     lv_obj_set_style_bg_color(s_mini, col_accent(), 0);
     lv_obj_set_style_border_width(s_mini, 0, 0);
-    lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_mini, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_scrollable(s_mini, false);
+    lv_obj_set_hidden(s_mini, true);
+    lv_obj_set_clickable(s_mini, true);
     lv_obj_add_event_cb(s_mini, on_mini_open, LV_EVENT_CLICKED, NULL);
 
     s_mini_title = lv_label_create(s_mini);
@@ -6801,7 +6858,7 @@ static void mini_bar_update(void)
                   s_active_builder == build_sendspin_playing ||
                   s_active_builder == build_alarm_ringing);
     if (np == NP_NONE || on_np) {
-        lv_obj_add_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_hidden(s_mini, true);
         return;
     }
     char title[96];
@@ -6813,7 +6870,7 @@ static void mini_bar_update(void)
     if (strcmp(lv_label_get_text(s_mini_pause), icon) != 0) {
         lv_label_set_text(s_mini_pause, icon);
     }
-    lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_hidden(s_mini, false);
 }
 
 // ---- Screen sleep ----
@@ -7108,7 +7165,7 @@ static void tick_screenshot(void)
             bool visible = false;
             uint32_t nc = lv_obj_get_child_count(top);
             for (uint32_t i = 0; i < nc; i++) {
-                if (!lv_obj_has_flag(lv_obj_get_child(top, i), LV_OBJ_FLAG_HIDDEN)) {
+                if (!lv_obj_is_hidden(lv_obj_get_child(top, i))) {
                     visible = true;
                     break;
                 }
@@ -7926,9 +7983,9 @@ static void tick_clock_labels(void)
                 if (strcmp(lv_label_get_text(s_home_clock), buf) != 0) {
                     lv_label_set_text(s_home_clock, buf);
                 }
-                lv_obj_remove_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_hidden(s_home_clock, false);
             } else {
-                lv_obj_add_flag(s_home_clock, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_hidden(s_home_clock, true);
             }
         }
         if (s_alarm_time_lbl) {
