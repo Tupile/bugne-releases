@@ -61,6 +61,7 @@ static bool s_play_worker_busy, s_downloading, s_dl_queued;
 static int s_play_ctx, s_memo_peer_count, s_memo_state, s_memo_peers[8], s_play_q;
 static char s_art_pending_path[PODCAST_PATH_MAX];
 static volatile bool s_talkie_active, s_talkie_rx_pending;
+static volatile bool s_tone_running;
 static char s_talkie_rx_path[96];
 static int removed;
 static int test_remove(const char *p) { (void)p; removed++; return 0; }
@@ -119,6 +120,7 @@ static void decode_set_start_skip_ms(uint32_t ms) { (void)ms; }
 static void decode_progress(uint32_t *p, uint32_t *d) { *p = 3000; *d = 9000; }
 static void worker_run_job(void) {}
 static void beep_run(void) {}
+static void tone_run(void) {}
 static void memo_record_run(void) {}
 static void memo_play_run(const char *p) { (void)p; }
 static int net_memo_peers(int *p, int n) { (void)p; (void)n; return 0; }
@@ -267,8 +269,13 @@ int main(int argc, char **argv) {
     reset(); removed = 0; s_talkie_active = false; s_talkie_rx_pending = false;
     req_post(&tk); req_post(&over);
     assert(!s_talkie_rx_pending && removed == 1);
+    // A dropped tone request releases the play button's running state.
+    play_req_t tone = {.kind = REQ_TONE};
+    reset(); s_tone_running = true;
+    req_post(&tone); req_post(&over);
+    assert(!s_tone_running);
     audio_unused(audio_is_active);
-    puts("review queue/worker cancellation: 20 cases passed");
+    puts("review queue/worker cancellation: 21 cases passed");
 }
 '''
 def test(ui_text):

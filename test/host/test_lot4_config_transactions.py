@@ -116,6 +116,10 @@ static int httpd_req_recv(httpd_req_t *r, char *out, size_t len) {
     memcpy(out, r->body + r->consumed, len); r->consumed += len; return (int)len;
 }
 static int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
+static int prune_calls; static size_t prune_n;
+static int podcast_prune_manifests(const int *ids, size_t n) {
+    (void)ids; prune_calls++; prune_n = n; return 0;
+}
 #define REQUIRE_AUTH(req, rv) do { if (!(req)->authed) { (req)->status = 401; return rv; } } while (0)
 '''
 
@@ -305,7 +309,11 @@ int main(void) {
     assert(config_store_write_json(legacy) == ESP_ERR_INVALID_ARG && !saves);
     httpd_req_t r = request(legacy);
     assert(config_post(&r) == ESP_OK && r.status == 400 && r.consumed == r.content_len);
-    assert(!nvs_calls && !saves);
+    assert(!nvs_calls && !saves && !prune_calls);
+    r = request("{\"schema_version\":1,\"podcasts\":[{\"id\":7,\"title\":\"P\",\"rss_url\":\"http://x/r\"}]}");
+    assert(config_post(&r) == ESP_OK && r.status == 200);
+    assert(prune_calls == 1 && prune_n == 1 && config_store_get()->podcasts[0].id == 7);
+    reset();
     r = request("test-token"); r.authed = false;
     assert(ha_token_post(&r) == ESP_FAIL && r.status == 401 && !r.consumed);
     r = request("test-token"); r.content_len = CFG_HA_TOKEN_MAX;

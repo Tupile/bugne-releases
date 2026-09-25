@@ -21,6 +21,8 @@
 #include "library.h"
 #include "quiet.h"
 #include "usage.h"
+#include "sleep_fade.h"
+#include "tone.h"
 #include "alarm_next.h"
 #include "stats.h"
 #include "pitch.h"
@@ -288,7 +290,7 @@ static char s_meta_artist[64];  // tag artist of the playing SD file
 // and podcast RSS refresh (network fetch + parse).
 typedef enum { REQ_PLAY, REQ_REFRESH, REQ_REFRESH_ALL, REQ_DOWNLOAD_JOB, REQ_BEEP,
                REQ_MEMO_RECORD, REQ_MEMO_PLAY, REQ_MEMO_PEERS, REQ_MEMO_SEND,
-               REQ_TALKIE_SEND, REQ_TALKIE_PLAY } req_kind_t;
+               REQ_TALKIE_SEND, REQ_TALKIE_PLAY, REQ_TONE } req_kind_t;
 typedef struct {
     req_kind_t kind;
     uint32_t generation;
@@ -495,6 +497,14 @@ static int64_t s_sunrise_block_min;     // fire epoch minute of the canceled occ
 static int     s_sleep_choice;       // 0=off, -1=end-of-track, else minutes armed
 static int64_t s_sleep_stop_at_us;   // esp_timer deadline, 0 = off or end-of-track mode
 static bool    s_sleep_end_of_track; // stop when the current track ends instead of a deadline
+// Fade-out over the last SLEEP_FADE_MS of a deadline. s_sleep_fade_saved is
+// the volume at fade start (-1 = no fade running), restored by sleep_clear and
+// sleep_arm. s_sleep_fade_last is the value the fade last set: any other
+// volume means the user moved it, which ends the fade and keeps their value.
+#define SLEEP_FADE_MS 30000
+static int     s_sleep_fade_saved = -1;
+static int     s_sleep_fade_last;
+static bool    s_sleep_fade_off;     // user overrode this deadline's fade
 static podcast_episode_t *s_episodes;  // browse buffer (last opened podcast), PSRAM
 static size_t s_ep_count;
 // Snapshot of the episode list of the podcast that is playing, so next/previous
@@ -1260,6 +1270,65 @@ static void beep_run(void)
     audio_arbiter_release(AUDIO_SOURCE_BEEP);
 }
 
+// ---- Metronome / reference tone (musician tools, reached from the tuner) ----
+// Generated PCM like the beep (tone.c, pure), served by the worker as REQ_TONE
+// under AUDIO_SOURCE_TONE. The LVGL task writes the parameters, the worker
+// reads them once per frame, so a change applies live. s_tone_stop is set by
+// ui_play, ui_stop and beep_start (any takeover wins, the alarm included) and
+// by tick_tone when the tool screen is left.
+enum { TONE_METRO, TONE_DRONE };
+#define TONE_RATE  22050
+#define TONE_FRAME 512   // ~23 ms per write, so a stop lands within ~50 ms
+static volatile bool s_tone_stop;
+static volatile bool s_tone_running;   // set by tone_start, cleared by the worker at exit
+static volatile int  s_tone_mode;
+static volatile int  s_metro_bpm = 100;
+static volatile int  s_metro_beats = 4;
+static volatile int  s_drone_midi = 69;  // A4
+static volatile uint32_t s_metro_beats_started;  // published per frame, for the beat dots
+static volatile int  s_metro_beat;
+
+static void tone_run(void)
+{
+    // The tuner task releases the arbiter asynchronously once its screen is
+    // left, so retry for a few seconds instead of giving up at once.
+    bool acquired = false;
+    for (int i = 0; i < 80 && !s_tone_stop; i++) {
+        if (audio_arbiter_acquire(AUDIO_SOURCE_TONE) == ESP_OK) { acquired = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!acquired || audio_open(TONE_RATE, 16, 1) != ESP_OK) {
+        ESP_LOGW(TAG, "tone: %s", acquired ? "audio open failed" : "arbiter busy, giving up");
+        if (acquired) audio_arbiter_release(AUDIO_SOURCE_TONE);
+        s_tone_running = false;
+        return;
+    }
+    s_tone_running = true;  // a previous run's exit may have cleared it after tone_start set it
+    ESP_LOGI(TAG, "tone: %s started", s_tone_mode == TONE_METRO ? "metronome" : "reference tone");
+    static int16_t frame[TONE_FRAME];
+    static tone_state_t st;
+    tone_init(&st, TONE_RATE);
+    bool drone = (s_tone_mode == TONE_DRONE);
+    while (!s_tone_stop && uxQueueMessagesWaiting(s_play_q) == 0) {
+        if (drone) {
+            tone_drone_fill(&st, frame, TONE_FRAME, tone_midi_hz(s_drone_midi), true);
+        } else {
+            tone_metro_fill(&st, frame, TONE_FRAME, s_metro_bpm, s_metro_beats);
+            s_metro_beat = st.beat;
+            s_metro_beats_started = st.beats_started;
+        }
+        if (audio_write(frame, sizeof(frame)) != ESP_OK) break;
+    }
+    if (drone) {  // 10 ms fade-out, no click at the stop
+        tone_drone_fill(&st, frame, TONE_FRAME, tone_midi_hz(s_drone_midi), false);
+        audio_write(frame, sizeof(frame));
+    }
+    audio_close();
+    audio_arbiter_release(AUDIO_SOURCE_TONE);
+    ESP_LOGI(TAG, "tone: stopped");
+    s_tone_running = false;
+}
+
 // Read a cover JPEG off the SD card into PSRAM and hand it to the art module.
 // Worker task only (SD I/O + JPEG decode must never run on the LVGL task).
 // A missing file is the normal case, not an error: most feeds have no cover
@@ -1332,6 +1401,10 @@ static void play_task(void *arg)
             }
             if (req.kind == REQ_BEEP) {
                 beep_run();
+                continue;
+            }
+            if (req.kind == REQ_TONE) {
+                tone_run();
                 continue;
             }
             if (req.kind == REQ_MEMO_RECORD) {
@@ -1501,6 +1574,14 @@ static volatile float s_tuner_freq;      // smoothed frequency, Hz
 static volatile int64_t s_tuner_hit_us;  // esp_timer time of the last detection
 static lv_obj_t *s_tuner_note_lbl, *s_tuner_freq_lbl, *s_tuner_bar;
 static void build_tuner(lv_obj_t *scr);
+static void build_metronome(lv_obj_t *scr);
+static void build_drone(lv_obj_t *scr);
+static void on_open_metronome(lv_event_t *e);  // tuner screen buttons
+static void on_open_drone(lv_event_t *e);
+// Metronome / reference tone widgets, NULLed by show() like the tuner's.
+static lv_obj_t *s_tone_btn, *s_metro_bpm_lbl, *s_metro_slider, *s_metro_beats_lbl;
+static lv_obj_t *s_metro_dots[TONE_BEATS_MAX];
+static lv_obj_t *s_drone_note_lbl, *s_drone_hz_lbl;
 
 // Stop the tuner and wait for its task to release the arbiter (bounded by one
 // blocking mic read, ~128 ms). No-op when the tuner is not running.
@@ -1542,6 +1623,9 @@ static void req_abandoned(const play_req_t *req)
         break;
     case REQ_MEMO_RECORD:
         s_memo_state = MEMO_UI_IDLE;  // the capture never started
+        break;
+    case REQ_TONE:
+        s_tone_running = false;       // the play button shows "stopped" again
         break;
     case REQ_TALKIE_PLAY: {
         // The tick cleared s_talkie_rx_pending when it posted this request, so
@@ -1609,6 +1693,7 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
     tuner_stop_sync();        // free the mic and the arbiter before a source starts
     s_beep_stop = true;       // end the alarm beep if it is sounding (source takes over)
     s_memo_stop = true;       // end a memo record/playback the same way
+    s_tone_stop = true;       // and a metronome / reference tone
     play_cancel();
     audio_set_paused(false);  // never carry a paused state into a new track
     source_sd_stop();      // stop whatever is currently playing
@@ -1648,8 +1733,19 @@ static void ui_play(bool is_file, const char *target, const char *title, int ski
 // alarm_fire (the alarm always wins), and the idle safety net in sleep_timer_cb.
 // Declared this early so ui_stop can call it; sleep_arm/sleep_label_refresh/
 // on_sleep_toggle live near build_now_playing, where the button is.
+// Put back the volume the fade started from. Every way out of a timer goes
+// through here, but ui_play does not: an auto-advance inside the fade window
+// keeps fading.
+static void sleep_fade_restore(void)
+{
+    if (s_sleep_fade_saved >= 0) audio_set_volume(s_sleep_fade_saved);
+    s_sleep_fade_saved = -1;
+    s_sleep_fade_off = false;
+}
+
 static void sleep_clear(void)
 {
+    sleep_fade_restore();
     s_sleep_choice = 0;
     s_sleep_stop_at_us = 0;
     s_sleep_end_of_track = false;
@@ -1659,6 +1755,7 @@ static void ui_stop(void)
 {
     s_beep_stop = true;       // end the alarm beep if it is sounding
     s_memo_stop = true;       // end a memo record/playback the same way
+    s_tone_stop = true;       // and a metronome / reference tone
     play_cancel();
     s_user_stopped = true;    // hide the mini bar at once, before the source tears down
     audio_output_off();       // mute now so playback stops instantly, not after buffers drain
@@ -1705,6 +1802,13 @@ static void show(screen_builder_t builder)
     s_tuner_note_lbl = NULL;  // same for the tuner widgets (rebuilt by build_tuner)
     s_tuner_freq_lbl = NULL;
     s_tuner_bar = NULL;
+    s_tone_btn = NULL;        // same for the metronome / reference tone widgets
+    s_metro_bpm_lbl = NULL;
+    s_metro_slider = NULL;
+    s_metro_beats_lbl = NULL;
+    for (int i = 0; i < TONE_BEATS_MAX; i++) s_metro_dots[i] = NULL;
+    s_drone_note_lbl = NULL;
+    s_drone_hz_lbl = NULL;
     s_memo_time_lbl = NULL;  // same for the memo record/play widgets
     s_memo_prog_bar = NULL;
     s_memo_play_btn = NULL;
@@ -1923,6 +2027,7 @@ static bool sleep_has_track_end(void)
 // 60-minute deadline instead, same as picking the 60 min step, per the plan.
 static void sleep_arm(int choice)
 {
+    sleep_fade_restore();
     s_sleep_choice = choice;
     if (choice == 0) {
         s_sleep_stop_at_us = 0;
@@ -2966,6 +3071,7 @@ static bool stats_classify(stats_source_t *src, const char **title)
     // A voice memo is a seconds-long message, not listening; counting it would
     // also misclassify (s_play_ctx still holds the previous session's context).
     if (audio_arbiter_active() == AUDIO_SOURCE_MEMO) return false;
+    if (audio_arbiter_active() == AUDIO_SOURCE_TONE) return false;  // practice tool, not listening
     if (source_sendspin_session_active()) {
         if (!source_sendspin_active()) return false;  // paused
         static char t[64];
@@ -4224,6 +4330,17 @@ static const char *TUNER_NOTE_EN[12] =
 static const char *TUNER_NOTE_FR[12] =
     {"Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"};
 
+// "Mi (E2)" in French, "E2" in English. Shared by the tuner and the drone.
+static void note_text(int midi, char *txt, size_t n)
+{
+    int pc = midi % 12, oct = midi / 12 - 1;
+    if (strcmp(lang_code(), "fr") == 0) {
+        snprintf(txt, n, "%s (%s%d)", TUNER_NOTE_FR[pc], TUNER_NOTE_EN[pc], oct);
+    } else {
+        snprintf(txt, n, "%s%d", TUNER_NOTE_EN[pc], oct);
+    }
+}
+
 // Capture task: blocking 128 ms mic reads, YIN pitch detection (pitch.c),
 // median-of-3 smoothing, results published in the s_tuner_* statics read by
 // the 50 ms UI tick. PSRAM stack is safe: no flash API is called here.
@@ -4375,6 +4492,275 @@ static void build_tuner(lv_obj_t *scr)
     lv_obj_set_style_border_width(tick, 0, 0);
     lv_obj_set_style_radius(tick, 0, 0);
     lv_obj_align(tick, LV_ALIGN_CENTER, 0, 28);
+
+    // The two sound tools, reached only from here (the tuner tile is the
+    // musician opt-in, no extra home tile).
+    lv_obj_t *row = lv_obj_create(scr);
+    lv_obj_set_size(row, scr_w(), LV_SIZE_CONTENT);
+    lv_obj_set_scrollable(row, false);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_t *mb = lv_button_create(row);
+    lv_obj_t *ml = lv_label_create(mb);
+    lv_label_set_text(ml, T(STR_METRONOME));
+    lv_obj_center(ml);
+    lv_obj_add_event_cb(mb, on_open_metronome, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *db = lv_button_create(row);
+    lv_obj_t *dl = lv_label_create(db);
+    lv_label_set_text(dl, T(STR_DRONE));
+    lv_obj_center(dl);
+    lv_obj_add_event_cb(db, on_open_drone, LV_EVENT_CLICKED, NULL);
+}
+
+// ---- Metronome and reference tone screens ----
+
+// Stop any playback and start the tone. The play buttons are the gate (the
+// screens themselves are silent, like the tuner).
+static void tone_start(int mode)
+{
+    if (play_denied()) return;
+    tuner_stop_sync();
+    ui_stop();  // takes over any playback (this also sets s_tone_stop)
+    if (source_sendspin_session_active()) source_sendspin_command(SENDSPIN_CMD_STOP);
+    s_tone_mode = mode;
+    s_tone_stop = false;
+    s_tone_running = true;  // immediate button feedback; the worker confirms
+    play_req_t req = { .kind = REQ_TONE };
+    req_post(&req);
+}
+
+static void on_tone_toggle(lv_event_t *e)
+{
+    if (s_tone_running) { s_tone_stop = true; return; }
+    tone_start((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+// Back goes to the tuner (the tools' hub), which restarts the capture.
+static void on_tone_back(lv_event_t *e)
+{
+    (void)e;
+    s_tone_stop = true;
+    tuner_begin();
+    show(build_tuner);
+}
+
+static void on_open_metronome(lv_event_t *e) { (void)e; tuner_stop_sync(); show(build_metronome); }
+static void on_open_drone(lv_event_t *e)     { (void)e; tuner_stop_sync(); show(build_drone); }
+
+// Transparent flex row for the tool screens' controls.
+static lv_obj_t *tone_row(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_scrollable(row, false);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 12, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+// Content column under the header, shared by both tool screens.
+static lv_obj_t *tone_content(lv_obj_t *scr)
+{
+    lv_obj_t *c = lv_obj_create(scr);
+    lv_obj_set_pos(c, 0, 52);
+    lv_obj_set_size(c, scr_w(), scr_h() - 52);
+    lv_obj_set_scrollable(c, false);
+    lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(c, 0, 0);
+    // Narrower side margin than PAD_SIDE: a 44-label-44 row must fit the
+    // 240 px portrait width with a label wide enough for "Sol# (G#4)".
+    lv_obj_set_style_pad_hor(c, 6, 0);
+    lv_obj_set_style_pad_ver(c, 4, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(c, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return c;
+}
+
+static lv_obj_t *tone_play_btn(lv_obj_t *parent, int mode)
+{
+    s_tone_btn = make_round_btn(parent, s_tone_running ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
+                                60, true, NULL);
+    lv_obj_add_event_cb(s_tone_btn, on_tone_toggle, LV_EVENT_CLICKED, (void *)(intptr_t)mode);
+    return s_tone_btn;
+}
+
+static void metro_show_bpm(void)
+{
+    char t[8];
+    snprintf(t, sizeof(t), "%d", s_metro_bpm);
+    if (s_metro_bpm_lbl) lv_label_set_text(s_metro_bpm_lbl, t);
+    if (s_metro_slider) lv_slider_set_value(s_metro_slider, s_metro_bpm, LV_ANIM_OFF);
+}
+
+static void metro_set_bpm(int bpm)
+{
+    if (bpm < TONE_BPM_MIN) bpm = TONE_BPM_MIN;
+    if (bpm > TONE_BPM_MAX) bpm = TONE_BPM_MAX;
+    s_metro_bpm = bpm;
+    metro_show_bpm();
+}
+
+static void on_metro_step(lv_event_t *e)
+{
+    metro_set_bpm(s_metro_bpm + (int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void on_metro_slider(lv_event_t *e)
+{
+    metro_set_bpm(lv_slider_get_value(lv_event_get_target(e)));
+}
+
+static void metro_show_beats(void)
+{
+    char t[24];
+    snprintf(t, sizeof(t), T(STR_METRO_BEATS_FMT), s_metro_beats);
+    if (s_metro_beats_lbl) lv_label_set_text(s_metro_beats_lbl, t);
+    for (int i = 0; i < TONE_BEATS_MAX; i++) {
+        if (s_metro_dots[i]) lv_obj_set_hidden(s_metro_dots[i], i >= s_metro_beats);
+    }
+}
+
+static void on_metro_beats(lv_event_t *e)
+{
+    (void)e;
+    s_metro_beats = s_metro_beats % TONE_BEATS_MAX + 1;  // 1..7, then back to 1
+    metro_show_beats();
+}
+
+// Tap tempo: the mean of the last taps (up to 4 intervals); a 2 s pause
+// starts a new measurement.
+static int64_t s_tap_us[5];
+static int s_tap_n;
+
+static void on_metro_tap(lv_event_t *e)
+{
+    (void)e;
+    int64_t now = esp_timer_get_time();
+    if (s_tap_n > 0 && now - s_tap_us[s_tap_n - 1] > 2000000) s_tap_n = 0;
+    if (s_tap_n == 5) {
+        memmove(s_tap_us, s_tap_us + 1, 4 * sizeof(s_tap_us[0]));
+        s_tap_n = 4;
+    }
+    s_tap_us[s_tap_n++] = now;
+    if (s_tap_n >= 2) {
+        int64_t span = s_tap_us[s_tap_n - 1] - s_tap_us[0];
+        if (span > 0) metro_set_bpm((int)((60000000LL * (s_tap_n - 1) + span / 2) / span));
+    }
+}
+
+static void build_metronome(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_tone_back);
+    add_title_wide(scr, T(STR_METRONOME));
+    s_tap_n = 0;
+    lv_obj_t *c = tone_content(scr);
+
+    lv_obj_t *r1 = tone_row(c);
+    lv_obj_t *minus = make_round_btn(r1, LV_SYMBOL_MINUS, 44, false, NULL);
+    lv_obj_add_event_cb(minus, on_metro_step, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+    lv_obj_add_event_cb(minus, on_metro_step, LV_EVENT_LONG_PRESSED_REPEAT, (void *)(intptr_t)-1);
+    s_metro_bpm_lbl = lv_label_create(r1);
+    lv_obj_set_style_text_font(s_metro_bpm_lbl, &bugne_font_48, 0);
+    lv_obj_set_flex_grow(s_metro_bpm_lbl, 1);  // "250" is ~100 px at 48 px
+    lv_label_set_long_mode(s_metro_bpm_lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_metro_bpm_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *plus = make_round_btn(r1, LV_SYMBOL_PLUS, 44, false, NULL);
+    lv_obj_add_event_cb(plus, on_metro_step, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+    lv_obj_add_event_cb(plus, on_metro_step, LV_EVENT_LONG_PRESSED_REPEAT, (void *)(intptr_t)1);
+
+    s_metro_slider = lv_slider_create(c);
+    lv_slider_set_range(s_metro_slider, TONE_BPM_MIN, TONE_BPM_MAX);
+    lv_obj_set_width(s_metro_slider, LV_PCT(86));
+    lv_obj_add_event_cb(s_metro_slider, on_metro_slider, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // One dot per beat, the current one in the accent color (tick_tone).
+    lv_obj_t *dots = tone_row(c);
+    lv_obj_set_style_pad_column(dots, 10, 0);
+    for (int i = 0; i < TONE_BEATS_MAX; i++) {
+        lv_obj_t *d = lv_obj_create(dots);
+        lv_obj_set_size(d, 14, 14);
+        lv_obj_set_scrollable(d, false);
+        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(d, 0, 0);
+        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(d, col_muted(), 0);
+        s_metro_dots[i] = d;
+    }
+
+    lv_obj_t *r3 = tone_row(c);
+    lv_obj_t *bb = lv_button_create(r3);
+    s_metro_beats_lbl = lv_label_create(bb);
+    lv_obj_center(s_metro_beats_lbl);
+    lv_obj_add_event_cb(bb, on_metro_beats, LV_EVENT_CLICKED, NULL);
+    tone_play_btn(r3, TONE_METRO);
+    lv_obj_t *tb = lv_button_create(r3);
+    lv_obj_t *tl = lv_label_create(tb);
+    lv_label_set_text(tl, T(STR_METRO_TAP));
+    lv_obj_center(tl);
+    lv_obj_add_event_cb(tb, on_metro_tap, LV_EVENT_PRESSED, NULL);  // on press: tighter timing
+
+    metro_show_bpm();
+    metro_show_beats();
+}
+
+#define DRONE_MIDI_MIN 28  // E1, a double bass low string
+#define DRONE_MIDI_MAX 96  // C7
+
+static void drone_show(void)
+{
+    char t[40];
+    note_text(s_drone_midi, t, sizeof(t));
+    if (s_drone_note_lbl) lv_label_set_text(s_drone_note_lbl, t);
+    snprintf(t, sizeof(t), "%.1f Hz", (double)tone_midi_hz(s_drone_midi));
+    if (s_drone_hz_lbl) lv_label_set_text(s_drone_hz_lbl, t);
+}
+
+static void on_drone_step(lv_event_t *e)
+{
+    int m = s_drone_midi + (int)(intptr_t)lv_event_get_user_data(e);
+    if (m < DRONE_MIDI_MIN || m > DRONE_MIDI_MAX) return;
+    s_drone_midi = m;
+    drone_show();
+}
+
+static lv_obj_t *drone_step_btn(lv_obj_t *parent, const char *sym, int delta)
+{
+    lv_obj_t *b = make_round_btn(parent, sym, 44, false, NULL);
+    lv_obj_add_event_cb(b, on_drone_step, LV_EVENT_CLICKED, (void *)(intptr_t)delta);
+    return b;
+}
+
+static void build_drone(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_tone_back);
+    add_title_wide(scr, T(STR_DRONE));
+    lv_obj_t *c = tone_content(scr);
+
+    lv_obj_t *r1 = tone_row(c);
+    drone_step_btn(r1, LV_SYMBOL_LEFT, -1);
+    s_drone_note_lbl = lv_label_create(r1);
+    lv_obj_set_style_text_font(s_drone_note_lbl, &bugne_font_20, 0);
+    lv_obj_set_flex_grow(s_drone_note_lbl, 1);
+    lv_label_set_long_mode(s_drone_note_lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_drone_note_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    drone_step_btn(r1, LV_SYMBOL_RIGHT, 1);
+
+    s_drone_hz_lbl = lv_label_create(c);
+    muted(s_drone_hz_lbl);
+
+    lv_obj_t *r3 = tone_row(c);
+    drone_step_btn(r3, LV_SYMBOL_DOWN, -12);
+    tone_play_btn(r3, TONE_DRONE);
+    drone_step_btn(r3, LV_SYMBOL_UP, 12);
+
+    drone_show();
 }
 
 // ---- Voice memos (record, keep, send to another Bugne, play received) ----
@@ -6757,6 +7143,7 @@ static np_source_t np_current(void)
     // logic: it is a seconds-long message tied to its own screen, and the
     // s_now_* metadata still describes the previous source.
     if (audio_arbiter_active() == AUDIO_SOURCE_MEMO) return NP_NONE;
+    if (audio_arbiter_active() == AUDIO_SOURCE_TONE) return NP_NONE;  // owned by its own screen
     np_source_t real = source_sendspin_session_active() ? NP_SENDSPIN
                      : audio_is_active() ? NP_LOCAL : NP_NONE;
     if (s_user_stopped) {
@@ -6916,6 +7303,7 @@ static void beep_start(void)
     ESP_LOGI(TAG, "alarm: starting beep fallback");
     tuner_stop_sync();  // free the arbiter: the alarm must always sound
     s_memo_stop = true; // a memo record/playback yields too: the alarm always sounds
+    s_tone_stop = true; // so does a metronome / reference tone
     s_alarm_beeping = true;
     s_beep_stop = false;
     play_cancel();
@@ -6962,11 +7350,13 @@ static void alarm_fire(int idx)
     struct tm ftm;
     localtime_r(&fnow, &ftm);
     s_alarm_fired_min[idx] = alarm_latch_key(&ftm);  // latch this minute: fires once
+    // The alarm always wins over a sleep timer (A2). Cleared BEFORE the save:
+    // it restores a volume the sleep fade may have lowered.
+    sleep_clear();
     s_alarm_saved_vol = audio_get_volume(); // restored at alarm end
     s_alarm_beeping = false;
     s_alarm_beep_confirmed = false;
     s_alarm_ramp_done = false;
-    sleep_clear();  // the alarm always wins over a sleep timer (A2)
 
     if (s_asleep) exit_sleep();
     lv_display_trigger_activity(s_disp);
@@ -7089,6 +7479,10 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "game",              build_game_setup },
     { "game_play",         build_game },
     { "tuner",             build_tuner },
+    { "metronome",         build_metronome },
+    { "metronome_play",    build_metronome },    // same screen, playing
+    { "drone",             build_drone },
+    { "drone_play",        build_drone },        // same screen, playing
     { "memos",             build_memos },
     { "memo_record",       build_memo_record },
     { "talkie",            build_talkie },       // correspondent picker
@@ -7244,6 +7638,11 @@ static void tick_nav_request(void)
             }
         } else if (strcmp(name, "tuner") == 0) {
             tuner_begin();  // mimic on_open_tuner: takeover + capture task
+        } else if (strcmp(name, "metronome_play") == 0 || strcmp(name, "drone_play") == 0) {
+            // Press play remotely (no touch injection exists): same gate and
+            // takeover as the button. The screen is shown right after, in this
+            // tick, so tick_tone keeps the tone running.
+            tone_start(strcmp(name, "drone_play") == 0 ? TONE_DRONE : TONE_METRO);
         } else if (strcmp(name, "memos") == 0 || strcmp(name, "memo_record") == 0 ||
                    strcmp(name, "talkie") == 0 || strcmp(name, "talkie_ready") == 0) {
             if (parental_blocked()) {
@@ -7386,6 +7785,31 @@ static void tick_apply_config(void)
     }
 }
 
+// A tone plays only while its own screen is shown: leaving it by any path
+// (back, remote nav, alarm ringing screen, parental kick) stops it. A rebuild
+// (orientation, language) keeps the same builder, so the tone keeps playing.
+static void tick_tone(void)
+{
+    bool metro = (s_active_builder == build_metronome);
+    bool drone = (s_active_builder == build_drone);
+    bool own = (metro && s_tone_mode == TONE_METRO) || (drone && s_tone_mode == TONE_DRONE);
+    if (s_tone_running && !own) s_tone_stop = true;
+    if (!s_tone_btn) return;
+    bool run = s_tone_running && own;
+    lv_obj_t *icon = lv_obj_get_child(s_tone_btn, 0);
+    const char *want = run ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY;
+    if (strcmp(lv_label_get_text(icon), want) != 0) lv_label_set_text(icon, want);
+    if (!metro) return;
+    int lit = run ? s_metro_beat : -1;
+    for (int i = 0; i < TONE_BEATS_MAX; i++) {
+        if (!s_metro_dots[i]) continue;
+        lv_color_t want_c = (i == lit) ? col_accent() : col_muted();
+        if (!lv_color_eq(lv_obj_get_style_bg_color(s_metro_dots[i], 0), want_c)) {
+            lv_obj_set_style_bg_color(s_metro_dots[i], want_c, 0);
+        }
+    }
+}
+
 // The tuner runs only while its screen is shown: navigating away by any
 // path (remote nav, alarm ringing screen, ...) ends the capture. The
 // async flag is enough here; playback takeovers use tuner_stop_sync().
@@ -7403,13 +7827,7 @@ static void tick_tuner(void)
         if (fresh) {
             int midi = s_tuner_midi;
             float cents = s_tuner_cents;
-            int pc = midi % 12, oct = midi / 12 - 1;
-            if (strcmp(lang_code(), "fr") == 0) {
-                snprintf(txt, sizeof(txt), "%s (%s%d)",
-                         TUNER_NOTE_FR[pc], TUNER_NOTE_EN[pc], oct);
-            } else {
-                snprintf(txt, sizeof(txt), "%s%d", TUNER_NOTE_EN[pc], oct);
-            }
+            note_text(midi, txt, sizeof(txt));
             if (fabsf(cents) <= TUNER_IN_TUNE_CENTS) {
                 lv_obj_set_style_text_color(s_tuner_note_lbl, col_accent(), 0);
             } else {
@@ -7934,7 +8352,8 @@ static void tick_stats_and_usage(void)
         }
         audio_source_t sa = audio_arbiter_active();
         bool session = (sa != AUDIO_SOURCE_NONE && sa != AUDIO_SOURCE_BEEP &&
-                        sa != AUDIO_SOURCE_TUNER && sa != AUDIO_SOURCE_MEMO) ||
+                        sa != AUDIO_SOURCE_TUNER && sa != AUDIO_SOURCE_MEMO &&
+                        sa != AUDIO_SOURCE_TONE) ||
                        source_sendspin_session_active();
         if (s_stats_session_prev && !session) stats_flush();  // play -> idle edge
         s_stats_session_prev = session;
@@ -8191,6 +8610,29 @@ static void tick_sleep_engine(int64_t now_us)
             ESP_LOGI(TAG, "sleep timer: no track end anymore, falling back to 60 min");
             sleep_arm(60);
         }
+        // Fade-out in the last SLEEP_FADE_MS. Not during a Sendspin session:
+        // local volume edges are published to Music Assistant, which would
+        // record the ramp as the user's volume.
+        if (s_sleep_stop_at_us != 0 && !s_sleep_fade_off &&
+            !source_sendspin_session_active()) {
+            int64_t left_ms = (s_sleep_stop_at_us - now_us) / 1000;
+            if (left_ms < SLEEP_FADE_MS && left_ms > 0) {
+                if (s_sleep_fade_saved < 0) {
+                    s_sleep_fade_saved = audio_get_volume();
+                    s_sleep_fade_last = s_sleep_fade_saved;
+                    ESP_LOGI(TAG, "sleep timer: fading out from volume %d", s_sleep_fade_saved);
+                }
+                if (audio_get_volume() != s_sleep_fade_last) {
+                    // The user moved the volume: keep theirs, stop fading.
+                    ESP_LOGI(TAG, "sleep timer: fade cancelled by a volume change");
+                    s_sleep_fade_saved = -1;
+                    s_sleep_fade_off = true;
+                } else {
+                    s_sleep_fade_last = sleep_fade_vol(s_sleep_fade_saved, left_ms, SLEEP_FADE_MS);
+                    audio_set_volume(s_sleep_fade_last);
+                }
+            }
+        }
         if (s_sleep_stop_at_us != 0 && now_us >= s_sleep_stop_at_us) {
             ESP_LOGI(TAG, "sleep timer: fired");
             if (source_sendspin_session_active()) source_sendspin_command(SENDSPIN_CMD_STOP);
@@ -8243,7 +8685,9 @@ static void tick_parental_block(void)
                     s_active_builder == build_sendspin_playing ||
                     s_active_builder == build_game ||
                     s_active_builder == build_game_setup ||
-                    s_active_builder == build_talkie) show(build_home);
+                    s_active_builder == build_talkie ||
+                    s_active_builder == build_metronome ||
+                    s_active_builder == build_drone) show(build_home);
                 toast(q ? T(STR_QUIET_HOURS) : T(STR_LIMIT_REACHED));
                 ESP_LOGI(TAG, "%s, playback stopped",
                          q ? "quiet hours: window opened" : "daily limit: quota reached");
@@ -8347,9 +8791,10 @@ static void tick_wake_and_sleep(void)
     } else if (s_sleep_ms > 0 && inactive >= s_sleep_ms &&
                s_active_builder != build_tuner &&
                s_active_builder != build_talkie &&
+               !s_tone_running &&
                s_memo_state != MEMO_UI_RECORDING) {
-        // No screen sleep while tuning, recording a memo, or in a talkie
-        // session: the user watches without touching (and waits for the
+        // No screen sleep while tuning, recording a memo, playing a tone
+        // (the player watches the beat), or in a talkie session: the user watches without touching (and waits for the
         // correspondent's messages, which must not play to a dark panel).
         enter_sleep();
     }
@@ -8375,6 +8820,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_download_scheduler();
     tick_apply_config();
     tick_tuner();
+    tick_tone();
     tick_memo_talkie();
     tick_sd_presence();
     tick_favorites();

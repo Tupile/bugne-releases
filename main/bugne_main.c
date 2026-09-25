@@ -27,6 +27,7 @@
 #include "played.h"
 #include "stats.h"
 #include "memo.h"
+#include "podcast.h"
 #include "podcast_resume.h"
 
 static const char *TAG = "bugne";
@@ -119,6 +120,14 @@ static void bg_init_task(void *arg)
     }
     TRY(source_sd_init());
     podcast_resume_init();
+    {
+        // Manifests of podcasts deleted before this boot (older firmware
+        // never removed them). bg_init has an internal stack: flash writes OK.
+        const config_t *c = config_store_get();
+        int ids[CFG_MAX_PODCASTS];
+        for (size_t i = 0; i < c->podcast_count; i++) ids[i] = c->podcasts[i].id;
+        podcast_prune_manifests(ids, c->podcast_count);
+    }
     memo_clean_parts();  // drop memo temporaries left by a power cut mid-record/receive
     memo_clean_talkie(); // drop ephemeral walkie-talkie files left by a power cut
     library_load();  // load the SD music index if present (best-effort, no card = no-op)

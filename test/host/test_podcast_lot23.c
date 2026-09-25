@@ -829,6 +829,49 @@ static void clean_tree(const char *path)
     assert(rmdir(path) == 0);
 }
 
+static void test_prune_manifests(void)
+{
+    // Start from an empty manifest folder: earlier tests leave manifests.
+    char dir[512];
+    mapped("/littlefs/podcasts", dir, sizeof(dir));
+    clean_tree(dir);
+    assert(test_mkdir("/littlefs/podcasts", 0700) == 0);
+
+    put("/littlefs/podcasts/3.json", "", 0);
+    put("/littlefs/podcasts/7.json", "", 0);
+    put("/littlefs/podcasts/42.json", "", 0);
+    put("/littlefs/podcasts/9001.json", "", 0);
+    put("/littlefs/podcasts/7.json.tmp", "", 0);
+    put("/littlefs/podcasts/played.bin", "", 0);
+    put("/littlefs/podcasts/.resume.bin", "", 0);
+    put("/littlefs/podcasts/abc.json", "", 0);
+    put("/littlefs/podcasts/7x.json", "", 0);
+    put("/littlefs/podcasts/.json", "", 0);
+
+    const int ids[] = {42, 3};
+    assert(podcast_prune_manifests(ids, 2) == 2);
+    assert(exists("/littlefs/podcasts/3.json"));
+    assert(exists("/littlefs/podcasts/42.json"));
+    assert(!exists("/littlefs/podcasts/7.json"));
+    assert(!exists("/littlefs/podcasts/9001.json"));
+    assert(exists("/littlefs/podcasts/7.json.tmp"));
+    assert(exists("/littlefs/podcasts/played.bin"));
+    assert(exists("/littlefs/podcasts/.resume.bin"));
+    assert(exists("/littlefs/podcasts/abc.json"));
+    assert(exists("/littlefs/podcasts/7x.json"));
+    assert(exists("/littlefs/podcasts/.json"));
+
+    // Idempotent, and an empty config removes every manifest.
+    assert(podcast_prune_manifests(ids, 2) == 0);
+    assert(podcast_prune_manifests(NULL, 0) == 2);
+    assert(!exists("/littlefs/podcasts/3.json"));
+
+    // A missing folder (fresh device) is not an error.
+    clean_tree(dir);
+    assert(podcast_prune_manifests(ids, 2) == 0);
+    assert(test_mkdir("/littlefs/podcasts", 0700) == 0);
+}
+
 int main(void)
 {
     strcpy(root, "/tmp/opencode/podcast-lot23-XXXXXX");
@@ -847,8 +890,9 @@ int main(void)
     test_cache_scan();
     test_retention();
     test_stable_collision_suffix();
+    test_prune_manifests();
     reset();
     clean_tree(root);
-    puts("podcast_lot23: storage faults, trim, cache scan, refresh cancellation and retention passed");
+    puts("podcast_lot23: storage faults, trim, cache scan, refresh cancellation, retention and manifest prune passed");
     return 0;
 }

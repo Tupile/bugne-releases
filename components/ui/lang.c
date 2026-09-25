@@ -170,6 +170,10 @@ static const lang_def_t LANGS[] = {
             [STR_TILE_TUNER]         = "Tuner",
             [STR_TILE_LAMP]          = "Lamp",
             [STR_TILE_MEMOS]         = "Memos",
+            [STR_METRONOME]          = "Metronome",
+            [STR_DRONE]              = "Ref. tone",
+            [STR_METRO_BEATS_FMT]    = "%d beats",
+            [STR_METRO_TAP]          = "Tap",
         },
     },
     {
@@ -331,6 +335,10 @@ static const lang_def_t LANGS[] = {
             [STR_TILE_TUNER]         = "Accord",
             [STR_TILE_LAMP]          = "Lampe",
             [STR_TILE_MEMOS]         = "Mémos",
+            [STR_METRONOME]          = "Métronome",
+            [STR_DRONE]              = "Diapason",
+            [STR_METRO_BEATS_FMT]    = "%d temps",
+            [STR_METRO_TAP]          = "Tap",
         },
     },
 };

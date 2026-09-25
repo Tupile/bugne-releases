@@ -938,6 +938,33 @@ size_t podcast_manifest_count(int id)
 
 // ---- Channel artwork ----
 
+int podcast_prune_manifests(const int *ids, size_t n)
+{
+    DIR *d = opendir("/littlefs/podcasts");
+    if (!d) return 0;  // no podcast was ever refreshed
+    int removed = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        // Only "<decimal id>.json": the digits must run straight into the
+        // suffix, which also rejects "<id>.json.tmp" and non-numeric names.
+        const char *p = e->d_name;
+        if (*p < '0' || *p > '9') continue;
+        char *end;
+        long id = strtol(p, &end, 10);
+        if (strcmp(end, ".json") != 0) continue;
+        bool keep = false;
+        for (size_t i = 0; i < n && !keep; i++) keep = (ids[i] == id);
+        if (keep) continue;
+        char path[64 + sizeof(e->d_name)];
+        snprintf(path, sizeof(path), "/littlefs/podcasts/%s", e->d_name);
+        if (remove(path) == 0) removed++;
+        else ESP_LOGW(TAG, "prune: cannot remove %s (errno %d)", path, errno);
+    }
+    closedir(d);
+    if (removed) ESP_LOGI(TAG, "pruned %d manifest(s) of deleted podcasts", removed);
+    return removed;
+}
+
 // Biggest cover we download. Feed images are commonly 1400x1400 JPEGs of a few
 // hundred KB; anything past this is refused rather than filling the card (the
 // URL comes from an untrusted feed, same reasoning as EPISODE_MAX_BYTES).

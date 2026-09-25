@@ -49,6 +49,24 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_usage"
 
+echo "=== building sleep_fade host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -o "$OUT/test_sleep_fade" \
+    test_sleep_fade.c ../../components/ui/sleep_fade.c
+
+echo "=== running ==="
+"$OUT/test_sleep_fade"
+
+echo "=== building tone host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -o "$OUT/test_tone" \
+    test_tone.c ../../components/ui/tone.c -lm
+
+echo "=== running ==="
+"$OUT/test_tone"
+
 echo "=== building epmeta host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -263,3 +281,4 @@ echo "=== running web page tests ==="
 # Parses the embedded page, syntax-checks every inline script and inline event
 # handler, then drives the save/install handlers against a scripted fetch.
 node test_lot4_web_actions.js
+node test_web_voice.js

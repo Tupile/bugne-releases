@@ -65,3 +65,10 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
 // default the manifest writer uses), so the folder matches the episodes'.
 // The file may not exist: the UI treats a missing cover as "no artwork".
 void podcast_cover_path(int id, const char *name, char *out, size_t out_size);
+
+// Remove every /littlefs/podcasts/<id>.json whose id is not in `ids` (the
+// configured podcasts). Deleting a podcast on the web page leaves its manifest
+// behind otherwise, and a reused id would read it. Every other file in the
+// folder (played.bin, .resume.bin, *.json.tmp) is left alone. Writes flash:
+// call from a task with an internal stack. Returns the number removed.
+int podcast_prune_manifests(const int *ids, size_t n);

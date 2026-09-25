@@ -171,6 +171,10 @@ typedef enum {
     STR_TILE_LAMP,
     STR_TILE_MEMOS,
     STR_SAVE_FAILED,
+    STR_METRONOME,          // tuner screen button + metronome screen title
+    STR_DRONE,              // tuner screen button + reference tone screen title
+    STR_METRO_BEATS_FMT,    // metronome beats chip, %d = beats per bar
+    STR_METRO_TAP,          // metronome tap-tempo button
     STR__COUNT
 } str_id_t;
 

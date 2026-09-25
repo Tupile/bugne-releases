@@ -15,6 +15,7 @@
 #include "source_sd.h"
 #include "library.h"
 #include "memo.h"
+#include "podcast.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -827,6 +828,12 @@ static esp_err_t config_post(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid config");
         return ESP_FAIL;
     }
+    // A podcast deleted by this save leaves its manifest on flash: drop it now
+    // so a reused id cannot read it (httpd runs on an internal stack).
+    const config_t *c = config_store_get();
+    int ids[CFG_MAX_PODCASTS];
+    for (size_t i = 0; i < c->podcast_count; i++) ids[i] = c->podcasts[i].id;
+    podcast_prune_manifests(ids, c->podcast_count);
     return httpd_resp_sendstr(req, "config saved");
 }
 
