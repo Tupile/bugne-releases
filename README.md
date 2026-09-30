@@ -28,7 +28,7 @@ The firmware was developed with substantial help from AI coding assistants.
 
 ## Status
 
-Version 1.9.6. Feature-complete and validated on real hardware: display, touch,
+Version 1.15.0. Feature-complete and validated on real hardware: display, touch,
 audio, SD card, Wi-Fi, Sendspin sync, and firmware update with rollback. It
 builds with ESP-IDF 6.1. The implemented feature set:
 
@@ -56,6 +56,12 @@ builds with ESP-IDF 6.1. The implemented feature set:
 - Per-radio pre-roll ad skip. Some stations send an advertisement when a player
   connects, OUI FM for example. A decoy connection absorbs that advertisement,
   so the real connection joins the live audio directly.
+- A web radio or a streamed episode that drops reconnects by itself, up to 6
+  times over about 2 min. A streamed episode resumes where it stopped.
+- Favorites: a star on the now-playing screen keeps a web radio, a track or a
+  downloaded episode, up to 12. The Favorites tile plays them with one tap.
+- Sleep timer: 15, 30, 45 or 60 min, or the end of the track. The volume fades
+  out over the last 30 s before the music stops.
 
 **Podcasts**
 
@@ -108,11 +114,14 @@ builds with ESP-IDF 6.1. The implemented feature set:
   more often about the facts the child knows less well. It counts the mastered
   facts out of 100. "Express 20" starts a session of 20 questions.
 - Instrument tuner (experimental): the microphone detects the pitch on the
-  device.
+  device. Next to it, a metronome (30 to 250 BPM, 1 to 7 beats, tap tempo) and
+  a reference tone (E1 to C7, A4 = 440 Hz).
 - Voice memos: the child records a message with the microphone, up to 60 s. The
   device keeps it on the SD card, or sends it to another Bugne on the same
   network. The receiver shows a small red dot on its home screen and plays the
   memo from the Memos screen. A parent stops the reception from the web page.
+  A parent can also send a voice message from a phone: record it with the
+  phone's recorder app and pick the file on the web page.
 - Walkie-talkie mode: the child holds a button to talk to another Bugne. The
   message plays at once if both devices show the talkie screen. If not, the
   device stores it as a normal memo, so it loses no message. The device deletes
@@ -253,6 +262,7 @@ network. A parent can switch it off.
 | `/` | GET | The web page, or the login page |
 | `/login` | POST | Open a session |
 | `/api/config` | GET, POST | Read or replace `config.json` |
+| `/api/ha/token` | POST | Store the Home Assistant access token |
 | `/api/wifi` | GET, POST | Read or write the saved Wi-Fi networks |
 | `/api/scan` | GET | Scan for the Wi-Fi networks in range |
 | `/api/password` | POST | Change the web page password |
