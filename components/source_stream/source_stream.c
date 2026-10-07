@@ -17,6 +17,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "rf_meta.h"
+#include "http_util.h"
 
 #include <time.h>
 
@@ -264,7 +265,7 @@ static bool fetch_text(const char *url, char *buf, size_t size)
         .buffer_size = 2048,
         .buffer_size_tx = 2048,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = http_util_client_init(&cfg);
     if (!client) {
         return false;
     }
@@ -416,7 +417,7 @@ static bool hseek_http_open(hseek_t *h, int64_t off)
         .url = h->url, .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = HTTP_TIMEOUT_MS, .buffer_size = 2048, .buffer_size_tx = 2048,
     };
-    h->cl = esp_http_client_init(&cfg);
+    h->cl = http_util_client_init(&cfg);
     if (!h->cl) return false;
     char range[40];
     snprintf(range, sizeof(range), "bytes=%lld-", (long long)off);
@@ -676,7 +677,7 @@ static void rf_poll_task(void *arg)
             .buffer_size = 2048,
             .buffer_size_tx = 2048,
         };
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        esp_http_client_handle_t client = http_util_client_init(&cfg);
         bool ok = false;
         if (client) {
             // This endpoint gzips its response unless identity is asked: required, not optional.
@@ -759,7 +760,7 @@ static esp_http_client_handle_t open_preroll_decoy(const char *url)
         // No event_handler: this connection must not touch s_metaint/s_ctype.
         // Default buffer sizes: this connection only reads and discards.
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = http_util_client_init(&cfg);
     if (!client) {
         ESP_LOGW(TAG, "preroll decoy: init failed, skipping");
         return NULL;
@@ -846,7 +847,7 @@ esp_err_t source_stream_play_generation(const char *url, uint32_t generation)
         .buffer_size = 2048,
         .buffer_size_tx = 2048,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = http_util_client_init(&cfg);
     if (!client) {
         close_preroll_decoy(decoy);
         return ESP_ERR_NO_MEM;

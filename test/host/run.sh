@@ -31,6 +31,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_sd_path"
 
+echo "=== building url_escape host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/http_util/include \
+    -o "$OUT/test_url_escape" \
+    test_url_escape.c ../../components/http_util/url_escape.c
+
+echo "=== running ==="
+"$OUT/test_url_escape"
+
 echo "=== building quiet host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -252,9 +261,11 @@ gcc -std=c11 -Wall -Wextra -g \
     -I "$LOT23_INC" \
     -I ../../components/podcast \
     -I ../../components/podcast/include \
+    -I ../../components/http_util/include \
     -I "$CJSON" \
     -o "$OUT/test_podcast_lot23" \
-    test_podcast_lot23.c ../../components/podcast/rss_parse.c "$OUT/yxml.o" "$CJSON/cJSON.c"
+    test_podcast_lot23.c ../../components/podcast/rss_parse.c "$OUT/yxml.o" "$CJSON/cJSON.c" \
+    ../../components/http_util/http_util.c ../../components/http_util/url_escape.c
 
 echo "=== running ==="
 "$OUT/test_podcast_lot23"

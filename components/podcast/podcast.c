@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "source_sd.h"
+#include "http_util.h"
 
 static const char *TAG = "podcast";
 
@@ -292,7 +293,7 @@ esp_err_t podcast_refresh_cancelable(int id, const char *name, const char *rss_u
         .buffer_size = HTTP_CHUNK,
         .buffer_size_tx = 2048,  // long feed URLs, same headroom as the download path
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = http_util_client_init(&cfg);
     char *chunk = heap_caps_malloc(HTTP_CHUNK, MALLOC_CAP_SPIRAM);
     bool net_ok = false;
     if (client && chunk && http_open_redirect(client, cancel, deadline) == 200) {
@@ -523,7 +524,7 @@ esp_err_t podcast_download_episode(const podcast_episode_t *ep, int skip_seconds
         .buffer_size = 4096,     // larger TLS reads speed the download
         .buffer_size_tx = 2048,  // long Radio France episode URLs
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = http_util_client_init(&cfg);
     if (!client) { fclose(fo); remove(part_abs); return ESP_ERR_NO_MEM; }
 
     bool ok = false;
@@ -1006,7 +1007,7 @@ static void download_cover(const char *url, const char *podir, volatile bool *ca
         .buffer_size = 4096,
         .buffer_size_tx = 2048,  // feed image URLs are long too
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = http_util_client_init(&cfg);
     if (!client) { fclose(fo); remove(part_abs); return; }
 
     bool ok = false;

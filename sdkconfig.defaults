@@ -136,3 +136,10 @@ CONFIG_ESP_COREDUMP_LOGS=n
 # FREERTOS_TASK_CREATE_ALLOW_EXT_MEM; setting the size here keeps the ~1.8 KB
 # cost visible instead of implicit.
 CONFIG_ESP_COREDUMP_STACK_SIZE=1792
+
+# Podcast hosts behind Google Trust Services (e.g. audio.ausha.co) send a chain
+# ending in GTS Root R4 cross-signed by GlobalSign Root CA, which IDF 6.1 no
+# longer ships: the default bundle check only looks at the last issuer and
+# fails with "No matching trusted root certificate found". Cross-signed verify
+# also accepts a chain cert that is itself a bundle root (~700 B more heap).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
