@@ -61,6 +61,13 @@ typedef struct {
 #define ROAM_MARGIN_DB       8                // candidate must beat current by this
 #define ROAM_MIN_DWELL_US    (90 * 1000 * 1000)
 
+// A network the failover gave up on ("visible but not joinable": strong signal,
+// yet every join is refused) is benched for this long. Roaming skips it, and
+// failover only picks it when nothing else configured is visible. Without this,
+// a strong but unjoinable box was re-tried by the roam check every ~2 min, each
+// attempt costing a 6-15 s outage (observed on a fleet unit, 2026-09-30).
+#define NET_BENCH_US         (10LL * 60 * 1000 * 1000)
+
 static net_state_t s_state = NET_STATE_BOOT;
 static bool s_want_sta;        // we have credentials and want to be a station
 static bool s_connected_once;  // first successful station connect happened
@@ -77,6 +84,13 @@ static int s_cred_count;   // number of configured networks (0..CFG_WIFI_SLOTS)
 static int s_cur;          // index of the network we are currently trying
 static int s_fail_count;   // consecutive failures on s_cur (drives failover)
 static int s_total_fails;  // total failures before first connect (drives AP fallback)
+static int s_bench_idx = -1;      // network benched after an unjoinable failover, or -1
+static int64_t s_bench_until_us;  // bench expiry (esp_timer time)
+
+static bool net_is_benched(int c)
+{
+    return c == s_bench_idx && esp_timer_get_time() < s_bench_until_us;
+}
 
 static void start_mdns(void);    // defined below
 static esp_err_t configure_ap(void);  // defined below
@@ -89,6 +103,15 @@ static esp_err_t apply_sta_config(void)
     wifi_config_t sta = {0};
     strlcpy((char *)sta.sta.ssid, s_creds[s_cur].ssid, sizeof(sta.sta.ssid));
     strlcpy((char *)sta.sta.password, s_creds[s_cur].pass, sizeof(sta.sta.password));
+    // IDF 6.1 turned on "WPA3 compatible mode" for stations by default: the
+    // station honours the RSN override elements (Wi-Fi 7 era boxes advertise
+    // WPA3 there while the base RSNE stays WPA2). Some boxes then reject the
+    // 4-way handshake with reason 17 (IE_IN_4WAY_DIFFERS) on every attempt;
+    // seen on a Bbox at -50 dBm after the IDF 6.1 migration, while its WPA2-only
+    // repeater kept working. Opt out: join through the base RSNE, exactly like
+    // the IDF 5.5 builds did. Pure WPA3 networks (SAE in the base RSNE) and PMF
+    // negotiation are unaffected.
+    sta.sta.disable_wpa3_compatible_mode = 1;
     return esp_wifi_set_config(WIFI_IF_STA, &sta);
 }
 
@@ -114,9 +137,16 @@ static void failover_task(void *arg)
     size_t n = 0;
     int pick = -1;
     if (net_scan(aps, sizeof(aps) / sizeof(aps[0]), &n) == ESP_OK) {
-        for (size_t i = 0; i < n && pick < 0; i++) {  // strongest first
-            for (int c = 0; c < s_cred_count; c++) {
-                if (strcmp(s_creds[c].ssid, aps[i].ssid) == 0) { pick = c; break; }
+        // Strongest first. A benched network is only a last resort: pass 0
+        // skips it, pass 1 (reached only if pass 0 found nothing) accepts it.
+        for (int pass = 0; pass < 2 && pick < 0; pass++) {
+            for (size_t i = 0; i < n && pick < 0; i++) {
+                for (int c = 0; c < s_cred_count; c++) {
+                    if (strcmp(s_creds[c].ssid, aps[i].ssid) != 0) continue;
+                    if (pass == 0 && net_is_benched(c)) break;
+                    pick = c;
+                    break;
+                }
             }
         }
     }
@@ -133,8 +163,10 @@ static void failover_task(void *arg)
         if (++s_failover_stays >= 2) {
             pick = (s_cur + 1) % s_cred_count;
             s_failover_stays = 0;
-            ESP_LOGW(TAG, "failover: %s visible but not joinable, trying %s",
-                     s_creds[s_cur].ssid, s_creds[pick].ssid);
+            s_bench_idx = s_cur;
+            s_bench_until_us = esp_timer_get_time() + NET_BENCH_US;
+            ESP_LOGW(TAG, "failover: %s visible but not joinable, benched for %d min, trying %s",
+                     s_creds[s_cur].ssid, (int)(NET_BENCH_US / 60000000LL), s_creds[pick].ssid);
         } else {
             ESP_LOGI(TAG, "failover: staying on %s (still the strongest visible)",
                      s_creds[s_cur].ssid);
@@ -485,6 +517,7 @@ static void roam_scan_and_switch(void)
         }
         for (int c = 0; c < s_cred_count; c++) {
             if (strcmp(s_creds[c].ssid, aps[i].ssid) == 0) {
+                if (net_is_benched(c)) break;  // refused us recently: not a roam target
                 s_cur = c;
                 apply_sta_config();
                 s_last_roam_us = esp_timer_get_time();
