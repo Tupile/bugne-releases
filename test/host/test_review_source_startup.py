@@ -38,10 +38,13 @@ prelude = r'''
 #define MALLOC_CAP_SPIRAM 0
 #define AUDIO_SOURCE_SD 1
 #define SD_IO_BUF_BYTES 1024
+#define SD_MOUNT_POINT "/sdcard"
 #define taskENTER_CRITICAL(m) do { assert(!locked); locked = true; } while (0)
 #define taskEXIT_CRITICAL(m) do { assert(locked); locked = false; } while (0)
 typedef int esp_err_t;
 typedef enum { DECODE_FORMAT_MP3, DECODE_FORMAT_FLAC, DECODE_FORMAT_AAC, DECODE_FORMAT_OGG } decode_format_t;
+typedef void sdmmc_card_t;
+typedef struct { int dummy; } DIR;
 typedef struct {
     size_t (*read)(void *, void *, size_t);
     bool (*seek)(void *, int, int);
@@ -49,10 +52,11 @@ typedef struct {
     void *ctx;
     int64_t total_bytes;
 } decode_source_t;
-static bool locked, s_present = true, s_completed;
+static bool locked, s_present = true, s_completed, s_init_done;
 static volatile bool s_stop;
 static uint32_t s_generation, s_completed_generation, s_rf_gen;
 static int hook, decodes, acquired, released;
+static sdmmc_card_t *s_card;
 static esp_err_t decode_result, acquire_result;
 static FILE *file;
 static void source_sd_stop(void);
@@ -68,6 +72,23 @@ static int close_file(FILE *f) { assert(!locked && f == file); if (hook == 4) so
 static void *heap_caps_malloc(size_t n, int caps) { assert(!locked); (void)caps; return malloc(n); }
 static int buffer_file(FILE *f, char *b, int mode, size_t size) { (void)f; (void)b; (void)mode; (void)size; return 0; }
 #define setvbuf buffer_file
+static int64_t mocked_time;
+static int64_t esp_timer_get_time(void) { return mocked_time; }
+static int init_calls, opendir_calls, closedir_calls, unmount_calls;
+static bool opendir_fails;
+static esp_err_t unmount_result;
+static esp_err_t source_sd_init(void) { init_calls++; return ESP_OK; }
+static DIR *mock_opendir(const char *name) {
+    (void)name; opendir_calls++;
+    if (opendir_fails) return NULL;
+    static DIR d; return &d;
+}
+static void mock_closedir(DIR *d) { (void)d; closedir_calls++; }
+#define opendir mock_opendir
+#define closedir mock_closedir
+static esp_err_t esp_vfs_fat_sdcard_unmount(const char *path, sdmmc_card_t *card) {
+    (void)path; (void)card; unmount_calls++; return unmount_result;
+}
 static esp_err_t audio_arbiter_acquire(int source) {
     assert(!locked); (void)source; acquired++;
     if (hook == 2) source_sd_stop();
@@ -83,7 +104,7 @@ esp_err_t source_sd_play_generation(const char *path, uint32_t generation);
 '''
 body = "\n".join(function(sd, name) for name in (
     "source_sd_generation", "source_sd_stop", "source_sd_completed", "file_read", "file_seek",
-    "file_tell", "format_from_path", "source_sd_play", "source_sd_play_generation",
+    "file_tell", "format_from_path", "source_sd_play", "source_sd_play_generation", "source_sd_poll"
 ))
 startup = function(stream, "source_stream_play_generation")
 startup = startup[:startup.index('    icy_set_title("");')] + "    (void)rf_generation;\n    return ESP_OK;\n}"
@@ -126,7 +147,57 @@ int main(void) {
     source_stream_stop();
     assert(source_stream_play_generation("url", queued) == ESP_ERR_INVALID_STATE && s_stop);
     assert(source_stream_play_generation(NULL, source_stream_generation()) == ESP_ERR_INVALID_ARG);
-    puts("actual SD playback and stream startup generation guards: passed");
+
+    s_init_done = false; mocked_time = init_calls = opendir_calls = closedir_calls = 0;
+    source_sd_poll();
+    assert(init_calls == 0 && opendir_calls == 0);
+
+    s_init_done = true; s_present = false;
+    source_sd_poll();
+    assert(init_calls == 1 && opendir_calls == 0);
+
+    source_sd_poll();
+    assert(init_calls == 1); // Rate limited
+
+    mocked_time = 29 * 1000000LL;
+    source_sd_poll();
+    assert(init_calls == 1); // Still rate limited
+
+    mocked_time = 30 * 1000000LL;
+    source_sd_poll();
+    assert(init_calls == 2); // 30s passed, init called again
+
+    s_present = true; opendir_fails = false;
+    mocked_time = 60 * 1000000LL;
+    source_sd_poll();
+    assert(opendir_calls == 1 && closedir_calls == 1 && init_calls == 2);
+
+    source_sd_poll();
+    assert(opendir_calls == 1); // Rate limited
+
+    mocked_time = (60 + 59) * 1000000LL;
+    source_sd_poll();
+    assert(opendir_calls == 1); // Still rate limited
+
+    mocked_time = (60 + 60) * 1000000LL;
+    source_sd_poll();
+    assert(opendir_calls == 2 && closedir_calls == 2);
+
+    opendir_fails = true; unmount_result = ESP_OK;
+    mocked_time = (120 + 60) * 1000000LL;
+    source_sd_poll();
+    assert(opendir_calls == 3 && closedir_calls == 2 && unmount_calls == 1 && !s_present);
+
+    mocked_time = (180 + 30) * 1000000LL;
+    source_sd_poll();
+    assert(init_calls == 3);
+
+    s_present = true; opendir_fails = true; unmount_result = ESP_FAIL;
+    mocked_time = (210 + 60) * 1000000LL;
+    source_sd_poll();
+    assert(opendir_calls == 4 && unmount_calls == 2 && s_present);
+
+    puts("actual SD playback, stream startup generation guards, and source_sd_poll rate limits: passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="bugne-source-startup-") as directory:

@@ -206,9 +206,8 @@ std::string g_name;
 bool g_mdns_done = false;
 esp_err_t advertise_mdns(const char *instance);  // defined below
 
-void sendspin_task(void *arg)
+void sendspin_task(void *)
 {
-    (void)arg;
     bool warned = false;
     int last_vol = -1;      // -1 forces one publish so the boot volume reaches the role
     bool last_ext = false;  // matches the client's default SYNCHRONIZED state

@@ -4,6 +4,7 @@
 #include "audio.h"
 #include "tags.h"
 #include "art.h"
+#include "adts.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -463,6 +464,10 @@ static int mp4_read_cb(int64_t offset, void *buffer, size_t size, void *token)
     return 0;
 }
 
+// A live AAC stream can carry an occasional corrupt frame (seen on Radio
+// France icecast: ffmpeg reports "Packet corrupt" too). Skip it and resync on
+// the next ADTS header; give up only after this many failures in a row.
+#define AAC_MAX_BAD_FRAMES 10
 #define AAC_PCM_CAP_INIT 16384  // one AAC frame: 1024 (LC) or 2048 (HE) samples * 2ch * 2B
 
 // First sample of the MP4 track at or after target_ms; not_found when none is.
@@ -607,6 +612,7 @@ static esp_err_t run_aac_adts(const decode_source_t *src, uint32_t skip_ms,
     bool opened = false;
     uint32_t rate = 44100, ch = 2;
     uint64_t cur = 0, skip_target = 0;  // in samples
+    int bad = 0;                        // consecutive corrupt frames
 
     for (;;) {
         // Top up the input buffer.
@@ -632,7 +638,20 @@ static esp_err_t run_aac_adts(const decode_source_t *src, uint32_t skip_ms,
             avail += g;
             continue;
         }
-        if (e != ESP_AUDIO_ERR_OK) break;
+        if (e != ESP_AUDIO_ERR_OK) {
+            // Corrupt frame: drop it and resync instead of ending playback.
+            if (++bad >= AAC_MAX_BAD_FRAMES) {
+                ESP_LOGW(TAG, "aac: %d bad frames in a row (err %d), giving up", bad, (int)e);
+                break;
+            }
+            size_t skip = adts_resync(inbuf, avail);
+            if (skip == 0) skip = avail ? 1 : 0;
+            ESP_LOGW(TAG, "aac: bad frame (err %d), skipped %u bytes", (int)e, (unsigned)skip);
+            memmove(inbuf, inbuf + skip, avail - skip);
+            avail -= skip;
+            continue;
+        }
+        bad = 0;
         uint32_t consumed = raw.consumed ? raw.consumed : 1;
         if (consumed > avail) consumed = avail;
         memmove(inbuf, inbuf + consumed, avail - consumed);

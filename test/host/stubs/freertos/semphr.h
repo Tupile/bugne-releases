@@ -23,3 +23,4 @@ static inline BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
     (void)s;
     return pdTRUE;
 }
+static inline void vSemaphoreDelete(SemaphoreHandle_t s) { (void)s; }

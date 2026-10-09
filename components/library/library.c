@@ -199,7 +199,14 @@ esp_err_t library_load(void)
     char line[LIB_PATH_MAX + 3 * LIB_NAME_MAX + 16];
     while (s_count < LIB_MAX_TRACKS && fgets(line, sizeof(line), f)) {
         char *nl = strpbrk(line, "\r\n");
-        if (nl) *nl = '\0';
+        if (nl) {
+            *nl = '\0';
+        } else if (strlen(line) == sizeof(line) - 1) {
+            ESP_LOGW(TAG, "index line too long, skipping");
+            int c;
+            while ((c = fgetc(f)) != EOF && c != '\n');
+            continue;
+        }
         char *fields[5], *p = line;
         bool ok = true;
         for (int k = 0; k < 4; k++) {  // first 4 fields are tab-terminated

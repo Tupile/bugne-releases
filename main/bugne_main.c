@@ -5,6 +5,8 @@
 // the device keeps running, so a missing codec, SD card, or network never
 // reboot-loops the whole unit.
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -73,15 +75,29 @@ static void ota_validate_task(void *arg)
 // PSRAM is reported too, not because it is tight but because the buffers that
 // live there (cover art bitmaps, browse tables, decoder buffers) are the ones
 // a leak would silently grow, invisible in the internal figures.
+// Sampled every minute but logged only every HEAP_LOG_PERIOD_MIN minutes, or at
+// once when the internal low-water mark drops by HEAP_LOG_LOW_STEP or more
+// (smaller creeps wait for the periodic line): a line per minute filled the
+// /api/logs ring in ~3 h and pushed real warnings out of it.
+#define HEAP_LOG_PERIOD_MIN 15
+#define HEAP_LOG_LOW_STEP   1024
 static void heap_log_task(void *arg)
 {
     (void)arg;
+    size_t last_min = SIZE_MAX;
+    unsigned minutes = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(60000));
-        ESP_LOGI(TAG, "internal RAM: %u free, %u min free (PSRAM %u free)",
+        size_t min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+        bool new_low = last_min == SIZE_MAX || min_free + HEAP_LOG_LOW_STEP <= last_min;
+        if (!new_low && ++minutes < HEAP_LOG_PERIOD_MIN) continue;
+        minutes = 0;
+        last_min = min_free;
+        ESP_LOGI(TAG, "internal RAM: %u free, %u min free (PSRAM %u free)%s",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                 (unsigned)min_free,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 new_low ? " [new low]" : "");
     }
 }
 

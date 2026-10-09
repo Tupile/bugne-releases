@@ -36,6 +36,8 @@ prelude = r'''
 #define ESP_ERR_INVALID_SIZE 0x104
 #define ESP_ERR_TIMEOUT 0x107
 #define ESP_ERR_NVS_NOT_FOUND 0x1102
+#define NVS_KEY_PW_SALT "pw_salt"
+#define NVS_KEY_PW_HASH "pw_hash"
 #define ESP_LOGE(...) ((void)0)
 #define ESP_LOGI(...) ((void)0)
 #define ESP_RETURN_ON_ERROR(expr, ...) do { int e = (expr); if (e) return e; } while (0)
@@ -83,6 +85,7 @@ static esp_err_t save_to_disk(const config_t *c) {
 }
 typedef int nvs_handle_t;
 static int nvs_open_error, nvs_set_error, nvs_commit_error, nvs_calls, nvs_commits;
+static int nvs_erase_error1, nvs_erase_error2;
 static char token_pending[CFG_HA_TOKEN_MAX], token_saved[CFG_HA_TOKEN_MAX];
 static int nvs_open(const char *ns, int mode, nvs_handle_t *h) {
     (void)ns; (void)mode; *h = 1; nvs_calls++; return nvs_open_error;
@@ -93,7 +96,9 @@ static int nvs_set_str(nvs_handle_t h, const char *key, const char *value) {
     return nvs_set_error;
 }
 static int nvs_erase_key(nvs_handle_t h, const char *key) {
-    (void)h; (void)key;
+    (void)h;
+    if (!strcmp(key, "pw_salt")) return nvs_erase_error1;
+    if (!strcmp(key, "pw_hash")) return nvs_erase_error2;
     token_pending[0] = 0;
     return nvs_set_error ? nvs_set_error : (token_saved[0] ? ESP_OK : ESP_ERR_NVS_NOT_FOUND);
 }
@@ -127,7 +132,7 @@ names = ('clampi', 'set_defaults', 'parse_one_alarm', 'dedup_ids', 'load_from_js
          'config_store_get', 'candidate_begin', 'candidate_finish',
          'config_store_set_lang', 'config_store_set_orientation', 'config_store_set_theme',
          'config_store_set_alarm', 'config_store_favorite_add', 'config_store_favorite_remove',
-         'config_store_write_json', 'config_store_set_ha_token')
+         'config_store_write_json', 'config_store_set_ha_token', 'config_store_clear_password')
 serializer = r'''
 #define CONFIG_PATH "config.json"
 #define CONFIG_TMP_PATH "config.tmp"
@@ -342,6 +347,31 @@ int main(void) {
     r = request("");
     assert(ha_token_post(&r) == ESP_OK && r.status == 200);
     assert(!saves && !memcmp(&live, &before, sizeof(live)));
+
+    // Test config_store_clear_password
+    nvs_open_error = nvs_erase_error1 = nvs_erase_error2 = nvs_commit_error = 0;
+    assert(config_store_clear_password() == ESP_OK);
+
+    nvs_open_error = ESP_FAIL;
+    assert(config_store_clear_password() == ESP_FAIL);
+
+    nvs_open_error = 0;
+    nvs_erase_error1 = ESP_ERR_NVS_NOT_FOUND;
+    nvs_erase_error2 = ESP_ERR_NVS_NOT_FOUND;
+    assert(config_store_clear_password() == ESP_OK);
+
+    nvs_erase_error1 = ESP_FAIL;
+    assert(config_store_clear_password() == ESP_FAIL);
+
+    nvs_erase_error1 = ESP_OK;
+    nvs_erase_error2 = ESP_FAIL;
+    assert(config_store_clear_password() == ESP_FAIL);
+
+    nvs_erase_error1 = nvs_erase_error2 = ESP_OK;
+    nvs_commit_error = ESP_FAIL;
+    assert(config_store_clear_password() == ESP_FAIL);
+    nvs_commit_error = 0;
+
     serializer_failures();
     puts("lot4 config: candidate failures/success, stable pointer, token auth/bounds/NVS/legacy rejection passed");
 }

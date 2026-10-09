@@ -76,6 +76,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_tone"
 
+echo "=== building adts host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/decode \
+    -o "$OUT/test_adts" \
+    test_adts.c ../../components/decode/adts.c
+
+echo "=== running ==="
+"$OUT/test_adts"
+
 echo "=== building epmeta host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -177,6 +186,16 @@ echo "=== running ==="
 "$OUT/test_memo_store"
 "$OUT/test_memo_send"
 
+echo "=== building audio_arbiter host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/audio/include \
+    -o "$OUT/test_audio_arbiter" \
+    test_audio_arbiter.c
+
+echo "=== running ==="
+"$OUT/test_audio_arbiter"
+
 echo "=== building played host tests ==="
 # The storage paths are redirected to /tmp through the #ifndef seam.
 gcc -std=c11 -Wall -Wextra -g \
@@ -210,6 +229,17 @@ gcc -std=c11 -Wall -Wextra -g \
 
 echo "=== running ==="
 "$OUT/test_logstore"
+
+echo "=== building art host tests ==="
+# art.c has an esp_jpeg dependency mocked in the test, so we include it directly
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs -I stubs/freertos \
+    -I ../../components/decode/include \
+    -o "$OUT/test_art" \
+    test_art.c
+
+echo "=== running ==="
+"$OUT/test_art"
 
 echo "=== building tags host tests ==="
 # tags.c is pure (no ESP dependency), so it compiles straight into the test.

@@ -7,6 +7,7 @@ Executes automated firmware tests on ESP32-S3 using Wokwi CLI.
 import argparse
 import glob
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -149,7 +150,7 @@ def build_firmware():
     
     if export_script:
         idf_dir = os.path.dirname(export_script)
-        cmd = f"export IDF_PATH='{idf_dir}' && . '{export_script}' && idf.py build"
+        cmd = f"export IDF_PATH={shlex.quote(idf_dir)} && . {shlex.quote(export_script)} && idf.py build"
     else:
         cmd = "idf.py build"
 
