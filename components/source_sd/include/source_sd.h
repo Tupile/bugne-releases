@@ -53,6 +53,11 @@ void source_sd_poll(void);
 // untouched) if no card is mounted or the query fails. Either pointer may be NULL.
 bool source_sd_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 
+// Below this free space the card counts as "almost full": the device shows a
+// message on the home screen, /api/status reports sd.low, and the web page
+// offers to limit the episodes kept per podcast.
+#define SD_LOW_ALERT_BYTES (500ULL * 1024 * 1024)
+
 // Play a file (blocking until it finishes or errors). path is absolute, for
 // example "/sdcard/music/song.mp3". Acquires the audio arbiter for the duration.
 esp_err_t source_sd_play(const char *path);

@@ -174,6 +174,7 @@ static const lang_def_t LANGS[] = {
             [STR_DRONE]              = "Ref. tone",
             [STR_METRO_BEATS_FMT]    = "%d beats",
             [STR_METRO_TAP]          = "Tap",
+            [STR_SD_LOW_FMT]         = "SD card almost full: %d MB free.",
         },
     },
     {
@@ -339,6 +340,7 @@ static const lang_def_t LANGS[] = {
             [STR_DRONE]              = "Diapason",
             [STR_METRO_BEATS_FMT]    = "%d temps",
             [STR_METRO_TAP]          = "Tap",
+            [STR_SD_LOW_FMT]         = "Carte SD presque pleine : %d Mo libres.",
         },
     },
 };

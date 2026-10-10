@@ -137,6 +137,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_pitch"
 
+echo "=== building podcast_keep host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I "$SRC/include" \
+    -o "$OUT/test_podcast_keep" \
+    test_podcast_keep.c "$SRC/podcast_keep.c"
+
+echo "=== running ==="
+"$OUT/test_podcast_keep"
+
 echo "=== building lang host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \

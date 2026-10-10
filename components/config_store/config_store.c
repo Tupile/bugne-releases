@@ -230,6 +230,10 @@ static void load_from_json(config_t *c, const cJSON *root)
             int sk = cJSON_IsNumber(skip) ? skip->valueint
                    : (cJSON_IsString(skip) && skip->valuestring) ? atoi(skip->valuestring) : 0;
             p->skip_seconds = sk < 0 ? 0 : sk;
+            const cJSON *keep = cJSON_GetObjectItemCaseSensitive(it, "keep_episodes");
+            int kp = cJSON_IsNumber(keep) ? keep->valueint
+                   : (cJSON_IsString(keep) && keep->valuestring) ? atoi(keep->valuestring) : 0;
+            p->keep_episodes = kp < 0 ? 0 : (kp > PODCAST_KEEP_MAX ? PODCAST_KEEP_MAX : kp);
         }
         int ids[CFG_MAX_PODCASTS];
         for (size_t i = 0; i < c->podcast_count; i++) ids[i] = c->podcasts[i].id;
@@ -382,7 +386,8 @@ static esp_err_t save_to_disk(const config_t *c)
         if (!cJSON_AddNumberToObject(o, "id", c->podcasts[i].id) ||
             !cJSON_AddStringToObject(o, "title", c->podcasts[i].title) ||
             !cJSON_AddStringToObject(o, "rss_url", c->podcasts[i].rss_url) ||
-            !cJSON_AddNumberToObject(o, "skip_seconds", c->podcasts[i].skip_seconds)) goto no_mem;
+            !cJSON_AddNumberToObject(o, "skip_seconds", c->podcasts[i].skip_seconds) ||
+            !cJSON_AddNumberToObject(o, "keep_episodes", c->podcasts[i].keep_episodes)) goto no_mem;
     }
 
     cJSON *ui = cJSON_AddObjectToObject(root, "ui");

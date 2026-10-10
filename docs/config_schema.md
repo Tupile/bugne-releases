@@ -33,7 +33,7 @@ configuration:
     { "id": 1, "name": "FIP", "url": "https://icecast.example/fip", "skip_preroll": 0 }
   ],
   "podcasts": [
-    { "id": 1, "title": "Example Show", "rss_url": "https://example/feed.xml", "skip_seconds": 0 }
+    { "id": 1, "title": "Example Show", "rss_url": "https://example/feed.xml", "skip_seconds": 0, "keep_episodes": 0 }
   ],
   "ui": {
     "volume": 60,
@@ -86,6 +86,7 @@ configuration:
 | `podcasts[].title` | string | Display title. |
 | `podcasts[].rss_url` | string | Podcast RSS feed URL. |
 | `podcasts[].skip_seconds` | int | Intro/ads to skip (0 = none). Trimmed off each MP3 at download, and skipped at the start of streamed playback. |
+| `podcasts[].keep_episodes` | int | Episodes kept on the SD card, 0 to 300, default 0 (no limit). Only the first N of the feed are downloaded; older downloaded files are deleted by the next download job (the episodes stay listed and stream). The playing episode, favorites and alarm tracks are never deleted. |
 | `ui.volume` | int | 0 to 100. |
 | `ui.volume_max` | int | Volume ceiling 1 to 100 (child-ear protection); every volume request is clamped to it. Default 100. |
 | `ui.screen_sleep_seconds` | int | Idle seconds before the screen sleeps. |

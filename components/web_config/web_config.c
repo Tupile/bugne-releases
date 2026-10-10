@@ -46,7 +46,7 @@ static const char *TAG = "web_config";
 #define WEB_MAX_BODY      32768  // bound on config.json uploads, must stay >= CONFIG_FILE_MAX
 // Below this free space the SD card is "almost full": warn before/while caching
 // episodes (a full podcast can be several hundred MB).
-#define SD_LOW_FREE_BYTES (200ULL * 1024 * 1024)
+#define SD_LOW_FREE_BYTES SD_LOW_ALERT_BYTES  // source_sd.h, shared with the device alert
 #define WEB_MAX_WIFI_BODY 512    // bound on the small wifi credential post
 #define SESSION_TOKEN_LEN 32     // hex chars
 #define COOKIE_NAME       "bugne_session"
@@ -1700,6 +1700,7 @@ static esp_err_t status_get(httpd_req_t *req)
         cJSON_AddBoolToObject(sd, "present", sd_present);
         cJSON_AddNumberToObject(sd, "total", (double)sd_total);
         cJSON_AddNumberToObject(sd, "free", (double)sd_free);
+        cJSON_AddBoolToObject(sd, "low", sd_present && sd_total > 0 && sd_free < SD_LOW_FREE_BYTES);
     }
     char *txt = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);

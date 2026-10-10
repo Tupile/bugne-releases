@@ -37,6 +37,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -65,6 +66,7 @@
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 #include "lvgl_private.h"  // full lv_theme_t, for the child-theme extension pattern
+#include "podcast_keep.h"
 
 static const char *TAG = "ui";
 
@@ -413,6 +415,9 @@ static volatile bool s_played_since_maint;  // audio played since the last auto-
 static volatile bool s_maint_done_since_boot; // one auto-maintenance has run since boot
 #define DL_IDLE_RESUME_US (5LL * 60 * 1000000)   // resume only after 5 min idle
 #define DL_MIN_FREE_BYTES (150ULL * 1024 * 1024) // stop downloading below this SD free space
+// Low SD space message (tick_sd_low_alert): next check time, last time shown.
+static int64_t s_sd_alert_next_us = 20LL * 1000000;
+static int64_t s_sd_alert_shown_us = -1;
 // GitHub firmware update check, run as an extra auto-maintenance phase (A1).
 // web_config already depends on ui, so ui cannot REQUIRE web_config back
 // (circular); bugne_main wires this function pointer to web_config_gh_check
@@ -1092,6 +1097,62 @@ static bool job_refresh(void)
 // cursor, refreshes first when in "new" mode, skips cached episodes, and persists
 // the cursor as it goes. On a pause/cancel (s_dl_cancel) it saves the cursor and
 // returns with the job still active; on completion it clears the job.
+// A downloaded episode file that must survive the episode limit: the one
+// playing (or last played), a favorite, an alarm track. Paths are compared as
+// stored: favorites and alarms keep them relative to the SD root.
+static bool keep_protected(const char *abs, const config_t *c)
+{
+    if (s_now_target[0] && strcmp(abs, s_now_target) == 0) return true;
+    const char *rel = (strncmp(abs, "/sdcard/", 8) == 0) ? abs + 8 : abs;
+    for (size_t i = 0; i < c->favorite_count; i++) {
+        if (c->favorites[i].type == 1 && strcmp(c->favorites[i].path, rel) == 0) return true;
+    }
+    for (int i = 0; i < CFG_MAX_ALARMS; i++) {
+        if (c->alarms[i].sd_path[0] && strcmp(c->alarms[i].sd_path, rel) == 0) return true;
+    }
+    return false;
+}
+
+// Apply keep_episodes to every in-scope podcast: delete the downloaded files
+// past the first N entries of its manifest (feed order, newest first). The
+// episodes stay listed and stream. Worker task only (SD I/O).
+static void job_prune(const config_t *c)
+{
+    for (size_t i = 0; i < c->podcast_count && !s_dl_cancel; i++) {
+        const config_podcast_t *p = &c->podcasts[i];
+        if (!job_in_scope(p) || p->keep_episodes <= 0) continue;
+        podcast_episode_t *eps = NULL;
+        size_t cap = 0, n = 0;
+        if (podcast_read_manifest(p->id, &eps, &cap, &n) != ESP_OK || n <= (size_t)p->keep_episodes) {
+            free(eps);
+            continue;
+        }
+        bool *flags = heap_caps_calloc(3 * n, sizeof(bool), MALLOC_CAP_SPIRAM);
+        if (!flags) { free(eps); continue; }
+        bool *cached = flags, *prot = flags + n, *del = flags + 2 * n;
+        for (size_t e = 0; e < n; e++) {
+            cached[e] = eps[e].cached;
+            prot[e] = cached[e] && keep_protected(eps[e].cache_path, c);
+        }
+        int removed = 0;
+        uint64_t freed = 0;
+        if (podcast_keep_select(cached, prot, n, p->keep_episodes, del) > 0) {
+            for (size_t e = 0; e < n && !s_dl_cancel; e++) {
+                if (!del[e]) continue;
+                struct stat st;
+                uint64_t sz = (stat(eps[e].cache_path, &st) == 0) ? (uint64_t)st.st_size : 0;
+                if (unlink(eps[e].cache_path) == 0) { removed++; freed += sz; }
+            }
+        }
+        if (removed) {
+            ESP_LOGI(TAG, "podcast %d: keep %d, deleted %d older episode(s), %llu MB freed",
+                     p->id, p->keep_episodes, removed, (unsigned long long)(freed / (1024 * 1024)));
+        }
+        free(flags);
+        free(eps);
+    }
+}
+
 static void worker_run_job(void)
 {
     const config_t *c = config_store_get();
@@ -1113,6 +1174,10 @@ static void worker_run_job(void)
             s_dljob.refresh_done = true;
             dljob_persist();
         }
+        // Episode limit: delete what falls outside each podcast's window before
+        // fetching, so the space freed serves the downloads below.
+        job_prune(c);
+        if (s_dl_cancel) { s_downloading = false; return; }
         s_dl_phase = UI_DL_DOWNLOADING;
 
         // Resume target captured before we overwrite the cursor below.
@@ -1124,7 +1189,7 @@ static void worker_run_job(void)
         for (size_t i = 0; i < c->podcast_count; i++) {
             const config_podcast_t *p = &c->podcasts[i];
             if (!job_in_scope(p)) continue;
-            int cnt = (int)podcast_manifest_count(p->id);
+            int cnt = (int)podcast_keep_window(podcast_manifest_count(p->id), p->keep_episodes);
             total += cnt;
             if (before) {
                 if (p->id == resume_pod) { done += (resume_ep < cnt ? resume_ep : cnt); before = false; }
@@ -1153,7 +1218,8 @@ static void worker_run_job(void)
             s_dljob.cur_ep_idx = (int)start_ep;
             dljob_persist();
 
-            for (size_t e = start_ep; e < got; e++) {
+            size_t lim = podcast_keep_window(got, p->keep_episodes);  // episode limit
+            for (size_t e = start_ep; e < lim; e++) {
                 if (s_dl_cancel) { s_dljob.cur_ep_idx = (int)e; dljob_persist(); free(eps); s_downloading = false; return; }
                 if (!s_dljob.force && eps[e].cached) {
                     s_dl_done++;
@@ -4961,6 +5027,7 @@ static void talkie_send_run(void)
 static void memo_stop_sync(void)
 {
     s_memo_stop = true;
+    audio_set_paused(false);  // a paused memo blocks in audio_write: release it
     for (int i = 0; i < 50 && s_memo_playing; i++) vTaskDelay(pdMS_TO_TICKS(10));
 }
 
@@ -5223,11 +5290,25 @@ static void on_memo_del(lv_event_t *e)
     show(build_memos);
 }
 
+// Icon of the memo play button: pause while playing, play when paused or idle.
+static const char *memo_play_symbol(void)
+{
+    return (s_memo_playing && !audio_is_paused()) ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY;
+}
+
+// Play / pause / resume. Pausing reuses the shared audio pause (audio_write
+// feeds silence and holds the memo loop), like the now-playing screen. Pausing
+// is always allowed; resuming obeys quiet hours and the daily limit.
 static void on_memo_play_toggle(lv_event_t *e)
 {
     (void)e;
     if (s_memo_playing) {
-        s_memo_stop = true;
+        if (audio_is_paused()) {
+            if (play_denied()) return;
+            audio_set_paused(false);
+        } else {
+            audio_set_paused(true);
+        }
     } else {
         if (play_denied()) return;
         char path[MEMO_NAME_MAX + 20];
@@ -5236,15 +5317,22 @@ static void on_memo_play_toggle(lv_event_t *e)
     }
 }
 
+static void on_memo_play_stop(lv_event_t *e)
+{
+    (void)e;
+    memo_stop_sync();  // next play restarts from the beginning
+}
+
 static void build_memo_play(lv_obj_t *scr)
 {
     add_back_cb(scr, on_memo_play_back);
     add_title(scr, s_memo_sel_title);  // two corner widgets: never add_title_wide
     lv_obj_t *del = make_round_btn(scr, LV_SYMBOL_TRASH, 44, false, on_memo_del);
     lv_obj_align(del, LV_ALIGN_TOP_RIGHT, -8, 8);
-    s_memo_play_btn = make_round_btn(scr, s_memo_playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
-                                     72, true, on_memo_play_toggle);
+    s_memo_play_btn = make_round_btn(scr, memo_play_symbol(), 72, true, on_memo_play_toggle);
     lv_obj_align(s_memo_play_btn, LV_ALIGN_CENTER, 0, -8);
+    lv_obj_t *stop = make_round_btn(scr, LV_SYMBOL_STOP, 44, false, on_memo_play_stop);
+    lv_obj_align_to(stop, s_memo_play_btn, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
     // Volume, now-playing pattern: s_np_vol so a web volume change moves it.
     lv_obj_t *vol = lv_slider_create(scr);
     lv_obj_set_width(vol, scr_w() - 60);
@@ -5258,9 +5346,8 @@ static void build_memo_play(lv_obj_t *scr)
     lv_obj_align(vicon, LV_ALIGN_BOTTOM_LEFT, PAD_SIDE, -18);
 }
 
-static void on_memo_row(lv_event_t *e)
+static void memo_open_row(int idx)
 {
-    int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     if (!s_memo_entries || idx < 0 || idx >= s_memo_entry_count) return;
     if (play_denied()) return;
     memo_entry_t *en = &s_memo_entries[idx];
@@ -5283,6 +5370,11 @@ static void on_memo_row(lv_event_t *e)
     char path[MEMO_NAME_MAX + 20];
     memo_abs_path(path, sizeof(path), s_memo_sel_name);
     memo_request(REQ_MEMO_PLAY, path);  // tapping a memo plays it right away
+}
+
+static void on_memo_row(lv_event_t *e)
+{
+    memo_open_row((int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
 }
 
 static void build_memos(lv_obj_t *scr)
@@ -7111,7 +7203,7 @@ static void toast_del_cb(lv_timer_t *t)
 
 // Show a short auto-dismissing message above the mini bar. For cues that have
 // no natural screen to live on (e.g. end of a list after navigating away).
-static void toast(const char *text)
+static void toast_for(const char *text, uint32_t ms)
 {
     lv_obj_t *box = lv_obj_create(lv_layer_top());
     lv_obj_set_style_text_font(box, &bugne_font_14, 0);  // top layer: set it here
@@ -7125,10 +7217,16 @@ static void toast(const char *text)
     lv_obj_align(box, LV_ALIGN_BOTTOM_MID, 0, -MINI_CLEAR);  // clear of the mini bar
     lv_obj_set_scrollable(box, false);
     lv_obj_t *l = lv_label_create(box);
+    lv_obj_set_style_max_width(l, scr_w() - 48, 0);  // long text wraps inside the box
     lv_label_set_text(l, text);
     lv_obj_center(l);
-    lv_timer_t *t = lv_timer_create(toast_del_cb, 3000, box);
+    lv_timer_t *t = lv_timer_create(toast_del_cb, ms, box);
     lv_timer_set_repeat_count(t, 1);  // LVGL deletes the timer after one run
+}
+
+static void toast(const char *text)
+{
+    toast_for(text, 3000);
 }
 
 // ---- Now-playing mini bar (persistent across screens) ----
@@ -7483,6 +7581,10 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "metronome_play",    build_metronome },    // same screen, playing
     { "drone",             build_drone },
     { "drone_play",        build_drone },        // same screen, playing
+    { "memo_play",         build_memo_play },    // bench hooks, see tick_nav_request
+    { "memo_toggle",       build_memo_play },
+    { "memo_stop",         build_memo_play },
+    { "sd_low_alert",      build_home },         // bench hook: re-arm the low SD message
     { "memos",             build_memos },
     { "memo_record",       build_memo_record },
     { "talkie",            build_talkie },       // correspondent picker
@@ -7615,6 +7717,28 @@ static void tick_nav_request(void)
         char name[sizeof(s_nav_req)];
         strlcpy(name, s_nav_req, sizeof(name));
         s_nav_req[0] = '\0';
+        // Memo player bench hooks (no touch injection exists, same precedent as
+        // "metronome_play"): "memo_play" opens and plays the first row of the
+        // memos list (show "memos" first), "memo_toggle" and "memo_stop" press
+        // the player's play/pause and stop buttons.
+        if (strcmp(name, "sd_low_alert") == 0) {
+            if (s_asleep) exit_sleep();  // the message only shows on an awake screen
+            show(build_home);
+            s_sd_alert_next_us = 0;
+            s_sd_alert_shown_us = -1;
+            return;
+        }
+        if (strcmp(name, "memo_play") == 0) {
+            memo_open_row(0);
+            return;
+        }
+        if (strcmp(name, "memo_toggle") == 0 || strcmp(name, "memo_stop") == 0) {
+            if (s_active_builder == build_memo_play) {
+                if (name[5] == 't') on_memo_play_toggle(NULL);
+                else on_memo_play_stop(NULL);
+            }
+            return;
+        }
         // Prepare selection state that these screens' on_open handlers normally set.
         if (strcmp(name, "episodes") == 0) {
             const config_t *c = config_store_get();
@@ -7893,9 +8017,17 @@ static void tick_memo_talkie(void)
             s_memo_state_shown = s_memo_state;  // track silently for a fresh re-entry
             s_memo_peers_shown = s_memo_peer_count;
         }
+        // A paused memo only makes sense on its player screen. Leaving it any
+        // other way than the back arrow (a nav request, SD removal, home
+        // rebuild) must not leave the worker parked in audio_write with the
+        // file open: end the playback, like on_memo_play_back does.
+        if (s_memo_playing && audio_is_paused() && s_active_builder != build_memo_play) {
+            s_memo_stop = true;
+            audio_set_paused(false);
+        }
         if (s_memo_play_btn && s_active_builder == build_memo_play) {
             lv_obj_t *icon = lv_obj_get_child(s_memo_play_btn, 0);
-            const char *want = s_memo_playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY;
+            const char *want = memo_play_symbol();
             if (icon && strcmp(lv_label_get_text(icon), want) != 0) {
                 lv_label_set_text(icon, want);
             }
@@ -7998,6 +8130,30 @@ static void tick_memo_talkie(void)
 
 // Rebuild home when the SD card comes or goes: the memos tile (grey state
 // and unread badge) keys off it. The SD browser handles its own message.
+// Low SD space message on the home screen: first check 20 s after boot, then
+// every 10 min, shown at most once a day. Only on an awake home screen, so it
+// never covers a game or a playing screen. The fix (episode limits) lives on
+// the web page, which shows the same alert.
+#define SD_ALERT_CHECK_US  (10LL * 60 * 1000000)
+#define SD_ALERT_REPEAT_US (24LL * 3600 * 1000000)
+
+static void tick_sd_low_alert(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (now < s_sd_alert_next_us || s_asleep || s_active_builder != build_home ||
+        !source_sd_present()) return;
+    s_sd_alert_next_us = now + SD_ALERT_CHECK_US;
+    if (s_sd_alert_shown_us >= 0 && now - s_sd_alert_shown_us < SD_ALERT_REPEAT_US) return;
+    uint64_t total = 0, freeb = 0;
+    if (!source_sd_usage(&total, &freeb) || total == 0 || freeb >= SD_LOW_ALERT_BYTES) return;
+    char msg[96];
+    snprintf(msg, sizeof(msg), T(STR_SD_LOW_FMT), (int)(freeb / (1024 * 1024)));
+    toast_for(msg, 8000);
+    s_sd_alert_shown_us = now;
+    ESP_LOGW(TAG, "SD almost full: %llu MB free, alert shown",
+             (unsigned long long)(freeb / (1024 * 1024)));
+}
+
 static void tick_sd_presence(void)
 {
     // Hot insert/remove probe. Only when nothing can hold the card busy: the
@@ -8823,6 +8979,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_tone();
     tick_memo_talkie();
     tick_sd_presence();
+    tick_sd_low_alert();
     tick_favorites();
     tick_volume_limit();
     tick_sendspin();

@@ -331,6 +331,13 @@ listening. A download runs when nobody uses the device, and pauses as soon as
 a child plays something. The device also refreshes the feeds and downloads the
 new episodes by itself, after it stays idle for a while.
 
+"Episodes kept on SD" limits how many episodes of a show stay on the card:
+only the latest ones are downloaded, and older files are deleted at the next
+download (they stay in the list and still play over Wi-Fi). Favorites and
+alarm tracks are never deleted. When less than 500 MB is free, the device shows
+a message on its home screen and the web page shows a red banner listing the
+biggest shows, with a "Keep the 30 latest" button for each.
+
 ### Radios
 
 <img src="img/en/web-radios.png" width="300">

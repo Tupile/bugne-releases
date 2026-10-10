@@ -27,6 +27,7 @@ extern "C" {
 #define CFG_RADIO_NAME_MAX    48
 #define CFG_PODCAST_TITLE_MAX 64
 #define CFG_URL_MAX           256
+#define PODCAST_KEEP_MAX      300   // keep_episodes ceiling (= PODCAST_MAX_EPISODES)
 #define CFG_MAX_WEBRADIOS     32
 #define CFG_MAX_PODCASTS      50
 
@@ -42,6 +43,7 @@ typedef struct {
     char title[CFG_PODCAST_TITLE_MAX];
     char rss_url[CFG_URL_MAX];
     int  skip_seconds;  // intro/ads to skip: trimmed off at download, skipped at stream playback
+    int  keep_episodes; // episodes kept on the SD card, newest first (0 = no limit)
 } config_podcast_t;
 
 // One alarm: time + weekday mask + source. See docs/config_schema.md. Up to

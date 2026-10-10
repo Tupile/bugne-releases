@@ -349,6 +349,14 @@ quand personne n'utilise l'appareil, et se met en pause dès qu'un enfant lance
 une écoute. L'appareil actualise aussi les flux et télécharge les nouveautés
 tout seul, quand il est resté inactif un moment.
 
+« Épisodes gardés sur la SD » limite le nombre d'épisodes d'une émission sur la
+carte : seuls les plus récents sont téléchargés, et les fichiers plus anciens
+sont supprimés au téléchargement suivant (ils restent dans la liste et
+s'écoutent toujours par le Wi-Fi). Les favoris et les pistes de réveil ne sont
+jamais supprimés. Quand il reste moins de 500 Mo, l'appareil affiche un message
+sur l'écran d'accueil et la page web un bandeau rouge qui liste les plus grosses
+émissions, avec un bouton « Garder les 30 derniers » pour chacune.
+
 ### Radios
 
 <img src="img/fr/web-radios.png" width="300">
