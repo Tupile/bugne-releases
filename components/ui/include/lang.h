@@ -119,6 +119,7 @@ typedef enum {
     STR_MEMO_SEND_ALL,      // peer picker: send to all peers
     STR_MEMO_SENDING,       // send in progress
     STR_MEMO_SENT,          // toast: send succeeded
+    STR_MEMO_SENT_NOT_KEPT, // toast: send succeeded, local copy dropped (box full)
     STR_MEMO_SEND_FAILED,   // toast: send failed
     STR_MEMO_NEW_FROM_FMT,  // toast: new memo received, %s = sender
     STR_MEMO_FROM_FMT,      // list row title of a received memo, %s = sender

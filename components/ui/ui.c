@@ -318,7 +318,7 @@ typedef enum { MEMO_UI_IDLE, MEMO_UI_RECORDING, MEMO_UI_PREVIEW,
 static volatile int  s_memo_state;       // memo_ui_state_t; worker advances, UI resets
 static volatile bool s_memo_stop;        // ends the memo record AND playback loops
 static volatile int  s_memo_rec_ms;      // live elapsed capture time, worker -> UI tick
-static volatile int  s_memo_result;      // one-shot: 1 sent, -1 send failed, -2 record failed
+static volatile int  s_memo_result;      // one-shot: 1 sent, 3 sent but not kept (box full), -1 send failed, -2 record failed
 static volatile bool s_memo_playing;     // worker is inside the memo playback loop
 static volatile bool s_memo_rx_flag;     // set by ui_memo_received (httpd task)
 static char s_memo_rx_from[MEMO_SENDER_MAX];   // sender behind s_memo_rx_flag
@@ -4992,9 +4992,16 @@ static void memo_send_run(int peer)
                       MEMO_ABS_DIR "/" MEMO_REC_NAME, false, NULL, NULL);
     }
     if (r == ESP_OK) {
-        remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);  // delivered: nothing kept locally
+        // Delivered: keep a local copy as an own memo (my-NNN.wav) so the
+        // sender can replay it. Box full or keep failure: the send still
+        // counts, the capture is dropped and the toast says it was not kept.
+        if (memo_count() < MEMO_MAX_COUNT && memo_keep_rec() >= 0) {
+            s_memo_result = 1;
+        } else {
+            remove(MEMO_ABS_DIR "/" MEMO_REC_NAME);
+            s_memo_result = 3;
+        }
         s_memo_state = MEMO_UI_IDLE;
-        s_memo_result = 1;
     } else {
         s_memo_state = MEMO_UI_PREVIEW;  // keep the capture so the child can retry
         s_memo_result = -1;
@@ -7589,6 +7596,7 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "memo_record",       build_memo_record },
     { "talkie",            build_talkie },       // correspondent picker
     { "talkie_ready",      build_talkie },       // fake session peer, PTT state
+    { "memo_send_self",    build_memo_record },  // bench hook: send .rec.wav to this device
     { "settings",          build_settings },
     { "settings_theme",    build_settings_theme },
     { "settings_alarm",    build_settings_alarm },
@@ -7730,6 +7738,22 @@ static void tick_nav_request(void)
         }
         if (strcmp(name, "memo_play") == 0) {
             memo_open_row(0);
+            return;
+        }
+        // "memo_send_self": send an uploaded memos/.rec.wav to this device over
+        // loopback (fake single peer), exercising memo_send_run's keep path
+        // without a second Bugne. The copy arrives here as rx-<name>-NNN.
+        if (strcmp(name, "memo_send_self") == 0) {
+            if (s_memo_state != MEMO_UI_IDLE && s_memo_state != MEMO_UI_PREVIEW) return;
+            memset(&s_memo_peers[0], 0, sizeof(s_memo_peers[0]));
+            strlcpy(s_memo_peers[0].name, "Self", sizeof(s_memo_peers[0].name));
+            strlcpy(s_memo_peers[0].ip, "127.0.0.1", sizeof(s_memo_peers[0].ip));
+            s_memo_peers[0].port = 80;
+            s_memo_peer_count = 1;
+            s_memo_state = MEMO_UI_SENDING;
+            play_req_t req = { .kind = REQ_MEMO_SEND, .id = 0 };
+            req_post(&req);
+            show(build_memo_record);
             return;
         }
         if (strcmp(name, "memo_toggle") == 0 || strcmp(name, "memo_stop") == 0) {
@@ -8039,10 +8063,11 @@ static void tick_memo_talkie(void)
             // error: hint at the hold gesture instead of "Recording failed".
             toast(r == 1 ? T(STR_MEMO_SENT)
                 : r == 2 ? T(STR_TALKIE_LEFT_MEMO)
+                : r == 3 ? T(STR_MEMO_SENT_NOT_KEPT)
                 : r == -1 ? T(STR_MEMO_SEND_FAILED)
                 : (s_active_builder == build_talkie ? T(STR_TALKIE_HOLD_HINT)
                                                     : T(STR_MEMO_REC_FAILED)));
-            if (r == 1 && s_active_builder == build_memo_record) show(build_memos);
+            if ((r == 1 || r == 3) && s_active_builder == build_memo_record) show(build_memos);
         }
         if (s_memo_rx_flag) {
             s_memo_rx_flag = false;

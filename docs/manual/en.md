@@ -243,7 +243,8 @@ house, or delete it.
 A small red dot appears on the Memos tile when a memo arrives, and a message
 pops up. Open the tile and tap the line with the bell to listen to it. The
 trash button deletes the open memo. To send a memo you need Wi-Fi and another
-Bugne on the same network. The device keeps 20 memos at most. A parent stops
+Bugne on the same network. A sent memo is also kept in your list, unless the
+box is full. The device keeps 20 memos at most. A parent stops
 the reception from the web page, on the Settings tab. The same switch also
 stops the walkie-talkie below.
 

@@ -253,7 +253,8 @@ arrêtez, vous pouvez écouter votre message, le garder sur l'appareil, l'envoye
 Quand un mémo arrive, un petit point rouge apparaît sur la tuile Mémos et un
 message s'affiche. Ouvrez la tuile et touchez la ligne avec la cloche pour
 l'écouter. Le bouton poubelle supprime le mémo ouvert. L'envoi demande le Wi-Fi
-et une autre Bugne sur le même réseau. L'appareil garde 20 mémos au maximum.
+et une autre Bugne sur le même réseau. Un mémo envoyé est aussi gardé dans
+votre liste, sauf si la boîte est pleine. L'appareil garde 20 mémos au maximum.
 Les parents refusent la réception depuis la page web, dans l'onglet Réglages.
 Ce même réglage coupe aussi le talkie-walkie ci-dessous.
 

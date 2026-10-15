@@ -4,7 +4,8 @@
 //
 // File layout under /sdcard/memos/ (scan of this directory is the only state,
 // no NVS, no wall-clock dependency):
-//   my-NNN.wav              own kept memo
+//   my-NNN.wav              own kept memo (also every successfully sent memo,
+//                           unless the 20-memo box is full)
 //   rx-<sender>-NNN.new.wav received, not listened to yet (unread)
 //   rx-<sender>-NNN.wav     received, listened to
 //   tk-NNN.wav              ephemeral walkie-talkie message (auto-played then
