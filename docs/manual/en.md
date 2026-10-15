@@ -231,6 +231,21 @@ A Lamp tile appears on the home screen when the parents configure it. It
 controls a light through Home Assistant (experimental feature). Tap it to turn
 the light of the room on or off.
 
+### Stopwatch and timer
+
+The Chrono tile appears on the home screen when your parents turn it on from
+the web page, on the Settings tab. It offers two tools.
+
+The stopwatch counts the time. Tap the play button to start, the same button
+to pause, and the round arrow to go back to zero.
+
+The timer counts down. Pick the length with 1, 3, 5 or 10 min, or with the −
+and + buttons (1 to 60 minutes), then tap play. At the end, the Bugne rings
+and shows "Time's up!". The Stop button ends the ring, which also stops by
+itself after one minute. The stopwatch and the timer keep running if you leave
+the screen or if the screen goes dark. The timer also rings during quiet
+hours, and it stops the music that is playing.
+
 ### Voice memos
 
 ![Memos](img/en/memos.png) ![Recording](img/en/memo_record.png)

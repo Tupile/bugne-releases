@@ -176,6 +176,11 @@ static const lang_def_t LANGS[] = {
             [STR_METRO_BEATS_FMT]    = "%d beats",
             [STR_METRO_TAP]          = "Tap",
             [STR_SD_LOW_FMT]         = "SD card almost full: %d MB free.",
+            [STR_TILE_CHRONO]        = "Chrono",
+            [STR_STOPWATCH]          = "Stopwatch",
+            [STR_TIMER]              = "Timer",
+            [STR_TIMER_MIN_FMT]      = "%d min",
+            [STR_TIMER_DONE]         = "Time's up!",
         },
     },
     {
@@ -343,6 +348,11 @@ static const lang_def_t LANGS[] = {
             [STR_METRO_BEATS_FMT]    = "%d temps",
             [STR_METRO_TAP]          = "Tap",
             [STR_SD_LOW_FMT]         = "Carte SD presque pleine : %d Mo libres.",
+            [STR_TILE_CHRONO]        = "Chrono",
+            [STR_STOPWATCH]          = "Chronomètre",
+            [STR_TIMER]              = "Minuteur",
+            [STR_TIMER_MIN_FMT]      = "%d min",
+            [STR_TIMER_DONE]         = "Terminé !",
         },
     },
 };

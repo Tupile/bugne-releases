@@ -23,6 +23,7 @@
 #include "usage.h"
 #include "sleep_fade.h"
 #include "tone.h"
+#include "chrono.h"
 #include "alarm_next.h"
 #include "stats.h"
 #include "pitch.h"
@@ -84,6 +85,7 @@ LV_FONT_DECLARE(bugne_icons_20);
 #define BUGNE_SYM_STAR  "\xEF\x80\x85"  // U+F005
 #define BUGNE_SYM_TOWER "\xEF\x94\x99"  // U+F519 broadcast tower
 #define BUGNE_SYM_CALC  "\xEF\x87\xAC"  // U+F1EC calculator
+#define BUGNE_SYM_CHRONO "\xEF\x8B\xB2" // U+F2F2 stopwatch
 
 #define LCD_HRES        240
 #define LCD_VRES        320
@@ -328,6 +330,17 @@ static lv_obj_t *s_memo_time_lbl, *s_memo_prog_bar, *s_memo_play_btn;  // reset 
 static void memo_record_run(void);
 static void memo_play_run(const char *path);
 static void memo_send_run(int peer);
+
+// ---- Chrono: stopwatch and countdown timer (chrono.c holds the arithmetic) ----
+// Both run on esp_timer_get_time, so they keep going when their screen is left
+// or the panel sleeps; tick_chrono fires the timer from any screen. RAM only.
+static chrono_sw_t  s_sw;
+static chrono_tmr_t s_tmr;               // zero-init = CHRONO_TMR_SET
+static int          s_tmr_set_min = 5;   // setting shown while CHRONO_TMR_SET
+static bool         s_tmr_ringing;       // the "time is up" beep is ours and sounding
+static int64_t      s_tmr_ring_start_us;
+#define TIMER_RING_MAX_US (60LL * 1000000)  // the beep stops by itself after 1 min
+static lv_obj_t *s_sw_lbl, *s_sw_btn, *s_tmr_lbl, *s_tmr_btn;  // reset in show()
 
 // ---- Walkie-talkie session state (push-to-talk over the memo pipeline) ----
 // A session = the talkie screen is shown; the correspondent is picked at the
@@ -1893,6 +1906,10 @@ static void show(screen_builder_t builder)
     s_upd_status_lbl = NULL;  // same for the update screen widgets
     s_upd_check_btn = NULL;
     s_upd_install_btn = NULL;
+    s_sw_lbl = NULL;          // same for the stopwatch / timer widgets
+    s_sw_btn = NULL;
+    s_tmr_lbl = NULL;
+    s_tmr_btn = NULL;
     lv_obj_t *old = lv_screen_active();
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_text_font(scr, &bugne_font_14, 0);  // accents via DejaVu, symbols via fallback
@@ -1921,6 +1938,11 @@ static void build_memo_play(lv_obj_t *scr);    // single-memo player
 static void build_talkie(lv_obj_t *scr);       // walkie-talkie session screen
 static void on_open_talkie(lv_event_t *e);     // entry button on build_memos
 static void on_open_lamp(lv_event_t *e);       // entry button on build_home
+static void build_chrono(lv_obj_t *scr);       // stopwatch / timer chooser (tile target)
+static void build_stopwatch(lv_obj_t *scr);
+static void build_timer(lv_obj_t *scr);        // setting, or the running countdown
+static void build_timer_done(lv_obj_t *scr);   // "time is up" ring screen
+static void on_open_chrono(lv_event_t *e);     // entry button on build_home
 static lv_obj_t *alarm_row(lv_obj_t *parent, lv_flex_align_t main_align);  // card row, defined with build_alarm_edit
 static void alarm_fire(int idx);     // alarm engine, defined after exit_sleep
 static void alarm_finish(bool snooze);
@@ -5728,7 +5750,10 @@ static lv_obj_t *make_tile(lv_obj_t *scr, const char *icon, str_id_t label_id,
         lv_obj_set_style_text_font(icon_l, &bugne_icons_28, 0);
         lv_obj_align(icon_l, LV_ALIGN_LEFT_MID, 12, 0);
         const int text_x = 46;  // 12 pad + ~30 icon glyph + 4 gap
-        lv_obj_set_size(text_l, w - text_x - 6, line_h);
+        // w - text_x - 2: a portrait banner (~103 px) needs every pixel for
+        // "Chrono" (~52 px at 14 px); the text is left-aligned, so the
+        // smaller right margin changes nothing for shorter labels.
+        lv_obj_set_size(text_l, w - text_x - 2, line_h);
         lv_obj_set_style_text_align(text_l, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_long_mode(text_l, LV_LABEL_LONG_DOT);
         lv_obj_align(text_l, LV_ALIGN_LEFT_MID, text_x, 0);
@@ -5794,17 +5819,18 @@ static void build_home(lv_obj_t *scr)
     const bool game_on = (hc && hc->ui.game == 1);
     const bool fav_on = (hc && hc->favorite_count > 0);  // Favorites tile only when some exist
     const bool tuner_on = (hc && hc->ui.tuner == 1);
+    const bool chrono_on = (hc && hc->ui.timer == 1);
     const bool ls = scr_w() > scr_h();
     const int M = PAD_SIDE, G = 10, Y0 = 54;
     const int limit = scr_h() - MINI_CLEAR;
     lv_obj_t *wr, *pod, *lib, *sd, *game = NULL, *fav = NULL, *mem = NULL;
 
     // Extras beyond the 4 base tiles, in display order. Memos is always shown
-    // (it greys out without SD like the other SD features), so nb is 1..5.
-    const char *ex_icon[5];
-    str_id_t ex_id[5];
-    lv_event_cb_t ex_cb[5];
-    lv_obj_t **ex_out[5];
+    // (it greys out without SD like the other SD features), so nb is 1..6.
+    const char *ex_icon[6];
+    str_id_t ex_id[6];
+    lv_event_cb_t ex_cb[6];
+    lv_obj_t **ex_out[6];
     int nb = 0;
     if (game_on) {
         ex_icon[nb] = BUGNE_SYM_CALC; ex_id[nb] = STR_TILE_GAME;
@@ -5822,6 +5848,10 @@ static void build_home(lv_obj_t *scr)
         ex_icon[nb] = LV_SYMBOL_POWER; ex_id[nb] = STR_TILE_LAMP;
         ex_cb[nb] = on_open_lamp; ex_out[nb] = NULL; nb++;
     }
+    if (chrono_on) {  // never greyed: makes no sound until its timer rings
+        ex_icon[nb] = BUGNE_SYM_CHRONO; ex_id[nb] = STR_TILE_CHRONO;
+        ex_cb[nb] = on_open_chrono; ex_out[nb] = NULL; nb++;
+    }
     ex_icon[nb] = LV_SYMBOL_ENVELOPE; ex_id[nb] = STR_TILE_MEMOS;
     ex_cb[nb] = on_open_memos; ex_out[nb] = &mem; nb++;
 
@@ -5830,7 +5860,7 @@ static void build_home(lv_obj_t *scr)
         // the extras, packed two per row in display order; a lone last extra
         // spans the full width. One banner row keeps the original 38 px
         // game-banner geometry; two shrink to 34 px each, three shrink further.
-        const int rows = (nb + 1) / 2;  // nb is 1..5: one, two, or three rows
+        const int rows = (nb + 1) / 2;  // nb is 1..6: one, two, or three rows
         const int Gp = (rows >= 3) ? 6 : G; // squeeze gutter if 3 banner rows
         const int banner_h = (rows >= 3) ? 30 : (rows == 2) ? 34 : 38;
         const int w2 = (scr_w() - 2 * M - Gp) / 2;
@@ -5853,27 +5883,31 @@ static void build_home(lv_obj_t *scr)
         // the SD card plus the extras. With 1 extra the pair is centered;
         // 2 extras fill the 3 columns; 3 switch row 2 to 4 narrower cells;
         // with 4 or 5 the memos tile is promoted to the top row and the grid
-        // becomes 4x2 or 4 top / 5 bottom.
+        // becomes 4x2 or 4 top / 5 bottom; with 6 the last two extras are
+        // promoted and both rows hold 5 cells.
         const bool e4 = (nb >= 4);
-        const bool e5 = (nb == 5);
+        const bool e5 = (nb >= 5);
+        const bool e6 = (nb == 6);
         const int w3 = (scr_w() - 2 * M - 2 * G) / 3;
         const int G4 = 6;  // 4-column rows: a tighter gutter buys the labels ~3 px each
         const int w4 = (scr_w() - 2 * M - 3 * G4) / 4;
         const int w5 = (scr_w() - 2 * M - 4 * 6) / 5; // Use 6px gutter for 5 cells
-        const int wt = e4 ? w4 : w3;               // top-row cell width
+        const int wt = e6 ? w5 : e4 ? w4 : w3;     // top-row cell width
         const int w2b = e5 ? w5 : (nb >= 3) ? w4 : w3; // row-2 cell width
-        const int GT = e4 ? G4 : G;                // top-row gutter
+        const int GT = e6 ? 6 : e4 ? G4 : G;       // top-row gutter
         const int G2 = e5 ? 6 : (nb >= 3) ? G4 : G; // row-2 gutter
         const int h3 = (limit - Y0 - G) / 2;
         const int row2_off = (nb == 1) ? (w3 + G) / 2 : 0;  // centers a 2-tile row
         wr = make_tile(scr, BUGNE_SYM_TOWER, STR_TILE_RADIOS, M, Y0, wt, h3, false, on_open_webradios);
         pod = make_tile(scr, LV_SYMBOL_LIST, STR_TILE_PODCASTS, M + wt + GT, Y0, wt, h3, false, on_open_podcasts);
         lib = make_tile(scr, LV_SYMBOL_AUDIO, STR_TILE_LIBRARY, M + 2 * (wt + GT), Y0, wt, h3, false, on_open_library);
-        const int n_row2 = e4 ? nb - 1 : nb;
-        if (e4) {  // memos (always the last extra) joins the top row
-            lv_obj_t *b = make_tile(scr, ex_icon[nb - 1], ex_id[nb - 1],
-                                    M + 3 * (wt + GT), Y0, wt, h3, false, ex_cb[nb - 1]);
-            if (ex_out[nb - 1]) *ex_out[nb - 1] = b;
+        const int n_top = e6 ? 2 : e4 ? 1 : 0;  // last extras promoted to the top row
+        const int n_row2 = nb - n_top;
+        for (int k = 0; k < n_top; k++) {  // memos (always the last extra) is among them
+            const int i = n_row2 + k;
+            lv_obj_t *b = make_tile(scr, ex_icon[i], ex_id[i],
+                                    M + (3 + k) * (wt + GT), Y0, wt, h3, false, ex_cb[i]);
+            if (ex_out[i]) *ex_out[i] = b;
         }
         sd = make_tile(scr, LV_SYMBOL_SD_CARD, STR_TILE_SD, M + row2_off, Y0 + h3 + G, w2b, h3, false, on_open_sd);
         int x5 = M + row2_off + w2b + G2;
@@ -7348,7 +7382,8 @@ static void mini_bar_update(void)
     np_source_t np = np_current();
     bool on_np = (s_active_builder == build_now_playing ||
                   s_active_builder == build_sendspin_playing ||
-                  s_active_builder == build_alarm_ringing);
+                  s_active_builder == build_alarm_ringing ||
+                  s_active_builder == build_timer_done);
     if (np == NP_NONE || on_np) {
         lv_obj_set_hidden(s_mini, true);
         return;
@@ -7403,20 +7438,28 @@ static const config_webradio_t *find_radio_by_id(const config_t *c, int id)
 // same way ui_play does: without this the worker would still be blocked inside a
 // source _play() call and REQ_BEEP would wait behind it (the alarm must always
 // sound). When nothing is playing these stops are harmless no-ops.
+static void beep_takeover(const char *title);
 static void beep_start(void)
 {
     ESP_LOGI(TAG, "alarm: starting beep fallback");
+    s_alarm_beeping = true;
+    beep_takeover(T(STR_ALARM_BEEP));
+}
+
+// Take over whatever is playing and start the beep loop, titled `title` for
+// GET /api/playback. Shared by the alarm fallback and the countdown timer.
+static void beep_takeover(const char *title)
+{
     tuner_stop_sync();  // free the arbiter: the alarm must always sound
     s_memo_stop = true; // a memo record/playback yields too: the alarm always sounds
     s_tone_stop = true; // so does a metronome / reference tone
-    s_alarm_beeping = true;
     s_beep_stop = false;
     play_cancel();
     audio_set_paused(false);
     // Same metadata reset as ui_play(), so GET /api/playback (and any other reader
     // of s_now_title/s_meta_*) reports the beep cleanly instead of the previous
     // source's stale title/artist.
-    strlcpy(s_now_title, T(STR_ALARM_BEEP), sizeof(s_now_title));
+    strlcpy(s_now_title, title, sizeof(s_now_title));
     s_now_target[0] = '\0';  // the beep has no favorite identity (star button)
     s_now_is_file = false;   // and no progress row / seek
     s_meta_title[0] = '\0';
@@ -7433,6 +7476,214 @@ static void beep_start(void)
     s_advance = false;  // same stale-end rule as ui_play
     play_req_t req = { .kind = REQ_BEEP };
     req_post(&req);
+}
+
+// ---- Chrono screens: stopwatch and countdown timer ----
+
+static void on_open_chrono(lv_event_t *e)    { (void)e; show(build_chrono); }
+static void on_chrono_back(lv_event_t *e)    { (void)e; show(build_chrono); }
+static void on_open_stopwatch(lv_event_t *e) { (void)e; show(build_stopwatch); }
+static void on_open_timer(lv_event_t *e)     { (void)e; show(build_timer); }
+
+// Chooser: two tiles, same layout as the Library chooser.
+static void build_chrono(lv_obj_t *scr)
+{
+    add_back_button(scr);
+    add_title_wide(scr, T(STR_TILE_CHRONO));
+    const bool ls = scr_w() > scr_h();
+    const int M = PAD_SIDE, G = 10, Y0 = 54;
+    const int limit = scr_h() - MINI_CLEAR;
+    if (ls) {
+        const int w = scr_w() - 2 * M;
+        const int h = (limit - Y0 - G) / 2;
+        make_tile(scr, BUGNE_SYM_CHRONO, STR_STOPWATCH, M, Y0, w, h, true, on_open_stopwatch);
+        make_tile(scr, LV_SYMBOL_BELL, STR_TIMER, M, Y0 + h + G, w, h, true, on_open_timer);
+    } else {
+        const int w2 = (scr_w() - 2 * M - G) / 2;
+        const int h2 = (limit - Y0 - G) / 2;
+        const int y = Y0 + (limit - Y0 - h2) / 2;
+        make_tile(scr, BUGNE_SYM_CHRONO, STR_STOPWATCH, M, y, w2, h2, false, on_open_stopwatch);
+        make_tile(scr, LV_SYMBOL_BELL, STR_TIMER, M + w2 + G, y, w2, h2, false, on_open_timer);
+    }
+}
+
+static lv_obj_t *chrono_big_label(lv_obj_t *parent)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_style_text_font(l, &bugne_font_48, 0);
+    return l;
+}
+
+static void on_sw_toggle(lv_event_t *e)
+{
+    (void)e;
+    int64_t now = esp_timer_get_time();
+    if (s_sw.running) chrono_sw_pause(&s_sw, now);
+    else chrono_sw_start(&s_sw, now);
+}
+
+static void on_sw_reset(lv_event_t *e)
+{
+    (void)e;
+    chrono_sw_reset(&s_sw);
+}
+
+// Big elapsed time, reset and start/pause. tick_chrono refreshes both.
+static void build_stopwatch(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_chrono_back);
+    add_title_wide(scr, T(STR_STOPWATCH));
+    lv_obj_t *c = tone_content(scr);
+    s_sw_lbl = chrono_big_label(c);
+    char b[16];
+    chrono_fmt_sw(b, sizeof(b), chrono_sw_elapsed(&s_sw, esp_timer_get_time()));
+    lv_label_set_text(s_sw_lbl, b);
+    lv_obj_t *r = tone_row(c);
+    make_round_btn(r, LV_SYMBOL_REFRESH, 44, false, on_sw_reset);
+    s_sw_btn = make_round_btn(r, s_sw.running ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY, 60, true,
+                              on_sw_toggle);
+}
+
+static void tmr_show_setting(void)
+{
+    char b[16];
+    chrono_fmt_tmr(b, sizeof(b), (int64_t)s_tmr_set_min * 60 * 1000000);
+    if (s_tmr_lbl) lv_label_set_text(s_tmr_lbl, b);
+}
+
+static void on_tmr_step(lv_event_t *e)
+{
+    s_tmr_set_min = chrono_tmr_clamp(s_tmr_set_min + (int)(intptr_t)lv_event_get_user_data(e));
+    tmr_show_setting();
+}
+
+static void on_tmr_preset(lv_event_t *e)
+{
+    s_tmr_set_min = chrono_tmr_clamp((int)(intptr_t)lv_event_get_user_data(e));
+    tmr_show_setting();
+}
+
+static void on_tmr_start(lv_event_t *e)
+{
+    (void)e;
+    chrono_tmr_start(&s_tmr, s_tmr_set_min, esp_timer_get_time());
+    show(build_timer);
+}
+
+static void on_tmr_toggle(lv_event_t *e)
+{
+    (void)e;
+    int64_t now = esp_timer_get_time();
+    if (s_tmr.state == CHRONO_TMR_RUNNING) chrono_tmr_pause(&s_tmr, now);
+    else chrono_tmr_resume(&s_tmr, now);
+}
+
+static void on_tmr_cancel(lv_event_t *e)
+{
+    (void)e;
+    chrono_tmr_cancel(&s_tmr);
+    show(build_timer);
+}
+
+// Setting (-, minutes, +, presets, start) while CHRONO_TMR_SET; otherwise the
+// running countdown with cancel and pause/resume, refreshed by tick_chrono.
+static void build_timer(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_chrono_back);
+    add_title_wide(scr, T(STR_TIMER));
+    lv_obj_t *c = tone_content(scr);
+    if (s_tmr.state == CHRONO_TMR_SET) {
+        // Three rows: the 48 px "60:00" (~140 px) plus two 44 px buttons
+        // does not fit the 240 px portrait width on one row.
+        s_tmr_lbl = chrono_big_label(c);
+        tmr_show_setting();
+
+        static const int presets[] = { 1, 3, 5, 10 };
+        lv_obj_t *r2 = tone_row(c);
+        lv_obj_set_style_pad_column(r2, 4, 0);  // four chips must fit 228 px (portrait)
+        for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); i++) {
+            lv_obj_t *b = lv_button_create(r2);
+            lv_obj_set_style_pad_hor(b, 6, 0);
+            lv_obj_t *l = lv_label_create(b);
+            char t[16];
+            snprintf(t, sizeof(t), T(STR_TIMER_MIN_FMT), presets[i]);
+            lv_label_set_text(l, t);
+            lv_obj_center(l);
+            lv_obj_add_event_cb(b, on_tmr_preset, LV_EVENT_CLICKED, (void *)(intptr_t)presets[i]);
+        }
+        lv_obj_t *r3 = tone_row(c);
+        lv_obj_t *minus = make_round_btn(r3, LV_SYMBOL_MINUS, 44, false, NULL);
+        lv_obj_add_event_cb(minus, on_tmr_step, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+        lv_obj_add_event_cb(minus, on_tmr_step, LV_EVENT_LONG_PRESSED_REPEAT, (void *)(intptr_t)-1);
+        make_round_btn(r3, LV_SYMBOL_PLAY, 60, true, on_tmr_start);
+        lv_obj_t *plus = make_round_btn(r3, LV_SYMBOL_PLUS, 44, false, NULL);
+        lv_obj_add_event_cb(plus, on_tmr_step, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+        lv_obj_add_event_cb(plus, on_tmr_step, LV_EVENT_LONG_PRESSED_REPEAT, (void *)(intptr_t)1);
+    } else {
+        s_tmr_lbl = chrono_big_label(c);
+        char b[16];
+        chrono_fmt_tmr(b, sizeof(b), chrono_tmr_left(&s_tmr, esp_timer_get_time()));
+        lv_label_set_text(s_tmr_lbl, b);
+        lv_obj_t *r = tone_row(c);
+        make_round_btn(r, LV_SYMBOL_CLOSE, 44, false, on_tmr_cancel);
+        s_tmr_btn = make_round_btn(r, s_tmr.state == CHRONO_TMR_RUNNING ? LV_SYMBOL_PAUSE
+                                                                        : LV_SYMBOL_PLAY,
+                                   60, true, on_tmr_toggle);
+    }
+}
+
+// Stop our beep, unless an alarm took it over (the alarm owns it then).
+static void timer_ring_end(void)
+{
+    s_tmr_ringing = false;
+    if (s_alarm_state != ALARM_RINGING && audio_arbiter_active() == AUDIO_SOURCE_BEEP) {
+        s_beep_stop = true;
+    }
+}
+
+static void on_tmr_done_stop(lv_event_t *e)
+{
+    (void)e;
+    timer_ring_end();
+    show(build_timer);
+}
+
+// No back button, like the alarm: Stop is the way out (any nav also ends it).
+static void build_timer_done(lv_obj_t *scr)
+{
+    lv_obj_t *title = lv_label_create(scr);
+    char tbuf[40];
+    snprintf(tbuf, sizeof(tbuf), LV_SYMBOL_BELL " %s", T(STR_TIMER));
+    lv_label_set_text(title, tbuf);
+    muted(title);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_t *c = tone_content(scr);
+    lv_obj_t *big = chrono_big_label(c);
+    lv_label_set_text(big, "00:00");
+    lv_obj_t *msg = lv_label_create(c);
+    lv_obj_set_style_text_font(msg, &bugne_font_20, 0);
+    lv_label_set_text(msg, T(STR_TIMER_DONE));
+    make_round_btn(c, LV_SYMBOL_STOP, 76, true, on_tmr_done_stop);
+}
+
+// The countdown reached zero (called from tick_chrono, LVGL task). Wakes the
+// screen, takes over any playback with the beep, and shows the ring screen.
+// Rings during quiet hours too, like the alarm: it is a signal, not listening.
+// A ringing alarm wins: it keeps the sound and the screen, we only toast.
+static void timer_ring_start(void)
+{
+    ESP_LOGI(TAG, "timer: time is up");
+    if (s_asleep) exit_sleep();
+    lv_display_trigger_activity(s_disp);
+    if (s_alarm_state == ALARM_RINGING) {
+        toast(T(STR_TIMER_DONE));
+        return;
+    }
+    podcast_resume_save_current_position();  // the takeover ends a podcast like a stop
+    beep_takeover(T(STR_TIMER_DONE));
+    s_tmr_ringing = true;
+    s_tmr_ring_start_us = esp_timer_get_time();
+    show(build_timer_done);
 }
 
 // Fire latch key: the LOCAL day and minute, not the epoch minute. On the night
@@ -7611,6 +7862,11 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "sendspin",          build_sendspin_playing },
     { "alarm_ringing",     build_alarm_ringing },
     { "lamp",              build_lamp },
+    { "chrono",            build_chrono },
+    { "stopwatch",         build_stopwatch },
+    { "stopwatch_run",     build_stopwatch },    // bench hook: start the stopwatch
+    { "timer",             build_timer },
+    { "timer_5s",          build_timer },        // bench hook: 5 s countdown
 };
 #define NAV_SCREEN_COUNT ((int)(sizeof(NAV_SCREENS) / sizeof(NAV_SCREENS[0])))
 
@@ -7762,6 +8018,14 @@ static void tick_nav_request(void)
                 else on_memo_play_stop(NULL);
             }
             return;
+        }
+        // Chrono bench hooks: start the stopwatch, or a 5 s countdown (the
+        // setting's minimum is 1 min) so the ring is reachable in a test.
+        if (strcmp(name, "stopwatch_run") == 0) {
+            chrono_sw_start(&s_sw, esp_timer_get_time());
+        } else if (strcmp(name, "timer_5s") == 0) {
+            s_tmr.state = CHRONO_TMR_RUNNING;
+            s_tmr.end_us = esp_timer_get_time() + 5000000;
         }
         // Prepare selection state that these screens' on_open handlers normally set.
         if (strcmp(name, "episodes") == 0) {
@@ -7930,6 +8194,55 @@ static void tick_apply_config(void)
         bool first = (s_tuner_flag_applied == -1);
         s_tuner_flag_applied = config_store_get()->ui.tuner;
         if (!first && s_active_builder == build_home) show(build_home);
+    }
+
+    // Same for the chrono tile.
+    static int s_timer_flag_applied = -1;
+    if (config_store_get()->ui.timer != s_timer_flag_applied) {
+        bool first = (s_timer_flag_applied == -1);
+        s_timer_flag_applied = config_store_get()->ui.timer;
+        if (!first && s_active_builder == build_home) show(build_home);
+    }
+}
+
+// Countdown timer engine plus the chrono screens' refresh, every 50 ms (the
+// stopwatch shows tenths). Runs on any screen: the timer rings wherever the
+// child is. Placed before tick_1hz on purpose: if the timer and an alarm land
+// on the same tick, the alarm fires after us and takes the sound and the
+// screen over, which the next tick sees as the ring screen being left.
+static void tick_chrono(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (chrono_tmr_expired(&s_tmr, now)) {
+        chrono_tmr_cancel(&s_tmr);
+        timer_ring_start();
+    }
+    if (s_tmr_ringing) {
+        if (s_active_builder != build_timer_done) {
+            timer_ring_end();  // left by a remote nav or an alarm
+        } else {
+            lv_display_trigger_activity(s_disp);  // never sleep mid-ring
+            if (now - s_tmr_ring_start_us >= TIMER_RING_MAX_US) timer_ring_end();
+        }
+    }
+    char b[16];
+    if (s_sw_lbl) {
+        chrono_fmt_sw(b, sizeof(b), chrono_sw_elapsed(&s_sw, now));
+        if (strcmp(lv_label_get_text(s_sw_lbl), b) != 0) lv_label_set_text(s_sw_lbl, b);
+    }
+    if (s_sw_btn) {
+        const char *want = s_sw.running ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY;
+        lv_obj_t *icon = lv_obj_get_child(s_sw_btn, 0);
+        if (strcmp(lv_label_get_text(icon), want) != 0) lv_label_set_text(icon, want);
+    }
+    if (s_tmr_lbl && s_tmr.state != CHRONO_TMR_SET) {
+        chrono_fmt_tmr(b, sizeof(b), chrono_tmr_left(&s_tmr, now));
+        if (strcmp(lv_label_get_text(s_tmr_lbl), b) != 0) lv_label_set_text(s_tmr_lbl, b);
+    }
+    if (s_tmr_btn) {
+        const char *want = s_tmr.state == CHRONO_TMR_RUNNING ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY;
+        lv_obj_t *icon = lv_obj_get_child(s_tmr_btn, 0);
+        if (strcmp(lv_label_get_text(icon), want) != 0) lv_label_set_text(icon, want);
     }
 }
 
@@ -8973,6 +9286,8 @@ static void tick_wake_and_sleep(void)
                s_active_builder != build_tuner &&
                s_active_builder != build_talkie &&
                !s_tone_running &&
+               !(s_active_builder == build_stopwatch && s_sw.running) &&
+               !(s_active_builder == build_timer && s_tmr.state == CHRONO_TMR_RUNNING) &&
                s_memo_state != MEMO_UI_RECORDING) {
         // No screen sleep while tuning, recording a memo, playing a tone
         // (the player watches the beat), or in a talkie session: the user watches without touching (and waits for the
@@ -9002,6 +9317,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_apply_config();
     tick_tuner();
     tick_tone();
+    tick_chrono();
     tick_memo_talkie();
     tick_sd_presence();
     tick_sd_low_alert();

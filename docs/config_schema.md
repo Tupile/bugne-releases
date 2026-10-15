@@ -45,6 +45,7 @@ configuration:
     "accent": 0,
     "game": 1,
     "tuner": 1,
+    "timer": 0,
     "memo_rx": 1,
     "tz": "CET-1CEST,M3.5.0,M10.5.0/3"
   },
@@ -96,6 +97,7 @@ configuration:
 | `ui.accent` | int | Button/accent color, 0 to 4: 0 Blue (default), 1 Ocean, 2 Pink, 3 Forest, 4 Orange. |
 | `ui.game` | int | Times-tables game on the home screen: 1 shown (default), 0 hidden. |
 | `ui.tuner` | int | Instrument tuner on the home screen (experimental feature): 1 shown (default), 0 hidden. |
+| `ui.timer` | int | Chrono tile (stopwatch and countdown timer) on the home screen: 0 hidden (default), 1 shown. Live-applied. |
 | `ui.memo_rx` | int | Accept voice memos from other Bugnes: 1 yes (default), 0 refuse. The receive route `POST /api/memo?from=<name>` needs no authentication on the LAN, because a peer does not know the password. It is bounded instead: the content length is required and capped at 2 MB, the device stores 20 memos at most (own plus received, and it refuses the next ones instead of deleting any), it checks the WAV format (PCM 16-bit mono 16 kHz), it sanitizes the sender name, and it chooses the storage path itself (`/sdcard/memos/`). |
 | `ui.tz` | string | POSIX TZ string, used for the wall clock and the alarm. Default `CET-1CEST,M3.5.0,M10.5.0/3` (Paris). Set from the web Settings page, live-applied (no reboot). |
 | `alarms[]` | array | Up to 3 alarms (`CFG_MAX_ALARMS`), e.g. weekday / weekend / free use. Each entry has the fields below. A legacy single `alarm` object (pre-B3 firmware) is still read forever and maps to `alarms[0]`; it is parsed BEFORE `alarms`, so if a config carries both, the array wins. Only `alarms` is written back. |

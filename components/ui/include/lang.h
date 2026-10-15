@@ -177,6 +177,11 @@ typedef enum {
     STR_METRO_BEATS_FMT,    // metronome beats chip, %d = beats per bar
     STR_METRO_TAP,          // metronome tap-tempo button
     STR_SD_LOW_FMT,         // home toast: printf with one %d (MB free on the SD card)
+    STR_TILE_CHRONO,        // home tile + chrono chooser title
+    STR_STOPWATCH,          // chooser tile + stopwatch screen title
+    STR_TIMER,              // chooser tile + timer screen title
+    STR_TIMER_MIN_FMT,      // timer preset chip, %d = minutes
+    STR_TIMER_DONE,         // timer ring screen, toast and playback title
     STR__COUNT
 } str_id_t;
 

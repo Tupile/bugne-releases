@@ -76,6 +76,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_tone"
 
+echo "=== building chrono host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -o "$OUT/test_chrono" \
+    test_chrono.c ../../components/ui/chrono.c
+
+echo "=== running ==="
+"$OUT/test_chrono"
+
 echo "=== building adts host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/decode \

@@ -64,6 +64,7 @@ static void set_defaults(config_t *c)
     c->ui.accent = 0;  // blue
     c->ui.game = 1;    // times-tables game shown on home
     c->ui.tuner = 1;   // instrument tuner shown on home
+    c->ui.timer = 0;   // chrono tile hidden: existing configs see no change
     c->ui.memo_rx = 1; // accept voice memos from other Bugnes
     strlcpy(c->ui.tz, "CET-1CEST,M3.5.0,M10.5.0/3", sizeof(c->ui.tz));  // Paris
 
@@ -262,6 +263,8 @@ static void load_from_json(config_t *c, const cJSON *root)
         if (cJSON_IsNumber(gm)) c->ui.game = clampi(gm->valueint, 0, 1);
         const cJSON *tn = cJSON_GetObjectItemCaseSensitive(ui, "tuner");
         if (cJSON_IsNumber(tn)) c->ui.tuner = clampi(tn->valueint, 0, 1);
+        const cJSON *tm = cJSON_GetObjectItemCaseSensitive(ui, "timer");
+        if (cJSON_IsNumber(tm)) c->ui.timer = clampi(tm->valueint, 0, 1);
         const cJSON *mr = cJSON_GetObjectItemCaseSensitive(ui, "memo_rx");
         if (cJSON_IsNumber(mr)) c->ui.memo_rx = clampi(mr->valueint, 0, 1);
         const cJSON *tz = cJSON_GetObjectItemCaseSensitive(ui, "tz");
@@ -401,6 +404,7 @@ static esp_err_t save_to_disk(const config_t *c)
         !cJSON_AddNumberToObject(ui, "accent", c->ui.accent) ||
         !cJSON_AddNumberToObject(ui, "game", c->ui.game) ||
         !cJSON_AddNumberToObject(ui, "tuner", c->ui.tuner) ||
+        !cJSON_AddNumberToObject(ui, "timer", c->ui.timer) ||
         !cJSON_AddNumberToObject(ui, "memo_rx", c->ui.memo_rx) ||
         !cJSON_AddStringToObject(ui, "tz", c->ui.tz[0] ? c->ui.tz : "CET-1CEST,M3.5.0,M10.5.0/3")) goto no_mem;
 
