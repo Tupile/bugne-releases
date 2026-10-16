@@ -28,7 +28,7 @@ prelude = r'''
 #define ESP_OK 0
 #define ESP_FAIL -1
 #define ESP_ERR_NO_MEM 0x101
-#define CFG_MAX_FAVORITES 12
+#define CFG_MAX_FAVORITES 24
 #define LV_STATE_CHECKED 1
 typedef int esp_err_t;
 typedef struct { int value; bool checked; } lv_obj_t;

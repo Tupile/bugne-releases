@@ -829,6 +829,26 @@ static void clean_tree(const char *path)
     assert(rmdir(path) == 0);
 }
 
+static void test_manifest_count(void)
+{
+    char dir[512];
+    mapped("/littlefs/podcasts", dir, sizeof(dir));
+    clean_tree(dir);
+    assert(test_mkdir("/littlefs/podcasts", 0700) == 0);
+    assert(podcast_manifest_count(7) == 0); // No manifest
+
+    old_manifest("");
+    assert(podcast_manifest_count(7) == 0); // Empty manifest
+
+    old_manifest(OLD_EP("Episode") "," OLD_EP("Another"));
+    assert(podcast_manifest_count(7) == 2);
+    assert(test_remove("/littlefs/podcasts/7.json") == 0);
+
+    old_manifest(OLD_EP("Episode") "," OLD_EP("Another") "," OLD_EP("Third"));
+    assert(podcast_manifest_count(7) == 3);
+    assert(test_remove("/littlefs/podcasts/7.json") == 0);
+}
+
 static void test_prune_manifests(void)
 {
     // Start from an empty manifest folder: earlier tests leave manifests.
@@ -891,6 +911,7 @@ int main(void)
     test_retention();
     test_stable_collision_suffix();
     test_prune_manifests();
+    test_manifest_count();
     reset();
     clean_tree(root);
     puts("podcast_lot23: storage faults, trim, cache scan, refresh cancellation, retention and manifest prune passed");

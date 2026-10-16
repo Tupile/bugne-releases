@@ -40,6 +40,18 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_url_escape"
 
+echo "=== building http_util host tests ==="
+# Single-TU build: the test includes http_util.c to share the scripted
+# esp_http_client stub state.
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/http_util/include \
+    -o "$OUT/test_http_util" \
+    test_http_util.c ../../components/http_util/url_escape.c
+
+echo "=== running ==="
+"$OUT/test_http_util"
+
 echo "=== building quiet host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -248,6 +260,16 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_logstore"
 
+echo "=== building board host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I stubs \
+    -I ../../components/board/include \
+    -o "$OUT/test_board" \
+    test_board.c ../../components/board/board.c
+
+echo "=== running ==="
+"$OUT/test_board"
+
 echo "=== building art host tests ==="
 # art.c has an esp_jpeg dependency mocked in the test, so we include it directly
 gcc -std=c11 -Wall -Wextra -g \
@@ -268,6 +290,22 @@ gcc -std=c11 -Wall -Wextra -g \
 
 echo "=== running ==="
 "$OUT/test_tags"
+
+
+echo "=== building library host tests ==="
+gcc -std=c11 -Wall -Wextra -g -D_DEFAULT_SOURCE \
+    -DSD_MOUNT='"/tmp/bugne-lib-test"' \
+    -DINDEX_PATH='"/tmp/bugne-lib-test/lib.tsv"' \
+    -DINDEX_TMP='"/tmp/bugne-lib-test/lib.tsv.tmp"' \
+    -I stubs -I stubs/freertos \
+    -I ../../components/library/include \
+    -I ../../components/decode/include \
+    -I ../../components/source_sd/include \
+    -o "$OUT/test_library" \
+    test_library.c
+
+echo "=== running ==="
+"$OUT/test_library"
 
 echo "=== checking config field parity ==="
 # Not a C test: compares the fields config_store parses against the fields it
@@ -328,9 +366,13 @@ for t in test_review_playback_worker.py \
          test_review_playback_cancel.py \
          test_review_source_startup.py \
          test_review_ui_save_feedback.py \
+         test_review_ui_remote.py \
          test_review_web_body_rules.py \
+         test_review_web_config.py \
          test_review_net_task_faults.py \
+         test_review_net.py \
          test_review_ha_tls.py \
+         test_review_source_stream_utils.py \
          test_lot4_config_transactions.py; do
     echo "--- $t"
     python3 "$t"

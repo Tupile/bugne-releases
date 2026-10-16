@@ -165,7 +165,7 @@ and previous buttons move between tracks.
 
 While something plays, tap the round star button on the now-playing screen to
 keep it as a favorite. Web radios, tracks and downloaded episodes can be favorites,
-up to 12. The Favorites tile plays them back with one tap. To remove a
+up to 24. The Favorites tile plays them back with one tap. To remove a
 favorite, tap the star again. It then sits on a colored background.
 
 ### The now-playing screen

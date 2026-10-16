@@ -18,9 +18,15 @@
 
 static const char *TAG = "library";
 
+#ifndef SD_MOUNT
 #define SD_MOUNT    "/sdcard"
+#endif
+#ifndef INDEX_PATH
 #define INDEX_PATH  "/sdcard/.bugne_library.tsv"
+#endif
+#ifndef INDEX_TMP
 #define INDEX_TMP   "/sdcard/.bugne_library.tsv.tmp"
+#endif
 #define LIB_MAX_TRACKS 4000   // PSRAM model cap (~1.8 MB)
 #define LIB_MAX_DEPTH  12     // recursion bound: each scan_dir frame is ~1 KB of
                               // stack, so a pathological deep tree on the card

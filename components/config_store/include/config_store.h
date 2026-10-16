@@ -88,7 +88,7 @@ typedef struct {
 
 // One favorite: a webradio (by stable id) or an SD track path. Added from the
 // device's now-playing star button, managed on the web Play tab.
-#define CFG_MAX_FAVORITES 12
+#define CFG_MAX_FAVORITES 24
 #define CFG_FAV_PATH_MAX  256
 #define CFG_FAV_TITLE_MAX 64
 

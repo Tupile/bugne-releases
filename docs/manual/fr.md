@@ -172,7 +172,7 @@ album, les boutons suivant et précédent passent d'un morceau à l'autre.
 
 Pendant une écoute, touchez le bouton rond à l'étoile de l'écran de lecture
 pour la garder en favori. Les radios web, les morceaux et les épisodes téléchargés
-peuvent être des favoris, 12 au maximum. La tuile Favoris les relance en un
+peuvent être des favoris, 24 au maximum. La tuile Favoris les relance en un
 geste. Pour retirer un favori, touchez de nouveau l'étoile, qui est alors sur
 un fond coloré.
 

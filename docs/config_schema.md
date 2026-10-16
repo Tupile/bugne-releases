@@ -117,7 +117,7 @@ configuration:
 | `quiet[].days` | int | Weekday bitmask: bit0 = Monday .. bit6 = Sunday, the day the window STARTS. 0 or missing is coerced to 127 (every day) on load. |
 | `daily_limit.enabled` | int | 0 (default) or 1. Parental daily usage limit. |
 | `daily_limit.minutes` | int | Maximum usage minutes per local day, 5 to 720. Default 120. |
-| `favorites[].type` | int | 0 = web radio (by stable id), 1 = SD track path. Max 12 entries. |
+| `favorites[].type` | int | 0 = web radio (by stable id), 1 = SD track path. Max 24 entries. |
 | `favorites[].radio_id` | int | The stable `webradios[].id` (type 0), not the array index. An id that no longer resolves shows as unavailable on the device. |
 | `favorites[].path` | string | SD path relative to the SD root (type 1). Required for type 1, empty otherwise. |
 | `favorites[].title` | string | Display title. |
@@ -168,7 +168,7 @@ written about once per minute of usage, so a power cut cannot reset it. The
 device counts and blocks nothing before the first SNTP sync. Like quiet hours,
 the web page is the only writer of this object.
 
-Favorites are up to 12 quick-play entries, behind a Favorites home tile. The
+Favorites are up to 24 quick-play entries, behind a Favorites home tile. The
 tile is hidden while the list is empty. The device adds and removes the content
 that plays through the star button of the now-playing screen
 (`config_store_favorite_add` and `config_store_favorite_remove`). The web Play
