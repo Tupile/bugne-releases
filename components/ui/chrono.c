@@ -30,16 +30,24 @@ int64_t chrono_sw_elapsed(const chrono_sw_t *sw, int64_t now_us)
     return sw->acc_us + run;
 }
 
-int chrono_tmr_clamp(int minutes)
+int chrono_tmr_clamp(int seconds)
 {
-    if (minutes < CHRONO_TIMER_MIN_MIN) return CHRONO_TIMER_MIN_MIN;
-    if (minutes > CHRONO_TIMER_MAX_MIN) return CHRONO_TIMER_MAX_MIN;
-    return minutes;
+    if (seconds < CHRONO_TIMER_MIN_S) return CHRONO_TIMER_MIN_S;
+    if (seconds > CHRONO_TIMER_MAX_S) return CHRONO_TIMER_MAX_S;
+    return seconds;
 }
 
-void chrono_tmr_start(chrono_tmr_t *t, int minutes, int64_t now_us)
+int chrono_tmr_step(int seconds, bool sec_field, int delta)
 {
-    t->end_us = now_us + (int64_t)chrono_tmr_clamp(minutes) * 60 * 1000000;
+    int m = seconds / 60, s = seconds % 60;
+    if (sec_field) s = ((s + delta) % 60 + 60) % 60;
+    else m += delta;
+    return chrono_tmr_clamp(m * 60 + s);
+}
+
+void chrono_tmr_start(chrono_tmr_t *t, int seconds, int64_t now_us)
+{
+    t->end_us = now_us + (int64_t)chrono_tmr_clamp(seconds) * 1000000;
     t->left_us = 0;
     t->state = CHRONO_TMR_RUNNING;
 }

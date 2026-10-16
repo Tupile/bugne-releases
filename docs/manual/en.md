@@ -240,7 +240,9 @@ The stopwatch counts the time. Tap the play button to start, the same button
 to pause, and the round arrow to go back to zero.
 
 The timer counts down. Pick the length with 1, 3, 5 or 10 min, or with the −
-and + buttons (1 to 60 minutes), then tap play. At the end, the Bugne rings
+and + buttons (5 seconds to 60 minutes), then tap play. The − and + buttons
+change the minutes; tap the seconds on the big clock to change them instead
+(the part being changed is in colour), and tap the minutes to go back. At the end, the Bugne rings
 and shows "Time's up!". The Stop button ends the ring, which also stops by
 itself after one minute. The stopwatch and the timer keep running if you leave
 the screen or if the screen goes dark. The timer also rings during quiet

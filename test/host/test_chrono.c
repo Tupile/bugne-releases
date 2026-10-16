@@ -50,7 +50,7 @@ int main(void)
     chrono_tmr_t t = {0};
     chrono_tmr_cancel(&t);
     CHECK(t.state == CHRONO_TMR_SET && chrono_tmr_left(&t, 0) == 0, "set state");
-    chrono_tmr_start(&t, 1, S(100));
+    chrono_tmr_start(&t, 60, S(100));
     CHECK(chrono_tmr_left(&t, S(130)) == S(30), "left while running");
     CHECK(!chrono_tmr_expired(&t, S(159)), "expired early");
     chrono_tmr_pause(&t, S(140));
@@ -64,9 +64,24 @@ int main(void)
     CHECK(!chrono_tmr_expired(&t, S(5000)), "cancelled timer expired");
 
     // Setting bounds.
-    CHECK(chrono_tmr_clamp(0) == 1 && chrono_tmr_clamp(61) == 60 && chrono_tmr_clamp(7) == 7, "clamp");
-    chrono_tmr_start(&t, 500, 0);
+    CHECK(chrono_tmr_clamp(0) == 5 && chrono_tmr_clamp(3601) == 3600 && chrono_tmr_clamp(7) == 7, "clamp");
+    chrono_tmr_start(&t, 9000, 0);
     CHECK(chrono_tmr_left(&t, 0) == S(3600), "start clamps to 60 min");
+    chrono_tmr_start(&t, 1, 0);
+    CHECK(chrono_tmr_left(&t, 0) == S(5), "start clamps to 5 s");
+    chrono_tmr_start(&t, 75, 0);
+    CHECK(chrono_tmr_left(&t, 0) == S(75), "seconds setting");
+
+    // Steps: minutes keep the seconds, seconds wrap without touching minutes.
+    CHECK(chrono_tmr_step(5 * 60 + 30, false, 1) == 6 * 60 + 30, "min +1");
+    CHECK(chrono_tmr_step(5 * 60 + 30, false, -1) == 4 * 60 + 30, "min -1");
+    CHECK(chrono_tmr_step(5 * 60 + 59, true, 1) == 5 * 60, "sec 59 -> 00");
+    CHECK(chrono_tmr_step(5 * 60, true, -1) == 5 * 60 + 59, "sec 00 -> 59");
+    CHECK(chrono_tmr_step(5 * 60 + 10, true, 1) == 5 * 60 + 11, "sec +1");
+    CHECK(chrono_tmr_step(5, true, -1) == 5, "sec floor 5 s");
+    CHECK(chrono_tmr_step(30, false, -1) == 5, "min floor 5 s");
+    CHECK(chrono_tmr_step(3600, true, 1) == 3600, "sec ceiling 60:00");
+    CHECK(chrono_tmr_step(59 * 60 + 30, false, 1) == 3600, "min ceiling 60:00");
 
     // Formatting.
     check_fmt_sw(0, "00:00.0");

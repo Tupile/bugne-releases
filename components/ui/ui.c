@@ -336,11 +336,13 @@ static void memo_send_run(int peer);
 // or the panel sleeps; tick_chrono fires the timer from any screen. RAM only.
 static chrono_sw_t  s_sw;
 static chrono_tmr_t s_tmr;               // zero-init = CHRONO_TMR_SET
-static int          s_tmr_set_min = 5;   // setting shown while CHRONO_TMR_SET
+static int          s_tmr_set_s = 300;   // setting (seconds) shown while CHRONO_TMR_SET
+static bool         s_tmr_sec_field;     // -/+ edit the seconds (else minutes)
 static bool         s_tmr_ringing;       // the "time is up" beep is ours and sounding
 static int64_t      s_tmr_ring_start_us;
 #define TIMER_RING_MAX_US (60LL * 1000000)  // the beep stops by itself after 1 min
 static lv_obj_t *s_sw_lbl, *s_sw_btn, *s_tmr_lbl, *s_tmr_btn;  // reset in show()
+static lv_obj_t *s_tmr_min_lbl, *s_tmr_sec_lbl;               // setting digits, same
 
 // ---- Walkie-talkie session state (push-to-talk over the memo pipeline) ----
 // A session = the talkie screen is shown; the correspondent is picked at the
@@ -1910,6 +1912,8 @@ static void show(screen_builder_t builder)
     s_sw_btn = NULL;
     s_tmr_lbl = NULL;
     s_tmr_btn = NULL;
+    s_tmr_min_lbl = NULL;
+    s_tmr_sec_lbl = NULL;
     lv_obj_t *old = lv_screen_active();
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_text_font(scr, &bugne_font_14, 0);  // accents via DejaVu, symbols via fallback
@@ -7483,7 +7487,7 @@ static void beep_takeover(const char *title)
 static void on_open_chrono(lv_event_t *e)    { (void)e; show(build_chrono); }
 static void on_chrono_back(lv_event_t *e)    { (void)e; show(build_chrono); }
 static void on_open_stopwatch(lv_event_t *e) { (void)e; show(build_stopwatch); }
-static void on_open_timer(lv_event_t *e)     { (void)e; show(build_timer); }
+static void on_open_timer(lv_event_t *e)     { (void)e; s_tmr_sec_field = false; show(build_timer); }
 
 // Chooser: two tiles, same layout as the Library chooser.
 static void build_chrono(lv_obj_t *scr)
@@ -7544,29 +7548,51 @@ static void build_stopwatch(lv_obj_t *scr)
                               on_sw_toggle);
 }
 
+// Setting digits: the field edited by -/+ is drawn in the accent colour.
 static void tmr_show_setting(void)
 {
-    char b[16];
-    chrono_fmt_tmr(b, sizeof(b), (int64_t)s_tmr_set_min * 60 * 1000000);
-    if (s_tmr_lbl) lv_label_set_text(s_tmr_lbl, b);
+    if (!s_tmr_min_lbl || !s_tmr_sec_lbl) return;
+    lv_label_set_text_fmt(s_tmr_min_lbl, "%02d", s_tmr_set_s / 60);
+    lv_label_set_text_fmt(s_tmr_sec_lbl, "%02d", s_tmr_set_s % 60);
+    lv_obj_t *on = s_tmr_sec_field ? s_tmr_sec_lbl : s_tmr_min_lbl;
+    lv_obj_t *off = s_tmr_sec_field ? s_tmr_min_lbl : s_tmr_sec_lbl;
+    lv_obj_set_style_text_color(on, col_accent(), 0);
+    lv_obj_remove_local_style_prop(off, LV_STYLE_TEXT_COLOR, 0);
 }
 
 static void on_tmr_step(lv_event_t *e)
 {
-    s_tmr_set_min = chrono_tmr_clamp(s_tmr_set_min + (int)(intptr_t)lv_event_get_user_data(e));
+    s_tmr_set_s = chrono_tmr_step(s_tmr_set_s, s_tmr_sec_field,
+                                  (int)(intptr_t)lv_event_get_user_data(e));
     tmr_show_setting();
 }
 
 static void on_tmr_preset(lv_event_t *e)
 {
-    s_tmr_set_min = chrono_tmr_clamp((int)(intptr_t)lv_event_get_user_data(e));
+    s_tmr_set_s = chrono_tmr_clamp((int)(intptr_t)lv_event_get_user_data(e) * 60);
     tmr_show_setting();
+}
+
+// Tap the minutes or the seconds to pick what -/+ change.
+static void on_tmr_field(lv_event_t *e)
+{
+    s_tmr_sec_field = (bool)(intptr_t)lv_event_get_user_data(e);
+    tmr_show_setting();
+}
+
+static lv_obj_t *tmr_digit(lv_obj_t *row, bool sec)
+{
+    lv_obj_t *l = chrono_big_label(row);
+    lv_obj_set_clickable(l, true);
+    lv_obj_set_ext_click_area(l, 12);
+    lv_obj_add_event_cb(l, on_tmr_field, LV_EVENT_CLICKED, (void *)(intptr_t)sec);
+    return l;
 }
 
 static void on_tmr_start(lv_event_t *e)
 {
     (void)e;
-    chrono_tmr_start(&s_tmr, s_tmr_set_min, esp_timer_get_time());
+    chrono_tmr_start(&s_tmr, s_tmr_set_s, esp_timer_get_time());
     show(build_timer);
 }
 
@@ -7585,7 +7611,8 @@ static void on_tmr_cancel(lv_event_t *e)
     show(build_timer);
 }
 
-// Setting (-, minutes, +, presets, start) while CHRONO_TMR_SET; otherwise the
+// Setting (MM:SS digits, presets, -, start, +) while CHRONO_TMR_SET; tapping
+// the minutes or the seconds picks the field -/+ edit. Otherwise the
 // running countdown with cancel and pause/resume, refreshed by tick_chrono.
 static void build_timer(lv_obj_t *scr)
 {
@@ -7595,7 +7622,11 @@ static void build_timer(lv_obj_t *scr)
     if (s_tmr.state == CHRONO_TMR_SET) {
         // Three rows: the 48 px "60:00" (~140 px) plus two 44 px buttons
         // does not fit the 240 px portrait width on one row.
-        s_tmr_lbl = chrono_big_label(c);
+        lv_obj_t *r1 = tone_row(c);
+        lv_obj_set_style_pad_column(r1, 0, 0);
+        s_tmr_min_lbl = tmr_digit(r1, false);
+        lv_label_set_text(chrono_big_label(r1), ":");
+        s_tmr_sec_lbl = tmr_digit(r1, true);
         tmr_show_setting();
 
         static const int presets[] = { 1, 3, 5, 10 };
@@ -7867,6 +7898,7 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "stopwatch_run",     build_stopwatch },    // bench hook: start the stopwatch
     { "timer",             build_timer },
     { "timer_5s",          build_timer },        // bench hook: 5 s countdown
+    { "timer_sec",         build_timer },        // bench hook: seconds field, one - step
 };
 #define NAV_SCREEN_COUNT ((int)(sizeof(NAV_SCREENS) / sizeof(NAV_SCREENS[0])))
 
@@ -8026,6 +8058,10 @@ static void tick_nav_request(void)
         } else if (strcmp(name, "timer_5s") == 0) {
             s_tmr.state = CHRONO_TMR_RUNNING;
             s_tmr.end_us = esp_timer_get_time() + 5000000;
+        } else if (strcmp(name, "timer_sec") == 0) {
+            chrono_tmr_cancel(&s_tmr);  // back to the setting
+            s_tmr_sec_field = true;     // as if the seconds were tapped, then -
+            s_tmr_set_s = chrono_tmr_step(s_tmr_set_s, true, -1);
         }
         // Prepare selection state that these screens' on_open handlers normally set.
         if (strcmp(name, "episodes") == 0) {

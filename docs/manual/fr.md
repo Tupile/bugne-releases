@@ -250,7 +250,10 @@ Le chronomètre compte le temps. Touchez le bouton lecture pour démarrer, le
 même bouton pour faire une pause, et la flèche ronde pour revenir à zéro.
 
 Le minuteur compte à rebours. Choisissez la durée avec 1, 3, 5 ou 10 min, ou
-avec les boutons − et + (de 1 à 60 minutes), puis touchez lecture. À la fin,
+avec les boutons − et + (de 5 secondes à 60 minutes), puis touchez lecture. Les
+boutons − et + changent les minutes ; touchez les secondes sur la grande
+horloge pour les changer à la place (la partie réglée est en couleur), et
+touchez les minutes pour y revenir. À la fin,
 la Bugne sonne et affiche « Terminé ! ». Le bouton Stop arrête la sonnerie,
 qui s'arrête aussi toute seule au bout d'une minute. Le chronomètre et le
 minuteur continuent de tourner si vous quittez l'écran ou si l'écran s'éteint.
