@@ -84,7 +84,7 @@ builds with ESP-IDF 6.1. The implemented feature set:
   point and a captive portal. In station mode it joins the strongest known
   network and roams between networks. It publishes an mDNS host name.
 - The firmware embeds the web page, and a login protects it. The page works on
-  a phone and on a desktop, in light and dark mode, in English and in French.
+  a phone and on a desktop, in light and dark mode, in English, French and German.
 - From that page a parent manages the Wi-Fi networks, the web radios and the
   podcast feeds. A parent also controls the playback, browses the music library
   and the files on the SD card, and reads the logs. The page saves and restores
@@ -99,7 +99,7 @@ builds with ESP-IDF 6.1. The implemented feature set:
 - The interface uses large rounded tiles, round transport buttons, a floating
   mini player bar and card list rows. Two QR codes help with the setup.
 - The screen sleeps while the audio plays.
-- The parent selects the language (English or French), the orientation
+- The parent selects the language (English, French or German), the orientation
   (portrait or landscape), light or dark mode, and one of 5 accent colors. The
   device applies each change at once, with no reboot.
 - Alarm clock: up to 3 alarms with a weekday schedule. An alarm plays a web

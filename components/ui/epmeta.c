@@ -12,6 +12,8 @@ static const char *const MON_EN[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun"
                                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 static const char *const MON_FR[12] = { "janv.", "f\xC3\xA9vr.", "mars", "avr.", "mai", "juin",
                                         "juil.", "ao\xC3\xBBt", "sept.", "oct.", "nov.", "d\xC3\xA9" "c." };
+static const char *const MON_DE[12] = { "Jan.", "Feb.", "M\xC3\xA4rz", "Apr.", "Mai", "Juni",
+                                        "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez." };
 
 // RFC 822 "[Day, ]DD Mon YYYY ..." or ISO "YYYY-MM-DD...". Month is 0..11.
 static bool parse_date(const char *s, int *day, int *mon, int *year)
@@ -42,15 +44,18 @@ static bool parse_date(const char *s, int *day, int *mon, int *year)
     return false;
 }
 
-void ep_meta_fmt(char *out, size_t n, const char *pubdate, int dur_s, bool fr, int cur_year)
+void ep_meta_fmt(char *out, size_t n, const char *pubdate, int dur_s, const char *lang, int cur_year)
 {
     if (!out || n == 0) return;
     char date[32] = "", dur[16] = "";
     int d, m, y;
     if (parse_date(pubdate, &d, &m, &y)) {
-        const char *mn = fr ? MON_FR[m] : MON_EN[m];
-        if (cur_year > 0 && y != cur_year) snprintf(date, sizeof(date), "%d %s %d", d, mn, y);
-        else snprintf(date, sizeof(date), "%d %s", d, mn);
+        const bool fr = lang && strcmp(lang, "fr") == 0;
+        const bool de = lang && strcmp(lang, "de") == 0;
+        const char *mn = fr ? MON_FR[m] : de ? MON_DE[m] : MON_EN[m];
+        const char *day_sep = de ? ". " : " ";  // German ordinal day: "1. Sept."
+        if (cur_year > 0 && y != cur_year) snprintf(date, sizeof(date), "%d%s%s %d", d, day_sep, mn, y);
+        else snprintf(date, sizeof(date), "%d%s%s", d, day_sep, mn);
     }
     if (dur_s > 0) {
         int min = (dur_s + 59) / 60;  // under a minute still reads "1 min"

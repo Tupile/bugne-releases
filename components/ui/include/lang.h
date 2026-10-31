@@ -188,7 +188,7 @@ typedef enum {
 // The translated string for id in the current language.
 const char *T(str_id_t id);
 
-// Select the active language by ISO code ("en", "fr"). Unknown codes fall back to
+// Select the active language by ISO code ("en", "fr", "de"). Unknown codes fall back to
 // the first language (English). Safe to call from the UI task.
 void lang_set_code(const char *code);
 
@@ -197,8 +197,8 @@ const char *lang_code(void);
 
 // Languages available, for building a selector.
 size_t lang_count(void);
-const char *lang_code_at(size_t i);   // "en", "fr"
-const char *lang_name_at(size_t i);   // "English", "Francais" (in their own language)
+const char *lang_code_at(size_t i);   // "en", "fr", "de"
+const char *lang_name_at(size_t i);   // "English", "Français", "Deutsch" (in their own language)
 
 #ifdef __cplusplus
 }
