@@ -403,7 +403,8 @@ Everything else is here:
   any time.
 - Home Assistant: the connection to your Home Assistant server (URL, Entity ID
   and a long-lived access token). It adds a Lamp tile (experimental feature) to
-  the home screen of the device.
+  the home screen of the device. This is not the Bugne integration for Home
+  Assistant (see "Going further"); it is a separate feature.
 - Wi-Fi networks: add, edit or remove a saved network.
 - Page password, backup and restore of the configuration, device logs, and
   firmware updates (see below). The Diagnostics card also has a "Crash report"

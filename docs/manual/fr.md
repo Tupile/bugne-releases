@@ -425,7 +425,9 @@ Tout le reste est ici :
   l'appareil. Vous pouvez les remettre à zéro à tout moment.
 - Home Assistant : la connexion à votre serveur Home Assistant (URL, Entité et
   un jeton d'accès longue durée). Elle ajoute une tuile Lampe (fonctionnalité
-  expérimentale) sur l'écran d'accueil de l'appareil.
+  expérimentale) sur l'écran d'accueil de l'appareil. Ce n'est pas
+  l'intégration de la Bugne dans Home Assistant (voir « Pour aller plus
+  loin ») : c'est une fonction à part.
 - Réseaux Wi-Fi : ajouter, modifier ou supprimer un réseau enregistré.
 - Mot de passe de la page, sauvegarde et restauration de la configuration,
   journaux de l'appareil, et mises à jour du firmware (voir plus bas). La carte
