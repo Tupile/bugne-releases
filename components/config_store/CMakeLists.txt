@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "config_store.c"
+    SRCS "config_store.c" "button_pins.c"
     INCLUDE_DIRS "include"
     # The managed component joltwallet/littlefs registers as joltwallet__littlefs.
     # If the first on-device build reports it missing, try the name "littlefs".

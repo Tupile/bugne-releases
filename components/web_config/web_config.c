@@ -16,6 +16,7 @@
 #include "library.h"
 #include "memo.h"
 #include "podcast.h"
+#include "podcast_new.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -1503,6 +1504,28 @@ static esp_err_t podcasts_download_get(httpd_req_t *req)
     return httpd_resp_sendstr(req, json);
 }
 
+// GET /api/podcasts/new: {"<podcast id>": count of new episodes, ...} for the
+// configured podcasts with at least one (red "N new" badge on the web page).
+// Empty object while ui.podcast_new_badge is off.
+static esp_err_t podcasts_new_get(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_OK);
+    const config_t *c = config_store_get();
+    char json[CFG_MAX_PODCASTS * 20 + 8];
+    size_t o = 0;
+    json[o++] = '{';
+    for (size_t i = 0; c && c->ui.podcast_new_badge == 1 && i < c->podcast_count; i++) {
+        int n = podcast_new_count(c->podcasts[i].id);
+        if (n <= 0) continue;
+        o += snprintf(json + o, sizeof(json) - o, "%s\"%d\":%d", o > 1 ? "," : "", c->podcasts[i].id, n);
+        if (o >= sizeof(json) - 2) break;
+    }
+    json[o++] = '}';
+    json[o] = 0;
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
 // POST /api/podcasts/download/cancel: stop a running download.
 static esp_err_t podcasts_download_cancel_post(httpd_req_t *req)
 {
@@ -1786,6 +1809,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/podcasts/download", .method = HTTP_POST, .handler = podcasts_download_post},
         {.uri = "/api/podcasts/download", .method = HTTP_GET,  .handler = podcasts_download_get},
         {.uri = "/api/podcasts/download/cancel", .method = HTTP_POST, .handler = podcasts_download_cancel_post},
+        {.uri = "/api/podcasts/new", .method = HTTP_GET, .handler = podcasts_new_get},
         {.uri = "/api/screenshot", .method = HTTP_GET,  .handler = screenshot_get},
         {.uri = "/api/debug/nav",  .method = HTTP_POST, .handler = debug_nav_post},
         {.uri = "/api/stats",       .method = HTTP_GET,  .handler = stats_get},

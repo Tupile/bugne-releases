@@ -47,6 +47,7 @@ configuration:
     "tuner": 1,
     "timer": 0,
     "memo_rx": 1,
+    "podcast_new_badge": 0,
     "tz": "CET-1CEST,M3.5.0,M10.5.0/3"
   },
   "alarms": [
@@ -67,6 +68,9 @@ configuration:
   "favorites": [
     { "type": 0, "radio_id": 1, "path": "", "title": "FIP" },
     { "type": 1, "radio_id": 0, "path": "Music/Album/track.mp3", "title": "Track" }
+  ],
+  "buttons": [
+    { "gpio": 44, "action": "toggle" }
   ]
 }
 ```
@@ -99,6 +103,7 @@ configuration:
 | `ui.tuner` | int | Instrument tuner on the home screen (experimental feature): 1 shown (default), 0 hidden. |
 | `ui.timer` | int | Chrono tile (stopwatch and countdown timer) on the home screen: 0 hidden (default), 1 shown. Live-applied. |
 | `ui.memo_rx` | int | Accept voice memos from other Bugnes: 1 yes (default), 0 refuse. The receive route `POST /api/memo?from=<name>` needs no authentication on the LAN, because a peer does not know the password. It is bounded instead: the content length is required and capped at 2 MB, the device stores 20 memos at most (own plus received, and it refuses the next ones instead of deleting any), it checks the WAV format (PCM 16-bit mono 16 kHz), it sanitizes the sender name, and it chooses the storage path itself (`/sdcard/memos/`). |
+| `ui.podcast_new_badge` | int | Red "new episode" dots: 0 off (default), 1 on. When on, an episode downloaded by the background job is marked new (stored in `/littlefs/podcasts/new.bin`, 128 markers at most) until it is launched; the Podcasts tile, the podcast row and the episode row show a red dot, and `GET /api/podcasts/new` returns `{"<podcast id>": count}` for the web page. Episodes already on the card when it is turned on are not marked. Live-applied. |
 | `ui.tz` | string | POSIX TZ string, used for the wall clock and the alarm. Default `CET-1CEST,M3.5.0,M10.5.0/3` (Paris). Set from the web Settings page, live-applied (no reboot). |
 | `alarms[]` | array | Up to 3 alarms (`CFG_MAX_ALARMS`), e.g. weekday / weekend / free use. Each entry has the fields below. A legacy single `alarm` object (pre-B3 firmware) is still read forever and maps to `alarms[0]`; it is parsed BEFORE `alarms`, so if a config carries both, the array wins. Only `alarms` is written back. |
 | `alarms[].enabled` | int | 0 (default) or 1. |
@@ -121,6 +126,9 @@ configuration:
 | `favorites[].radio_id` | int | The stable `webradios[].id` (type 0), not the array index. An id that no longer resolves shows as unavailable on the device. |
 | `favorites[].path` | string | SD path relative to the SD root (type 1). Required for type 1, empty otherwise. |
 | `favorites[].title` | string | Display title. |
+| `buttons[]` | array | External buttons, empty by default, 8 at most (`CFG_MAX_BUTTONS`). Each button is wired between its pin and GND (internal pull-up, active low), debounced (30 ms) and polled by the UI task. Live-applied. A present array replaces the list; invalid entries are dropped. |
+| `buttons[].gpio` | int | Allowed pins only (`button_pins.c`): 2, 14, 21, 44 (UART RX), and with care 0 (BOOT button), 3 (strapping) and 43 (UART TX, driven during boot). Every other pin drives the display, touch, audio, SD card or flash/PSRAM and is refused. A pin may appear once. Using 43/44 detaches them from the UART0 console until the next reboot (logs stay on USB). |
+| `buttons[].action` | string | `toggle` (play/pause; resuming obeys the parental gates), `vol_up`, `vol_down` (5 % steps up to `ui.volume_max`, repeated every 300 ms after a 500 ms hold). A press also wakes the screen. |
 
 The alarm engine (ui.c, 1 Hz tick) checks the 3 alarms every second. When
 several alarms are due in the same minute, the lowest index fires. The others

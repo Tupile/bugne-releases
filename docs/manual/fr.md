@@ -151,6 +151,11 @@ devant chaque épisode indique comment il sera lu :
 - Icône téléchargement : l'épisode sera lu en direct par le Wi-Fi. Ces lignes
   sont grisées quand l'appareil est hors ligne.
 - Ligne grise avec une coche : vous l'avez déjà écouté.
+- Point rouge : l'épisode vient d'être téléchargé et personne ne l'a encore
+  lancé. Un point rouge apparaît aussi sur la tuile Podcasts de l'accueil et
+  sur la ligne de l'émission. Il disparaît dès qu'on lance l'épisode. Cette
+  alerte est désactivée par défaut : cochez « Point rouge sur les nouveaux
+  épisodes de podcast téléchargés » dans les réglages de la page web.
 
 Sous chaque titre, une ligne donne la date de l'épisode et sa durée, par
 exemple « 8 sept. · 52 min ».
@@ -450,6 +455,24 @@ L'appareil s'annonce sur le réseau avec mDNS et sert une petite API HTTP, pour
 son état et sa lecture. Vous pouvez donc l'intégrer à Home Assistant, ou à
 toute domotique capable d'appeler des adresses HTTP. Le README liste les
 routes.
+
+### Boutons externes
+
+Vous pouvez brancher des boutons poussoirs sur la carte et leur donner une
+commande : lecture/pause, volume + ou volume −. Chaque bouton se branche entre
+une broche et la masse (GND), sans autre composant. Dans la page web, onglet
+Réglages, carte « Boutons », cliquez sur « Ajouter un bouton », puis choisissez
+la broche et la commande. Le réglage s'applique tout de suite.
+
+- Broches possibles : IO2, IO14, IO21 et RX (IO44) du connecteur UART. Avec
+  précaution : TX (IO43), IO0 (le bouton BOOT) et IO3, à ne pas presser
+  pendant le démarrage. Les autres broches servent à la Bugne et sont grisées.
+- Volume + et volume − répètent le pas tant qu'on garde le bouton appuyé. Le
+  volume ne dépasse jamais le volume maximum des réglages.
+- Lecture/pause respecte le contrôle parental : la pause marche toujours, la
+  reprise est refusée pendant les heures calmes.
+- Un appui rallume aussi l'écran.
+- 8 boutons au maximum.
 
 ### Plusieurs Bugnes à la maison
 

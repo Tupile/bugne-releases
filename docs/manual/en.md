@@ -144,6 +144,11 @@ each episode tells you how it plays:
 - Download icon: the episode streams over Wi-Fi. These rows are grey while the
   device is offline.
 - Grey row with a checkmark: you listened to it already.
+- Red dot: the episode was just downloaded and nobody has started it yet. A red
+  dot also shows on the Podcasts tile of the home screen and on the show row.
+  It goes away as soon as the episode is started. This alert is off by
+  default: tick "Red dot on newly downloaded podcast episodes" in the settings
+  of the web page.
 
 Under each title, a line gives the episode's date and length, for example
 "8 Sep · 52 min".
@@ -425,6 +430,23 @@ The device announces itself on the network with mDNS and serves a small HTTP
 API for its status and its playback. You can integrate it into Home Assistant,
 or into any home automation that calls HTTP endpoints. The README lists the
 routes.
+
+### External buttons
+
+You can wire push buttons to the board and give each one a command: play/pause,
+volume + or volume −. Each button goes between a pin and ground (GND), with no
+other part. On the web page, Settings tab, "Buttons" card, click "Add a button",
+then choose the pin and the command. The setting applies at once.
+
+- Possible pins: IO2, IO14, IO21 and RX (IO44) on the UART connector. With
+  care: TX (IO43), IO0 (the BOOT button) and IO3, not to be pressed while the
+  Bugne starts. The other pins are used by the Bugne and are greyed out.
+- Volume + and volume − repeat the step while the button is held. The volume
+  never goes above the maximum volume of the settings.
+- Play/pause obeys the parental controls: pausing always works, resuming is
+  refused during quiet hours.
+- A press also turns the screen back on.
+- 8 buttons at most.
 
 ### Several Bugnes in one home
 

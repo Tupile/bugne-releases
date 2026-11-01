@@ -12,6 +12,7 @@
 #include "source_sendspin.h"
 #include "podcast.h"
 #include "played.h"
+#include "podcast_new.h"
 #include "art.h"  // cover art bitmap for the current track
 #include "audio.h"
 #include "audio_arbiter.h"
@@ -68,6 +69,8 @@
 #include "lvgl.h"
 #include "lvgl_private.h"  // full lv_theme_t, for the child-theme extension pattern
 #include "podcast_keep.h"
+#include "button_pins.h"
+#include "buttons.h"
 
 static const char *TAG = "ui";
 
@@ -421,6 +424,7 @@ static portMUX_TYPE s_refresh_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_downloading;
 static volatile bool s_dl_queued;
 static volatile bool s_dl_cancel;
+static volatile bool s_podnew_flag;   // worker marked a new episode: rebuild home / podcast list
 static volatile int  s_dl_done;       // episodes handled so far this job
 static volatile int  s_dl_total;      // episodes in scope this job
 static config_dljob_t s_dljob;        // the persisted job; s_dljob.active == pending
@@ -527,6 +531,8 @@ static int     s_sleep_fade_last;
 static bool    s_sleep_fade_off;     // user overrode this deadline's fade
 static podcast_episode_t *s_episodes;  // browse buffer (last opened podcast), PSRAM
 static size_t s_ep_count;
+static bool  *s_ep_new;     // per browse row: red "new" dot (podcast_new), PSRAM
+static size_t s_ep_new_n;   // valid entries in s_ep_new
 // Snapshot of the episode list of the podcast that is playing, so next/previous
 // and auto-advance follow that podcast even after the user browses to a different
 // one (which overwrites s_episodes above). PSRAM-backed: the array is ~23 KB.
@@ -1108,6 +1114,45 @@ static bool job_refresh(void)
     return !s_dl_cancel && uxQueueMessagesWaiting(s_play_q) == 0;
 }
 
+// New-episode markers (podcast_new.h): drop those of `pod_id` whose episode is
+// no longer in the manifest or no longer on the card. eps[].cached must be
+// current. Any task (podcast_new locks internally).
+static void podnew_retain_cached(int pod_id, const podcast_episode_t *eps, size_t n)
+{
+    if (podcast_new_count(pod_id) == 0) return;  // common case: nothing to scan
+    uint64_t *keep = n ? heap_caps_malloc(n * sizeof(uint64_t), MALLOC_CAP_SPIRAM) : NULL;
+    if (n && !keep) return;  // keep the markers rather than drop them on OOM
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (eps[i].cached) keep[k++] = podcast_new_hash(eps[i].episode_url);
+    }
+    podcast_new_retain(pod_id, keep, k);
+    free(keep);
+}
+
+// True when the red "new episode" dots are on (ui.podcast_new_badge).
+static bool podnew_on(void)
+{
+    const config_t *c = config_store_get();
+    return c && c->ui.podcast_new_badge == 1;
+}
+
+// Notification red dot, same look as the memos / update dots.
+static lv_obj_t *podnew_dot(lv_obj_t *parent)
+{
+    lv_obj_t *dot = lv_obj_create(parent);
+    lv_obj_set_size(dot, 12, 12);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(0xE53935), 0);  // notification red
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(dot, lv_color_white(), 0);    // ring: visible on any surface
+    lv_obj_set_style_border_width(dot, 2, 0);
+    lv_obj_set_style_pad_all(dot, 0, 0);
+    lv_obj_set_clickable(dot, false);
+    lv_obj_set_scrollable(dot, false);
+    return dot;
+}
+
 // Run the persisted background download job on the worker. Resumes from the saved
 // cursor, refreshes first when in "new" mode, skips cached episodes, and persists
 // the cursor as it goes. On a pause/cancel (s_dl_cancel) it saves the cursor and
@@ -1156,7 +1201,10 @@ static void job_prune(const config_t *c)
                 if (!del[e]) continue;
                 struct stat st;
                 uint64_t sz = (stat(eps[e].cache_path, &st) == 0) ? (uint64_t)st.st_size : 0;
-                if (unlink(eps[e].cache_path) == 0) { removed++; freed += sz; }
+                if (unlink(eps[e].cache_path) == 0) {
+                    removed++; freed += sz;
+                    podcast_new_clear(eps[e].episode_url);  // off the card: no longer new
+                }
             }
         }
         if (removed) {
@@ -1257,11 +1305,19 @@ static void worker_run_job(void)
                     esp_err_t r = podcast_download_episode(&eps[e], skip_s, &s_dl_cancel);
                     if (r != ESP_OK && s_dl_cancel) { s_dljob.cur_ep_idx = (int)e; dljob_persist(); free(eps); s_downloading = false; return; }
                     if (r != ESP_OK) ESP_LOGW(TAG, "  episode %u of podcast %d failed (%d)", (unsigned)e, p->id, r);
+                    // Only a first download is "new" (not a forced re-download),
+                    // and only while the setting is on.
+                    if (r == ESP_OK && !eps[e].cached && config_store_get()->ui.podcast_new_badge == 1) {
+                        podcast_new_add(p->id, eps[e].episode_url);
+                        s_podnew_flag = true;
+                    }
+                    if (r == ESP_OK) eps[e].cached = true;
                     s_dl_done++;
                 }
                 s_dljob.cur_ep_idx = (int)e + 1;
                 if ((e & 0x7) == 0) dljob_persist();  // throttle flash writes
             }
+            podnew_retain_cached(p->id, eps, got);  // forget markers of episodes gone from feed/card
             free(eps);
         }
 
@@ -2827,6 +2883,7 @@ static void play_ctx_at_ex_skip(int i, bool show_np, int skip_override_ms)
         // Navigate the playing podcast's own snapshot, not the browse buffer.
         if (!s_play_eps || i < 0 || (size_t)i >= s_play_ep_count) return;
         const podcast_episode_t *ep = &s_play_eps[i];
+        podcast_new_clear(ep->episode_url);  // launched: no longer new (red dot off)
         // Only a cached MP3 was physically trimmed at download, so it plays from
         // the start. Everything else (streamed, or cached FLAC/AAC which are not
         // trimmed) skips the intro at playback.
@@ -3742,6 +3799,21 @@ static void ep_table_draw_cb(lv_event_t *e)
     if (!base || base->part != LV_PART_ITEMS) return;
     uint32_t row = base->id1;
     if (row >= s_ep_count) return;
+    if (row < s_ep_new_n && s_ep_new[row] && lv_draw_task_get_type(t) == LV_DRAW_TASK_TYPE_LABEL) {
+        // New episode: the row text starts with blanks instead of an icon;
+        // a red dot is drawn there, centred on the first text line.
+        lv_draw_label_dsc_t *ld = lv_draw_task_get_label_dsc(t);
+        lv_area_t a;
+        lv_draw_task_get_area(t, &a);
+        int32_t lh = ld && ld->font ? lv_font_get_line_height(ld->font) : 16;
+        lv_draw_rect_dsc_t rd;
+        lv_draw_rect_dsc_init(&rd);
+        rd.radius = LV_RADIUS_CIRCLE;
+        rd.bg_color = lv_color_hex(0xE53935);
+        rd.bg_opa = LV_OPA_COVER;
+        lv_area_t d = { a.x1 + 1, a.y1 + lh / 2 - 6, a.x1 + 12, a.y1 + lh / 2 + 5 };
+        lv_draw_rect(base->layer, &rd, &d);
+    }
     bool offline_grey = net_state() != NET_STATE_CONNECTED && !s_episodes[row].cached;
     bool played = !offline_grey && played_contains(s_episodes[row].episode_url);
     if (!offline_grey && !played) return;
@@ -3805,9 +3877,30 @@ static void build_episodes(lv_obj_t *scr)
         localtime_r(&now, &lt);
         cur_year = lt.tm_year + 1900;
     }
+    // New-episode dots: per-row flags read by ep_table_draw_cb, which draws
+    // the dot over blanks that stand in for the icon.
+    s_ep_new_n = 0;
+    char blanks[8] = "";
+    if (podnew_on()) {
+        podnew_retain_cached(s_nav_podcast_id, s_episodes, s_ep_count);
+        if (podcast_new_count(s_nav_podcast_id) > 0) {
+            free(s_ep_new);
+            s_ep_new = heap_caps_calloc(s_ep_count, sizeof(bool), MALLOC_CAP_SPIRAM);
+            if (s_ep_new) s_ep_new_n = s_ep_count;
+            const lv_font_t *f = lv_obj_get_style_text_font(scr, LV_PART_MAIN);
+            int sw = f ? lv_font_get_glyph_width(f, ' ', ' ') : 4;
+            int nb = sw > 0 ? (14 + sw - 1) / sw : 4;  // blanks covering the 12 px dot
+            if (nb > (int)sizeof(blanks) - 1) nb = sizeof(blanks) - 1;
+            memset(blanks, ' ', nb);
+            blanks[nb] = 0;
+        }
+    }
     for (size_t i = 0; i < s_ep_count; i++) {
+        bool is_new = i < s_ep_new_n && podcast_new_contains(s_episodes[i].episode_url);
+        if (is_new) s_ep_new[i] = true;
         // A3: an already-played episode shows OK instead of its cached/download icon.
-        const char *icon = played_contains(s_episodes[i].episode_url) ? LV_SYMBOL_OK
+        const char *icon = is_new ? blanks
+                          : played_contains(s_episodes[i].episode_url) ? LV_SYMBOL_OK
                           : s_episodes[i].cached ? LV_SYMBOL_SD_CARD : LV_SYMBOL_DOWNLOAD;
         char meta[40];
         ep_meta_fmt(meta, sizeof(meta), s_episodes[i].date, s_episodes[i].duration_seconds, fr, cur_year);
@@ -3859,7 +3952,16 @@ static void build_podcasts(lv_obj_t *scr)
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_podcast, LV_EVENT_CLICKED, NULL);
     }
-    list_titles_static(list);
+    list_titles_static(list);  // before the dots below: it expects the label last
+    // Red dot on each podcast with new (downloaded, not yet launched) episodes.
+    if (podnew_on()) {
+        for (size_t i = 0; i < c->podcast_count; i++) {
+            if (podcast_new_count(c->podcasts[i].id) == 0) continue;
+            lv_obj_t *dot = podnew_dot(lv_obj_get_child(list, (int32_t)i));
+            lv_obj_set_ignore_layout(dot, true);  // list rows are flex rows
+            lv_obj_align(dot, LV_ALIGN_RIGHT_MID, -4, 0);
+        }
+    }
 }
 
 // Home --------------------------------------------------------------------
@@ -5941,6 +6043,12 @@ static void build_home(lv_obj_t *scr)
     // Discreet unread-memos alert: a small red dot on the memos tile. Computed
     // at build time only; the receive flag, the SD-presence edge and the memo
     // list actions all rebuild home (no per-tick directory scan).
+    // Same dot on the Podcasts tile when an episode is new (podcast_new.h).
+    if (pod && podnew_on() && hc) {
+        bool any = false;
+        for (size_t i = 0; !any && i < hc->podcast_count; i++) any = podcast_new_count(hc->podcasts[i].id) > 0;
+        if (any) lv_obj_align(podnew_dot(pod), LV_ALIGN_TOP_RIGHT, -4, 4);
+    }
     if (mem && source_sd_present() && memo_unread_count() > 0) {
         lv_obj_t *dot = lv_obj_create(mem);
         lv_obj_set_size(dot, 12, 12);
@@ -7854,6 +7962,68 @@ void ui_screenshot_release(void)
 // sleep_timer_cb. "game_play" jumps straight past the table picker into
 // build_game (all tables enabled), for a remote screenshot of the game itself.
 typedef struct { const char *name; screen_builder_t fn; } nav_screen_t;
+// ---- External buttons (config "buttons") ----
+// Polled on the 50 ms UI tick (no ISR, no extra task): the actions reuse the
+// web remote paths on the UI task. Pins are (re)configured live whenever the
+// config's button list changes. A pin removed from the list stays an input
+// until the next reboot (UART0 pins only get their console back at reboot).
+static config_button_t s_btn_applied[CFG_MAX_BUTTONS];
+static size_t          s_btn_applied_n = SIZE_MAX;  // SIZE_MAX: never applied
+static buttons_state_t s_btn_state[CFG_MAX_BUTTONS];
+
+static void button_fire(const config_button_t *b, bool log)
+{
+    if (log) ESP_LOGI(TAG, "button IO%d: %s", b->gpio, button_action_name(b->action));
+    lv_display_trigger_activity(s_disp);  // a press also wakes the screen
+    switch (b->action) {
+    case BUTTON_ACT_TOGGLE:
+        ui_remote_apply(UI_REMOTE_TOGGLE, 0);
+        break;
+    case BUTTON_ACT_VOL_UP:
+    case BUTTON_ACT_VOL_DOWN:
+        ui_remote_apply(UI_REMOTE_VOLUME,
+                        buttons_volume_step(audio_get_volume(),
+                                            b->action == BUTTON_ACT_VOL_UP ? 1 : -1,
+                                            audio_get_volume_limit()));
+        break;
+    default:
+        break;
+    }
+}
+
+static void tick_buttons(void)
+{
+    const config_t *c = config_store_get();
+    if (!c) return;
+    if (c->button_count != s_btn_applied_n ||
+        memcmp(c->buttons, s_btn_applied, c->button_count * sizeof(c->buttons[0])) != 0) {
+        for (size_t i = 0; i < c->button_count; i++) {
+            gpio_config_t io = {
+                .pin_bit_mask = 1ULL << c->buttons[i].gpio,
+                .mode = GPIO_MODE_INPUT,
+                .pull_up_en = GPIO_PULLUP_ENABLE,
+                .pull_down_en = GPIO_PULLDOWN_DISABLE,
+                .intr_type = GPIO_INTR_DISABLE,
+            };
+            esp_err_t err = gpio_config(&io);
+            ESP_LOGI(TAG, "button on IO%d (%s): %s", c->buttons[i].gpio,
+                     button_action_name(c->buttons[i].action), esp_err_to_name(err));
+        }
+        memcpy(s_btn_applied, c->buttons, c->button_count * sizeof(c->buttons[0]));
+        s_btn_applied_n = c->button_count;
+        memset(s_btn_state, 0, sizeof(s_btn_state));
+        return;  // let the pull-ups settle before the first sample
+    }
+    uint32_t now = lv_tick_get();
+    for (size_t i = 0; i < s_btn_applied_n; i++) {
+        const config_button_t *b = &s_btn_applied[i];
+        bool pressed = gpio_get_level(b->gpio) == 0;  // wired to GND, active low
+        buttons_event_t ev = buttons_update(&s_btn_state[i], pressed, now,
+                                            b->action != BUTTON_ACT_TOGGLE);
+        if (ev != BUTTONS_EV_NONE) button_fire(b, ev == BUTTONS_EV_PRESS);
+    }
+}
+
 static const nav_screen_t NAV_SCREENS[] = {
     { "home",              build_home },
     { "webradios",         build_webradios },
@@ -7899,6 +8069,9 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "timer",             build_timer },
     { "timer_5s",          build_timer },        // bench hook: 5 s countdown
     { "timer_sec",         build_timer },        // bench hook: seconds field, one - step
+    { "button_0",          NULL },               // bench hook: press external button 0
+    { "button_1",          NULL },               // bench hook: press external button 1
+    { "button_2",          NULL },               // bench hook: press external button 2
 };
 #define NAV_SCREEN_COUNT ((int)(sizeof(NAV_SCREENS) / sizeof(NAV_SCREENS[0])))
 
@@ -8049,6 +8222,13 @@ static void tick_nav_request(void)
                 if (name[5] == 't') on_memo_play_toggle(NULL);
                 else on_memo_play_stop(NULL);
             }
+            return;
+        }
+        // External button bench hook: fire button N's action as a press would.
+        if (strncmp(name, "button_", 7) == 0) {
+            const config_t *c = config_store_get();
+            int n = atoi(name + 7);
+            if (c && n >= 0 && (size_t)n < c->button_count) button_fire(&c->buttons[n], true);
             return;
         }
         // Chrono bench hooks: start the stopwatch, or a 5 s countdown (the
@@ -8230,6 +8410,19 @@ static void tick_apply_config(void)
         bool first = (s_tuner_flag_applied == -1);
         s_tuner_flag_applied = config_store_get()->ui.tuner;
         if (!first && s_active_builder == build_home) show(build_home);
+    }
+
+    // New-episode dots: the setting toggles live, and a download that marked
+    // an episode new refreshes the screens that show a dot (not the episode
+    // list: a rebuild would lose its scroll position).
+    static int s_podnew_applied = -1;
+    bool podnew_set = config_store_get()->ui.podcast_new_badge != s_podnew_applied;
+    if (podnew_set || s_podnew_flag) {
+        bool first = (s_podnew_applied == -1);
+        s_podnew_applied = config_store_get()->ui.podcast_new_badge;
+        s_podnew_flag = false;
+        if (!first && (s_active_builder == build_home || s_active_builder == build_podcasts))
+            show(s_active_builder);
     }
 
     // Same for the chrono tile.
@@ -9369,6 +9562,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_refresh_done();
     tick_config_save();
     tick_net_change();
+    tick_buttons();  // before tick_wake_and_sleep: a press triggers activity
     tick_wake_and_sleep();
 }
 

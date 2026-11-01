@@ -31,6 +31,7 @@ prelude = r'''
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "config_store.h"
+#include "button_pins.h"
 #include "cJSON.h"
 #define ESP_ERR_INVALID_STATE 0x103
 #define ESP_ERR_INVALID_SIZE 0x104
@@ -385,5 +386,5 @@ with tempfile.TemporaryDirectory(prefix='lot4-', dir='/tmp/opencode') as tmp:
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                     '-I', str(ROOT / 'test/host/stubs'),
                     '-I', str(ROOT / 'components/config_store/include'), '-I', str(CJSON),
-                    str(src), str(CJSON / 'cJSON.c'), '-lm', '-o', str(exe)], check=True)
+                    str(src), str(ROOT / 'components/config_store/button_pins.c'), str(CJSON / 'cJSON.c'), '-lm', '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, cwd=tmp)

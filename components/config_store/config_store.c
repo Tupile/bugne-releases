@@ -1,5 +1,6 @@
 // config_store: NVS + LittleFS, plus loading and validating config.json.
 #include "config_store.h"
+#include "button_pins.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +67,7 @@ static void set_defaults(config_t *c)
     c->ui.tuner = 1;   // instrument tuner shown on home
     c->ui.timer = 0;   // chrono tile hidden: existing configs see no change
     c->ui.memo_rx = 1; // accept voice memos from other Bugnes
+    c->ui.podcast_new_badge = 0;  // new-episode dots off: existing configs see no change
     strlcpy(c->ui.tz, "CET-1CEST,M3.5.0,M10.5.0/3", sizeof(c->ui.tz));  // Paris
 
     for (int i = 0; i < CFG_MAX_ALARMS; i++) {
@@ -267,6 +269,8 @@ static void load_from_json(config_t *c, const cJSON *root)
         if (cJSON_IsNumber(tm)) c->ui.timer = clampi(tm->valueint, 0, 1);
         const cJSON *mr = cJSON_GetObjectItemCaseSensitive(ui, "memo_rx");
         if (cJSON_IsNumber(mr)) c->ui.memo_rx = clampi(mr->valueint, 0, 1);
+        const cJSON *pnb = cJSON_GetObjectItemCaseSensitive(ui, "podcast_new_badge");
+        if (cJSON_IsNumber(pnb)) c->ui.podcast_new_badge = clampi(pnb->valueint, 0, 1);
         const cJSON *tz = cJSON_GetObjectItemCaseSensitive(ui, "tz");
         if (cJSON_IsString(tz) && tz->valuestring && tz->valuestring[0])
             strlcpy(c->ui.tz, tz->valuestring, sizeof(c->ui.tz));
@@ -310,6 +314,30 @@ static void load_from_json(config_t *c, const cJSON *root)
             strlcpy(f->path, (type == 1) ? pa->valuestring : "", sizeof(f->path));
             const cJSON *ti = cJSON_GetObjectItemCaseSensitive(it, "title");
             strlcpy(f->title, (cJSON_IsString(ti) && ti->valuestring) ? ti->valuestring : "", sizeof(f->title));
+        }
+    }
+
+    // External buttons: a present array replaces the list. Entries with a pin
+    // the board uses, an unknown action or an already-used pin are dropped, so
+    // a bad config can never reconfigure the display, SD or flash pins.
+    const cJSON *btns = cJSON_GetObjectItemCaseSensitive(root, "buttons");
+    if (cJSON_IsArray(btns)) {
+        c->button_count = 0;
+        int n = cJSON_GetArraySize(btns);
+        for (int i = 0; i < n && c->button_count < CFG_MAX_BUTTONS; i++) {
+            const cJSON *it = cJSON_GetArrayItem(btns, i);
+            if (!cJSON_IsObject(it)) continue;
+            const cJSON *gp = cJSON_GetObjectItemCaseSensitive(it, "gpio");
+            const cJSON *ac = cJSON_GetObjectItemCaseSensitive(it, "action");
+            if (!cJSON_IsNumber(gp) || !button_pin_allowed(gp->valueint)) continue;
+            int action = cJSON_IsString(ac) ? button_action_from_name(ac->valuestring) : -1;
+            if (action < 0) continue;
+            bool dup = false;
+            for (size_t j = 0; j < c->button_count; j++) dup |= (c->buttons[j].gpio == gp->valueint);
+            if (dup) continue;
+            c->buttons[c->button_count].gpio = gp->valueint;
+            c->buttons[c->button_count].action = action;
+            c->button_count++;
         }
     }
 
@@ -406,6 +434,7 @@ static esp_err_t save_to_disk(const config_t *c)
         !cJSON_AddNumberToObject(ui, "tuner", c->ui.tuner) ||
         !cJSON_AddNumberToObject(ui, "timer", c->ui.timer) ||
         !cJSON_AddNumberToObject(ui, "memo_rx", c->ui.memo_rx) ||
+        !cJSON_AddNumberToObject(ui, "podcast_new_badge", c->ui.podcast_new_badge) ||
         !cJSON_AddStringToObject(ui, "tz", c->ui.tz[0] ? c->ui.tz : "CET-1CEST,M3.5.0,M10.5.0/3")) goto no_mem;
 
     // Only "alarms" is written (the legacy "alarm" object is read forever but
@@ -443,6 +472,18 @@ static esp_err_t save_to_disk(const config_t *c)
             !cJSON_AddNumberToObject(o, "radio_id", c->favorites[i].radio_id) ||
             !cJSON_AddStringToObject(o, "path", c->favorites[i].path) ||
             !cJSON_AddStringToObject(o, "title", c->favorites[i].title)) goto no_mem;
+    }
+
+    cJSON *btns = cJSON_AddArrayToObject(root, "buttons");
+    if (!btns) goto no_mem;
+    for (size_t i = 0; i < c->button_count; i++) {
+        cJSON *o = cJSON_CreateObject();
+        if (!o || !cJSON_AddItemToArray(btns, o)) {
+            cJSON_Delete(o);
+            goto no_mem;
+        }
+        if (!cJSON_AddNumberToObject(o, "gpio", c->buttons[i].gpio) ||
+            !cJSON_AddStringToObject(o, "action", button_action_name(c->buttons[i].action))) goto no_mem;
     }
 
     cJSON *quiet = cJSON_AddArrayToObject(root, "quiet");

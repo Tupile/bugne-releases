@@ -27,6 +27,7 @@
 #include "source_stream.h"
 #include "source_sendspin.h"
 #include "played.h"
+#include "podcast_new.h"
 #include "stats.h"
 #include "memo.h"
 #include "podcast.h"
@@ -117,6 +118,7 @@ static void bg_init_task(void *arg)
 {
     (void)arg;
     played_init();  // LittleFS is already mounted (config_store_init ran in app_main)
+    podcast_new_init();  // new-episode markers (red dots), same LittleFS dir
     stats_init();   // load listening stats from LittleFS (C3)
     TRY(net_start());
     // Serve the config page once the network is up. On success, also wire the

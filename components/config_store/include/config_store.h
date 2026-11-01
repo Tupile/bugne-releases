@@ -99,6 +99,14 @@ typedef struct {
     char title[CFG_FAV_TITLE_MAX]; // display title
 } config_favorite_t;
 
+// External buttons wired to a free GPIO (to GND, internal pull-up). Allowed
+// pins and action names live in button_pins.h; the UI task applies them live.
+#define CFG_MAX_BUTTONS 8
+typedef struct {
+    int gpio;    // allowed pin only (button_pin_allowed), unique in the list
+    int action;  // button_action_t
+} config_button_t;
+
 #define CFG_LANG_MAX 6
 #define CFG_TZ_MAX   48
 typedef struct {
@@ -113,6 +121,7 @@ typedef struct {
     int  tuner;                // instrument tuner on the home screen: 1 = shown (default)
     int  timer;                // stopwatch / countdown timer tile on home: 0 = hidden (default)
     int  memo_rx;              // accept voice memos from other Bugnes: 1 = yes (default)
+    int  podcast_new_badge;    // red dots on newly downloaded podcast episodes: 0 = off (default)
     char tz[CFG_TZ_MAX];       // POSIX TZ string; default Paris ("CET-1CEST,M3.5.0,M10.5.0/3")
 } config_ui_t;
 
@@ -146,6 +155,9 @@ typedef struct {
 
     config_favorite_t favorites[CFG_MAX_FAVORITES];
     size_t            favorite_count;
+
+    config_button_t buttons[CFG_MAX_BUTTONS];  // external buttons, empty by default
+    size_t          button_count;
 } config_t;
 
 // Init NVS, mount LittleFS, then load and validate config.json. A missing or

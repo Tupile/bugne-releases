@@ -88,6 +88,16 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_tone"
 
+echo "=== building buttons host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/config_store/include \
+    -I ../../components/ui/include \
+    -o "$OUT/test_buttons" \
+    test_buttons.c ../../components/config_store/button_pins.c ../../components/ui/buttons.c
+
+echo "=== running ==="
+"$OUT/test_buttons"
+
 echo "=== building chrono host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -237,6 +247,18 @@ gcc -std=c11 -Wall -Wextra -g \
 
 echo "=== running ==="
 "$OUT/test_played"
+
+echo "=== building podcast_new host tests ==="
+# Storage redirected to /tmp, cap shrunk to 4 to exercise the ring.
+gcc -std=c11 -Wall -Wextra -g \
+    -DPODCAST_NEW_DIR='"/tmp/bugne-podnew-test"' -DPODCAST_NEW_CAP=4 \
+    -I stubs \
+    -I ../../components/podcast/include \
+    -o "$OUT/test_podcast_new" \
+    test_podcast_new.c ../../components/podcast/podcast_new.c -lpthread
+
+echo "=== running ==="
+"$OUT/test_podcast_new"
 
 echo "=== building podcast_resume host tests ==="
 gcc -std=c11 -Wall -Wextra -g \

@@ -5,6 +5,8 @@
 // Screen sleep during playback: backlight off (IO45) plus display sleep, woken
 // by the BOOT button (IO0) and touch INT (IO17). Audio keeps playing while the
 // screen is off.
+// External buttons (config "buttons", see button_pins.h / buttons.h): polled
+// on the UI tick, they run play/pause or volume +/- and also wake the screen.
 #pragma once
 
 #include <stdbool.h>
