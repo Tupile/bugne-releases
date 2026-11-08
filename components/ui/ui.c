@@ -3869,7 +3869,6 @@ static void build_episodes(lv_obj_t *scr)
     lv_table_set_row_count(list, s_ep_count);
     // Second line per row: date and duration ("1 sept. · 12 min"), the year
     // only when it is not the current one (unknown before the first SNTP sync).
-    const bool fr = strcmp(lang_code(), "fr") == 0;
     int cur_year = 0;
     if (time_valid()) {
         time_t now = time(NULL);
@@ -3903,7 +3902,7 @@ static void build_episodes(lv_obj_t *scr)
                           : played_contains(s_episodes[i].episode_url) ? LV_SYMBOL_OK
                           : s_episodes[i].cached ? LV_SYMBOL_SD_CARD : LV_SYMBOL_DOWNLOAD;
         char meta[40];
-        ep_meta_fmt(meta, sizeof(meta), s_episodes[i].date, s_episodes[i].duration_seconds, fr, cur_year);
+        ep_meta_fmt(meta, sizeof(meta), s_episodes[i].date, s_episodes[i].duration_seconds, lang_code(), cur_year);
         char line[PODCAST_TITLE_MAX + 8 + sizeof(meta)];
         snprintf(line, sizeof(line), "%s %s%s%s", icon, s_episodes[i].title, meta[0] ? "\n" : "", meta);
         lv_table_set_cell_value(list, i, 0, line);
@@ -4517,19 +4516,25 @@ static void build_game(lv_obj_t *scr)
 static void on_open_podcasts(lv_event_t *e)  { (void)e; show(build_podcasts); }
 // ---- Instrument tuner (engine + screen; state declared before ui_play) ----
 
-// Note names. English letters are shown in both languages; French prepends
-// the Latin (solfege) name: "Mi (E2)". Octave is the MIDI convention (C4=60).
+// Note names. English letters are shown in English; French prepends the
+// Latin (solfege) name: "Mi (E2)"; German uses H for B: "H3". Octave is the
+// MIDI convention (C4=60).
 static const char *TUNER_NOTE_EN[12] =
     {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 static const char *TUNER_NOTE_FR[12] =
     {"Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"};
+static const char *TUNER_NOTE_DE[12] =
+    {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "H"};
 
-// "Mi (E2)" in French, "E2" in English. Shared by the tuner and the drone.
+// "Mi (E2)" in French, "H3" in German, "E2" in English. Shared by the tuner
+// and the drone.
 static void note_text(int midi, char *txt, size_t n)
 {
     int pc = midi % 12, oct = midi / 12 - 1;
     if (strcmp(lang_code(), "fr") == 0) {
         snprintf(txt, n, "%s (%s%d)", TUNER_NOTE_FR[pc], TUNER_NOTE_EN[pc], oct);
+    } else if (strcmp(lang_code(), "de") == 0) {
+        snprintf(txt, n, "%s%d", TUNER_NOTE_DE[pc], oct);
     } else {
         snprintf(txt, n, "%s%d", TUNER_NOTE_EN[pc], oct);
     }

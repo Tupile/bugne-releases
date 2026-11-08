@@ -95,7 +95,7 @@ configuration:
 | `ui.volume` | int | 0 to 100. |
 | `ui.volume_max` | int | Volume ceiling 1 to 100 (child-ear protection); every volume request is clamped to it. Default 100. |
 | `ui.screen_sleep_seconds` | int | Idle seconds before the screen sleeps. |
-| `ui.lang` | string | UI language ISO code: `en` (default) or `fr`. |
+| `ui.lang` | string | UI language ISO code: `en` (default), `fr` or `de`. |
 | `ui.orientation` | int | 0 = portrait (default), 1 = landscape. |
 | `ui.dark` | int | Theme mode: 0 light, 1 dark (default). |
 | `ui.accent` | int | Button/accent color, 0 to 4: 0 Blue (default), 1 Ocean, 2 Pink, 3 Forest, 4 Orange. |

@@ -39,6 +39,22 @@ static void test_set_language(void)
     CHECK_STR(T(STR_RESUME_PROMPT), "Resume playback?", "en translation for STR_RESUME_PROMPT");
 }
 
+static void test_german(void)
+{
+    lang_set_code("de");
+    CHECK_STR(lang_code(), "de", "set lang code de");
+    CHECK_STR(T(STR_SETTINGS), "Einstellungen", "de translation for STR_SETTINGS");
+    CHECK_STR(T(STR_RESUME_PROMPT), "Wiedergabe fortsetzen?", "de translation for STR_RESUME_PROMPT");
+    CHECK_INT(strlen(T(STR_DAY_LETTERS)), 7, "de day letters length");
+    // Every string id has a German translation (no silent English fallback).
+    for (int i = 0; i < STR__COUNT; i++) {
+        lang_set_code("de");
+        const char *de = T((str_id_t)i);
+        CHECK(de[0] != '\0', "de translation missing for id %d", i);
+    }
+    lang_set_code("en");
+}
+
 static void test_invalid_language(void)
 {
     // Set to a valid one first
@@ -79,6 +95,10 @@ static void test_metadata(void)
     CHECK_STR(lang_code_at(1), "fr", "second lang code");
     CHECK_STR(lang_name_at(1), "Français", "second lang name");
 
+    CHECK(count >= 3, "at least 3 languages expected, got %zu", count);
+    CHECK_STR(lang_code_at(2), "de", "third lang code");
+    CHECK_STR(lang_name_at(2), "Deutsch", "third lang name");
+
     CHECK_STR(lang_code_at(count), "", "out of bounds lang_code_at returns empty string");
     CHECK_STR(lang_name_at(count), "", "out of bounds lang_name_at returns empty string");
 }
@@ -87,6 +107,7 @@ int main(void)
 {
     test_default_language();
     test_set_language();
+    test_german();
     test_invalid_language();
     test_null_language();
     test_out_of_bounds_ids();
