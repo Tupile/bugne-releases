@@ -115,6 +115,8 @@ typedef struct {
     int  screen_sleep_seconds; // >= 0
     char lang[CFG_LANG_MAX];   // UI language ISO code ("en", "fr"); default "en"
     int  orientation;          // 0 = portrait (default), 1 = landscape
+    int  panel_invert;         // display color inversion, 1 = on (default, ES3C28P panel); boot-applied
+    int  panel_mirror_x;       // display X mirror, 1 = on (default, ES3C28P panel); boot-applied
     int  dark;                 // 0 = light, 1 = dark (default)
     int  accent;               // button/accent color 0..4, see docs/config_schema.md
     int  game;                 // times-tables game on the home screen: 1 = shown (default)

@@ -61,6 +61,8 @@ static void set_defaults(config_t *c)
     c->ui.screen_sleep_seconds = 30;
     strlcpy(c->ui.lang, "en", sizeof(c->ui.lang));
     c->ui.orientation = 0;
+    c->ui.panel_invert = 1;   // the ES3C28P panel needs both (AGENTS.md display notes)
+    c->ui.panel_mirror_x = 1;
     c->ui.dark = 1;    // dark: matches the look Bugne always had
     c->ui.accent = 0;  // blue
     c->ui.game = 1;    // times-tables game shown on home
@@ -257,6 +259,10 @@ static void load_from_json(config_t *c, const cJSON *root)
             strlcpy(c->ui.lang, lang->valuestring, sizeof(c->ui.lang));
         const cJSON *ori = cJSON_GetObjectItemCaseSensitive(ui, "orientation");
         if (cJSON_IsNumber(ori)) c->ui.orientation = clampi(ori->valueint, 0, 1);
+        const cJSON *pinv = cJSON_GetObjectItemCaseSensitive(ui, "panel_invert");
+        if (cJSON_IsNumber(pinv)) c->ui.panel_invert = clampi(pinv->valueint, 0, 1);
+        const cJSON *pmx = cJSON_GetObjectItemCaseSensitive(ui, "panel_mirror_x");
+        if (cJSON_IsNumber(pmx)) c->ui.panel_mirror_x = clampi(pmx->valueint, 0, 1);
         const cJSON *dk = cJSON_GetObjectItemCaseSensitive(ui, "dark");
         if (cJSON_IsNumber(dk)) c->ui.dark = clampi(dk->valueint, 0, 1);
         const cJSON *ac = cJSON_GetObjectItemCaseSensitive(ui, "accent");
@@ -428,6 +434,8 @@ static esp_err_t save_to_disk(const config_t *c)
         !cJSON_AddNumberToObject(ui, "screen_sleep_seconds", c->ui.screen_sleep_seconds) ||
         !cJSON_AddStringToObject(ui, "lang", c->ui.lang[0] ? c->ui.lang : "en") ||
         !cJSON_AddNumberToObject(ui, "orientation", c->ui.orientation) ||
+        !cJSON_AddNumberToObject(ui, "panel_invert", c->ui.panel_invert) ||
+        !cJSON_AddNumberToObject(ui, "panel_mirror_x", c->ui.panel_mirror_x) ||
         !cJSON_AddNumberToObject(ui, "dark", c->ui.dark) ||
         !cJSON_AddNumberToObject(ui, "accent", c->ui.accent) ||
         !cJSON_AddNumberToObject(ui, "game", c->ui.game) ||

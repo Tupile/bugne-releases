@@ -211,6 +211,10 @@ static void seed_file(void) {
     reset();
     live.webradio_count = 1;
     live.webradios[0] = (config_webradio_t){.id = 2, .name = "Radio", .url = "https://example.com/radio", .skip_preroll = 1};
+    /* Non-default panel quirks: the round trip only proves the serializer
+     * emits them if they differ from set_defaults (1/1). */
+    live.ui.panel_invert = 0;
+    live.ui.panel_mirror_x = 0;
     before = live;
     json_fail_at = array_fail_at = 0;
     assert(real_save(&live) == ESP_OK);
@@ -277,6 +281,9 @@ static httpd_req_t request(const char *s) {
     return (httpd_req_t){.body = s, .content_len = strlen(s), .authed = true};
 }
 int main(void) {
+    config_t def;
+    set_defaults(&def);
+    assert(def.ui.panel_invert == 1 && def.ui.panel_mirror_x == 1);
     const config_t *borrowed = config_store_get();
     for (int i = 0; i < 7; i++) {
         for (int e = 0; e < 3; e++) {

@@ -721,7 +721,9 @@ static esp_err_t init_display(esp_lcd_panel_io_handle_t *out_io, esp_lcd_panel_h
     // config uses invert_colors: true for the same module). Without it every
     // color renders complemented: white shows black, orange shows blue. The
     // pre-theme UI unknowingly ran that way (LVGL light theme looked dark).
-    esp_lcd_panel_invert_color(*out_panel, true);
+    // ui.panel_invert (default 1) lets another panel batch turn it off from
+    // the web page; boot-applied only.
+    esp_lcd_panel_invert_color(*out_panel, config_store_get()->ui.panel_invert != 0);
     // Mirror is applied via the esp_lvgl_port rotation config (see ui_start),
     // because the port re-applies orientation when the display is added.
     esp_lcd_panel_disp_on_off(*out_panel, true);
@@ -9614,6 +9616,8 @@ esp_err_t ui_start(i2c_master_bus_handle_t i2c_bus)
     }
 
     esp_lcd_panel_io_handle_t io = NULL;
+    ESP_LOGI(TAG, "display: panel_invert=%d panel_mirror_x=%d",
+             config_store_get()->ui.panel_invert, config_store_get()->ui.panel_mirror_x);
     ESP_RETURN_ON_ERROR(init_display(&io, &s_panel), TAG, "display init failed");
 
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
@@ -9632,7 +9636,10 @@ esp_err_t ui_start(i2c_master_bus_handle_t i2c_bus)
         .hres = LCD_HRES,
         .vres = LCD_VRES,
         .monochrome = false,
-        .rotation = { .mirror_x = true },  // panel is mirrored on X by default
+        // The ES3C28P panel is mirrored on X by default; ui.panel_mirror_x
+        // (default 1) is the web-page escape hatch for another panel batch.
+        // Boot-applied: the port derives every later rotation from this base.
+        .rotation = { .mirror_x = config_store_get()->ui.panel_mirror_x != 0 },
         .flags = {
             .buff_dma = true,
             .swap_bytes = true,

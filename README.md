@@ -170,6 +170,16 @@ If you wish to support this project at no extra cost, you can order the board vi
 unavailable). Make sure to select the touch model "ES3C28P". For users in France,
 you can also use this [Amazon affiliate link](https://amzn.to/3RrzKT1).
 
+**Other board, untested:** the Freenove ESP32-S3 Display 2.8" with touch
+(FNK0104B) has the same pin map as the ES3C28P according to its schematic
+and documentation (same display, touch, audio codec, microSD and amplifier
+wiring). We believe the firmware runs on it as is, but it has not been
+tested. Take the 2.8" touch model only: the 3.5" and 4.0" models use other
+display controllers and are not supported. If the screen does not look as
+expected on a different panel (inverted colors or a mirrored image), open the
+web page, Settings, "Screen (troubleshooting)": you can turn color inversion
+and the mirror off or on there, then the device restarts.
+
 The board also carries a TP4054 charger and a JST 1.25mm port for a 1S 3.7V
 LiPo battery. This project did not test battery operation. It is possible in
 principle, but not recommended yet. Power the device over USB.

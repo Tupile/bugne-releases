@@ -808,12 +808,13 @@ static esp_err_t config_post(httpd_req_t *req)
         if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&addr, &alen) == 0) {
             inet_ntop(AF_INET6, &addr.sin6_addr, ips, sizeof(ips));
         }
-        ESP_LOGI(TAG, "config POST from %s, %u bytes, quiet %s, favorites %s, alarms %s, sunrise %s, daily_limit %s", ips,
+        ESP_LOGI(TAG, "config POST from %s, %u bytes, quiet %s, favorites %s, alarms %s, sunrise %s, daily_limit %s, panel %s", ips,
                  (unsigned)strlen(buf), strstr(buf, "\"quiet\"") ? "present" : "MISSING",
                  strstr(buf, "\"favorites\"") ? "present" : "MISSING",
                  strstr(buf, "\"alarms\"") ? "present" : "MISSING",
                  strstr(buf, "\"sunrise\"") ? "present" : "MISSING",
-                 strstr(buf, "\"daily_limit\"") ? "present" : "MISSING");
+                 strstr(buf, "\"daily_limit\"") ? "present" : "MISSING",
+                 strstr(buf, "\"panel_invert\"") ? "present" : "MISSING");
         cJSON *root = cJSON_Parse(buf);
         bool legacy_token = root && cJSON_HasObjectItem(root, "ha_token");
         cJSON_Delete(root);

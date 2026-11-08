@@ -41,6 +41,8 @@ configuration:
     "screen_sleep_seconds": 30,
     "lang": "en",
     "orientation": 0,
+    "panel_invert": 1,
+    "panel_mirror_x": 1,
     "dark": 1,
     "accent": 0,
     "game": 1,
@@ -97,6 +99,8 @@ configuration:
 | `ui.screen_sleep_seconds` | int | Idle seconds before the screen sleeps. |
 | `ui.lang` | string | UI language ISO code: `en` (default), `fr` or `de`. |
 | `ui.orientation` | int | 0 = portrait (default), 1 = landscape. |
+| `ui.panel_invert` | int | Display color inversion: 1 = on (default, needed by the ES3C28P panel), 0 = off. Applied at boot. Troubleshooting only, for a panel batch that shows inverted colors. |
+| `ui.panel_mirror_x` | int | Display horizontal mirror: 1 = on (default, needed by the ES3C28P panel), 0 = off. Applied at boot. Troubleshooting only, for a panel batch that shows a mirrored image. |
 | `ui.dark` | int | Theme mode: 0 light, 1 dark (default). |
 | `ui.accent` | int | Button/accent color, 0 to 4: 0 Blue (default), 1 Ocean, 2 Pink, 3 Forest, 4 Orange. |
 | `ui.game` | int | Times-tables game on the home screen: 1 shown (default), 0 hidden. |
