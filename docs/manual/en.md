@@ -383,7 +383,7 @@ files and delete files.
 
 Everything else is here:
 
-- Device name, language (English or French, for the device screen and for this
+- Device name, language (English, French or German, for the device screen and for this
   page), and time zone.
 - Theme, color and screen orientation of the device.
 - Max volume: a hard ceiling for little ears. The device never plays louder,

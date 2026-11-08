@@ -404,7 +404,7 @@ des fichiers, téléchargez des fichiers et supprimez des fichiers.
 
 Tout le reste est ici :
 
-- Nom de l'appareil, langue (français ou anglais, pour l'écran de l'appareil et
+- Nom de l'appareil, langue (français, anglais ou allemand, pour l'écran de l'appareil et
   pour cette page), et fuseau horaire.
 - Thème, couleur et orientation de l'écran de l'appareil.
 - Volume maximum : un plafond absolu pour les petites oreilles. L'appareil ne

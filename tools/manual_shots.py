@@ -7,7 +7,7 @@
 # The original ui.lang is restored at the end, even on error.
 #
 # Usage: python3 tools/manual_shots.py <ip> [--login <password>]
-#        [--langs en,fr] [--outdir docs/manual/img] [--only <screen,...>]
+#        [--langs en,fr,de] [--outdir docs/manual/img] [--only <screen,...>]
 #
 # Reuses the BMP-to-PNG conversion from tools/screenshot.py (stdlib only).
 import json
@@ -114,7 +114,7 @@ def capture_pass(dev, lang, outdir, only):
 
 def main():
     args = sys.argv[1:]
-    password, langs, outdir, only = None, ["en", "fr"], "docs/manual/img", None
+    password, langs, outdir, only = None, ["en", "fr", "de"], "docs/manual/img", None
     for flag in ("--login", "--langs", "--outdir", "--only"):
         if flag in args:
             i = args.index(flag)
@@ -130,7 +130,7 @@ def main():
                 only = set(val.split(","))
     if len(args) != 1:
         raise SystemExit("usage: manual_shots.py <ip> [--login <password>] "
-                         "[--langs en,fr] [--outdir dir] [--only screen,...]")
+                         "[--langs en,fr,de] [--outdir dir] [--only screen,...]")
 
     dev = Device(args[0], password)
     cfg = dev.config()
