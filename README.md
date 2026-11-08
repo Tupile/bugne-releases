@@ -116,7 +116,7 @@ builds with ESP-IDF 6.1. The implemented feature set:
 - Instrument tuner (experimental): the microphone detects the pitch on the
   device. Next to it, a metronome (30 to 250 BPM, 1 to 7 beats, tap tempo) and
   a reference tone (E1 to C7, A4 = 440 Hz).
-- Voice memos: the child records a message with the microphone, up to 60 s. The
+- Voice memos: the child records a message with the microphone, up to 2 min. The
   device keeps it on the SD card, or sends it to another Bugne on the same
   network. The receiver shows a small red dot on its home screen and plays the
   memo from the Memos screen. A parent stops the reception from the web page.

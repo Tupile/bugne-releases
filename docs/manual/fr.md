@@ -270,7 +270,7 @@ cours.
 ![Mémos](img/fr/memos.png) ![Enregistrement](img/fr/memo_record.png)
 
 La tuile Mémos est une petite boîte vocale. Touchez le bouton +, puis le grand
-bouton rouge, et parlez. Un mémo dure une minute au maximum. Quand vous
+bouton rouge, et parlez. Un mémo dure deux minutes au maximum. Quand vous
 arrêtez, vous pouvez écouter votre message, le garder sur l'appareil, l'envoyer
 à une autre Bugne de la maison, ou le supprimer.
 

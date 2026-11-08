@@ -28,9 +28,9 @@ extern "C" {
 #endif
 
 #define MEMO_RATE_HZ         16000
-#define MEMO_MAX_MS          60000                // recording cap
+#define MEMO_MAX_MS          120000               // recording cap
 #define MEMO_MAX_COUNT       20                   // stored memos cap (own + received)
-#define MEMO_RX_MAX_BYTES    (2 * 1024 * 1024)    // 60 s @ 32 kB/s + headers
+#define MEMO_RX_MAX_BYTES    (4 * 1024 * 1024)    // 120 s @ 32 kB/s + headers
 #define MEMO_DIR             "memos"              // relative to the SD root
 #ifndef MEMO_ABS_DIR                              // host tests redirect to /tmp
 #define MEMO_ABS_DIR         "/sdcard/" MEMO_DIR

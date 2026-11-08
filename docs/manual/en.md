@@ -258,7 +258,7 @@ hours, and it stops the music that is playing.
 ![Memos](img/en/memos.png) ![Recording](img/en/memo_record.png)
 
 The Memos tile is a small voice mailbox. Tap the + button, then the big red
-button, and speak. A memo lasts one minute at most. When you stop, you can
+button, and speak. A memo lasts two minutes at most. When you stop, you can
 listen to your message, keep it on the device, send it to another Bugne in the
 house, or delete it.
 

@@ -24,7 +24,7 @@ function run(env) {
     const ctx = vm.createContext(Object.assign({Math, Promise, Float32Array, Int16Array,
         ArrayBuffer, DataView, encodeURIComponent, Blob: class { constructor(p) { this.parts = p; } },
         tr: x => x}, env));
-    vm.runInContext('var VM_MAX_S=60;var VM_RATE=16000;' + code, ctx);
+    vm.runInContext('var VM_MAX_S=120;var VM_RATE=16000;' + code, ctx);
     return ctx;
 }
 
@@ -104,9 +104,9 @@ async function main() {
     assert.equal(o.last, 'Message sent.');
     assert.equal(o.closed, 1);
 
-    o = await send({duration: 75});
-    assert.equal(bytes(o.posts[0]), 44 + 60 * 16000 * 2);   // cut, under the 2 MB cap
-    assert.equal(o.last, 'Message sent (cut to 60 s).');
+    o = await send({duration: 150});
+    assert.equal(bytes(o.posts[0]), 44 + 120 * 16000 * 2);  // cut, under the 4 MB cap
+    assert.equal(o.last, 'Message sent (cut to 2 min).');
 
     o = await send({offlineThrows: true, rate: 48000});
     assert.equal(bytes(o.posts[0]), 44 + 2 * 16000 * 2);
