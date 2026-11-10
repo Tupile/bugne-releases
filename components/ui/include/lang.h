@@ -182,6 +182,9 @@ typedef enum {
     STR_TIMER,              // chooser tile + timer screen title
     STR_TIMER_MIN_FMT,      // timer preset chip, %d = minutes
     STR_TIMER_DONE,         // timer ring screen, toast and playback title
+    STR_TUNER_MODE_CHROMATIC, // tuner mode line: every note
+    STR_TUNER_MODE_GUITAR,    // tuner mode line: guitar strings
+    STR_TUNER_MODE_BASS,      // tuner mode line: bass and double bass strings
     STR__COUNT
 } str_id_t;
 

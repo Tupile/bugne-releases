@@ -27,6 +27,8 @@ int main(void)
     check(NULL, 720, 0, 2026, "12 min");                     // no date
     check("garbage", 720, 1, 2026, "12 min");                // unparseable date
     check(NULL, 0, 0, 2026, "");                             // nothing known
+    check("\n\t Wed, 02 Sept 2026 08:00:00 GMT", 0, 0, 2026, "2 Sep");  // indented XML, long month
+    check("Mon, 01 Sep 26 08:00:00 GMT", 0, 0, 2026, "1 Sep");          // two-digit year is 2026
     check(d, 720, 0, 2024, "1 Sep 2026 \xC2\xB7 12 min");    // other year: shown
     check(d, 720, 0, 0, "1 Sep \xC2\xB7 12 min");            // unknown year: hidden
     check("Tue, 5 Aug 2025 10:00:00 +0200", 60, 1, 2026, "5 ao\xC3\xBBt 2025 \xC2\xB7 1 min");

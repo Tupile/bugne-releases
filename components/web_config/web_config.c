@@ -360,7 +360,7 @@ static bool coredump_present(void) { return false; }
 #endif
 
 // GET /api/coredump: {"enabled":bool,"present":bool} plus, when present,
-// task/pc/cause/vaddr/backtrace/corrupted.
+// task/elf_sha/pc/cause/vaddr/backtrace/corrupted.
 static esp_err_t coredump_get(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_OK);
@@ -381,6 +381,12 @@ static esp_err_t coredump_get(httpd_req_t *req)
             // exc_task is a fixed 16-byte field, not guaranteed NUL-terminated.
             snprintf(task, sizeof(task), "%.16s", s->exc_task);
             cJSON_AddStringToObject(o, "task", task);
+            // The build that CRASHED, not the one running now: a dump outlives
+            // firmware updates. Same prefix as "elf_sha" in /api/status.
+            char sha[sizeof(s->app_elf_sha256) + 1];
+            snprintf(sha, sizeof(sha), "%.*s", (int)sizeof(s->app_elf_sha256),
+                     (const char *)s->app_elf_sha256);
+            cJSON_AddStringToObject(o, "elf_sha", sha);
             snprintf(hex, sizeof(hex), "0x%08x", (unsigned)s->exc_pc);
             cJSON_AddStringToObject(o, "pc", hex);
             snprintf(hex, sizeof(hex), "0x%x", (unsigned)s->ex_info.exc_cause);
@@ -1701,6 +1707,11 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddStringToObject(o, "id", board_device_id());
     cJSON_AddStringToObject(o, "name", (c && c->device_name[0]) ? c->device_name : "");
     cJSON_AddStringToObject(o, "version", esp_app_get_description()->version);
+    // Identifies the exact build (two builds can share a version string); a
+    // crash report carries the same prefix, see GET /api/coredump.
+    char elf_sha[CONFIG_APP_RETRIEVE_LEN_ELF_SHA + 1];
+    esp_app_get_elf_sha256(elf_sha, sizeof(elf_sha));
+    cJSON_AddStringToObject(o, "elf_sha", elf_sha);
     cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(o, "heap_free", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddStringToObject(o, "reset_reason", board_reset_reason_name());

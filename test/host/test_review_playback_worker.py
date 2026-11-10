@@ -62,6 +62,7 @@ static int s_play_ctx, s_memo_peer_count, s_memo_state, s_memo_peers[8], s_play_
 static char s_art_pending_path[PODCAST_PATH_MAX];
 static volatile bool s_talkie_active, s_talkie_rx_pending;
 static volatile bool s_tone_running;
+static bool s_ghota_checked_once;
 static char s_talkie_rx_path[96];
 static int removed;
 static int test_remove(const char *p) { (void)p; removed++; return 0; }
@@ -121,6 +122,7 @@ static void decode_progress(uint32_t *p, uint32_t *d) { *p = 3000; *d = 9000; }
 static void worker_run_job(void) {}
 static void beep_run(void) {}
 static void tone_run(void) {}
+static void update_check_run(void) {}
 static void memo_record_run(void) {}
 static void memo_play_run(const char *p) { (void)p; }
 static int net_memo_peers(int *p, int n) { (void)p; (void)n; return 0; }
@@ -274,11 +276,27 @@ int main(int argc, char **argv) {
     reset(); s_tone_running = true;
     req_post(&tone); req_post(&over);
     assert(!s_tone_running);
+    // Posting the update check cancels no download, and a dropped one does
+    // not count for the daily throttle.
+    play_req_t upd = {.kind = REQ_UPDATE_CHECK};
+    reset(); s_ghota_checked_once = true; s_dl_cancel = false;
+    req_post(&upd);
+    assert(!s_dl_cancel && s_ghota_checked_once);
+    req_post(&over);
+    assert(!s_ghota_checked_once);
     audio_unused(audio_is_active);
-    puts("review queue/worker cancellation: 21 cases passed");
+    puts("review queue/worker cancellation: 23 cases passed");
 }
 '''
 def test(ui_text):
+    # Update-check wiring: queued before the job chain (a card-less device's
+    # persisted job must not starve it), served by the worker, and no longer
+    # part of the maintenance job.
+    sched = function(ui_text, "tick_download_scheduler")
+    assert sched.index("update_check_due(") < sched.index("if (s_downloading || s_dl_queued)")
+    assert "s_ghota" not in function(ui_text, "worker_run_job")
+    worker = function(ui_text, "play_task")
+    assert worker.index("REQ_UPDATE_CHECK") < worker.index("update_check_run();")
     body = "\n".join(function(ui_text, name) for name in names)
     with tempfile.TemporaryDirectory(prefix="bugne-review-worker-") as directory:
         source = Path(directory) / "test.c"

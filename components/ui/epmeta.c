@@ -1,11 +1,10 @@
 // Episode meta line ("1 Sep · 12 min"), see epmeta.h. Pure and host-tested.
 #include "epmeta.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 
+#include "podcast_keep.h"  // podcast_date_parse
 #include "tags.h"  // tags_utf8_trim_partial
 
 static const char *const MON_EN[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -15,41 +14,12 @@ static const char *const MON_FR[12] = { "janv.", "f\xC3\xA9vr.", "mars", "avr.",
 static const char *const MON_DE[12] = { "Jan.", "Feb.", "M\xC3\xA4rz", "Apr.", "Mai", "Juni",
                                         "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez." };
 
-// RFC 822 "[Day, ]DD Mon YYYY ..." or ISO "YYYY-MM-DD...". Month is 0..11.
-static bool parse_date(const char *s, int *day, int *mon, int *year)
-{
-    if (!s) return false;
-    while (*s == ' ') s++;
-    if (isdigit((unsigned char)s[0]) && isdigit((unsigned char)s[1]) &&
-        isdigit((unsigned char)s[2]) && isdigit((unsigned char)s[3]) && s[4] == '-') {
-        int y, m, d;
-        if (sscanf(s, "%4d-%2d-%2d", &y, &m, &d) != 3) return false;
-        if (m < 1 || m > 12 || d < 1 || d > 31) return false;
-        *year = y; *mon = m - 1; *day = d;
-        return true;
-    }
-    const char *comma = strchr(s, ',');
-    if (comma && comma - s <= 9) s = comma + 1;  // skip the weekday
-    while (*s == ' ') s++;
-    int d = 0, y = 0;
-    char m[4] = "";
-    if (sscanf(s, "%2d %3s %4d", &d, m, &y) != 3) return false;
-    if (d < 1 || d > 31) return false;
-    for (int i = 0; i < 12; i++) {
-        if (strcasecmp(m, MON_EN[i]) == 0) {
-            *day = d; *mon = i; *year = y;
-            return true;
-        }
-    }
-    return false;
-}
-
 void ep_meta_fmt(char *out, size_t n, const char *pubdate, int dur_s, const char *lang, int cur_year)
 {
     if (!out || n == 0) return;
     char date[32] = "", dur[16] = "";
     int d, m, y;
-    if (parse_date(pubdate, &d, &m, &y)) {
+    if (podcast_date_parse(pubdate, &d, &m, &y)) {
         const bool fr = lang && strcmp(lang, "fr") == 0;
         const bool de = lang && strcmp(lang, "de") == 0;
         const char *mn = fr ? MON_FR[m] : de ? MON_DE[m] : MON_EN[m];

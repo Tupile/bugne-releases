@@ -30,6 +30,7 @@
 #include "podcast_new.h"
 #include "stats.h"
 #include "memo.h"
+#include "art.h"
 #include "podcast.h"
 #include "podcast_resume.h"
 
@@ -200,6 +201,7 @@ void app_main(void)
     // mount. The slow subsystems follow on bg_init_task; the UI tolerates them
     // arriving late (network sources grey out until connected, SD screens show
     // "no card" until the mount lands, and ui.c rebuilds on state changes).
+    art_init();  // cover-art lock: the UI tick and three producer tasks share it
     TRY(ui_start(i2c_bus));
     xTaskCreate(bg_init_task, "bg_init", 8192, NULL, 4, NULL);
 

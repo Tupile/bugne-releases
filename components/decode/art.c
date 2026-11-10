@@ -15,20 +15,31 @@ static uint8_t  *s_px;      // decoded RGB565, PSRAM, NULL when empty
 static uint16_t  s_w, s_h;
 static uint32_t  s_gen;
 
-// The slot is touched by the playback worker (tag callbacks) and by the LVGL
-// task (art_take), so it needs a lock; it is created on first use, which is
-// always the worker before the UI can see a new generation.
+// The Music Assistant (Sendspin) slot: fully separate from the local one
+// above, so neither source can clear or replace the other's cover. It has a
+// staged bitmap (decoded, not visible yet) besides the current one.
+static uint8_t  *s_ss_px, *s_ss_st_px;
+static uint16_t  s_ss_w, s_ss_h, s_ss_st_w, s_ss_st_h;
+static uint32_t  s_ss_gen;
+
+// One lock for both slots. They are touched by the playback worker (tag
+// callbacks), the Sendspin tasks and the LVGL task. art_init() creates it at
+// boot; the lazy creation below stays as a fallback (host tests, and a caller
+// that runs before art_init), and is only safe with a single first caller.
 static SemaphoreHandle_t lock_get(void)
 {
     if (!s_lock) {
         SemaphoreHandle_t m = xSemaphoreCreateMutex();
         if (!m) return NULL;
-        // No race in practice (first call is the worker), but keep it cheap
-        // and idempotent rather than relying on that.
         if (s_lock) vSemaphoreDelete(m);
         else s_lock = m;
     }
     return s_lock;
+}
+
+void art_init(void)
+{
+    (void)lock_get();
 }
 
 static void slot_clear_locked(void)
@@ -38,7 +49,9 @@ static void slot_clear_locked(void)
     s_w = s_h = 0;
 }
 
-bool art_set_jpeg(const uint8_t *jpeg, size_t len)
+// Decode a JPEG to an RGB565 bitmap that fits ART_BOX. On success the caller
+// owns *px (PSRAM). No lock held: this is the slow part.
+static bool decode_jpeg(const uint8_t *jpeg, size_t len, uint8_t **out_px, uint16_t *out_w, uint16_t *out_h)
 {
     if (!jpeg || len < 4 || len > ART_MAX_JPEG) return false;
 
@@ -102,16 +115,28 @@ bool art_set_jpeg(const uint8_t *jpeg, size_t len)
         info.output_len = (size_t)nw * nh * 2;
     }
 
+    *out_px = px;
+    *out_w = info.width;
+    *out_h = info.height;
+    ESP_LOGI(TAG, "cover %ux%u (%u B)", info.width, info.height, (unsigned)info.output_len);
+    return true;
+}
+
+bool art_set_jpeg(const uint8_t *jpeg, size_t len)
+{
+    uint8_t *px = NULL;
+    uint16_t w = 0, h = 0;
+    if (!decode_jpeg(jpeg, len, &px, &w, &h)) return false;
+
     SemaphoreHandle_t m = lock_get();
     if (!m) { heap_caps_free(px); return false; }
     xSemaphoreTake(m, portMAX_DELAY);
     slot_clear_locked();  // an untaken older bitmap belongs to us
     s_px = px;
-    s_w = info.width;
-    s_h = info.height;
+    s_w = w;
+    s_h = h;
     s_gen++;
     xSemaphoreGive(m);
-    ESP_LOGI(TAG, "cover %ux%u (%u B)", s_w, s_h, (unsigned)info.output_len);
     return true;
 }
 
@@ -142,6 +167,90 @@ bool art_take(uint8_t **px, uint16_t *w, uint16_t *h)
         if (h) *h = s_h;
         s_px = NULL;  // ownership moves to the caller
         s_w = s_h = 0;
+    }
+    xSemaphoreGive(m);
+    return have;
+}
+
+// ---- Music Assistant slot ----
+
+static void ss_stage_locked(uint8_t *px, uint16_t w, uint16_t h)
+{
+    if (s_ss_st_px) heap_caps_free(s_ss_st_px);  // an older staged bitmap is ours
+    s_ss_st_px = px;
+    s_ss_st_w = w;
+    s_ss_st_h = h;
+}
+
+void art_ss_stage_jpeg(const uint8_t *jpeg, size_t len)
+{
+    uint8_t *px = NULL;
+    uint16_t w = 0, h = 0;
+    // A refused image stages "nothing": the commit that follows must remove
+    // the previous cover rather than leave it up.
+    if (!decode_jpeg(jpeg, len, &px, &w, &h)) px = NULL;
+
+    SemaphoreHandle_t m = lock_get();
+    if (!m) { if (px) heap_caps_free(px); return; }
+    xSemaphoreTake(m, portMAX_DELAY);
+    ss_stage_locked(px, w, h);
+    xSemaphoreGive(m);
+}
+
+void art_ss_stage_none(void)
+{
+    SemaphoreHandle_t m = lock_get();
+    if (!m) return;
+    xSemaphoreTake(m, portMAX_DELAY);
+    ss_stage_locked(NULL, 0, 0);
+    xSemaphoreGive(m);
+}
+
+void art_ss_commit(void)
+{
+    SemaphoreHandle_t m = lock_get();
+    if (!m) return;
+    xSemaphoreTake(m, portMAX_DELAY);
+    if (s_ss_px) heap_caps_free(s_ss_px);  // never taken: still ours
+    s_ss_px = s_ss_st_px;
+    s_ss_w = s_ss_st_w;
+    s_ss_h = s_ss_st_h;
+    s_ss_st_px = NULL;
+    s_ss_st_w = s_ss_st_h = 0;
+    s_ss_gen++;
+    xSemaphoreGive(m);
+}
+
+void art_ss_clear(void)
+{
+    SemaphoreHandle_t m = lock_get();
+    if (!m) return;
+    xSemaphoreTake(m, portMAX_DELAY);
+    if (s_ss_px) heap_caps_free(s_ss_px);
+    s_ss_px = NULL;
+    s_ss_w = s_ss_h = 0;
+    s_ss_gen++;  // the staged bitmap, if any, is kept for its own commit
+    xSemaphoreGive(m);
+}
+
+uint32_t art_ss_gen(void)
+{
+    return s_ss_gen;  // aligned 32-bit read, no lock needed
+}
+
+bool art_ss_take(uint8_t **px, uint16_t *w, uint16_t *h, uint32_t *gen)
+{
+    SemaphoreHandle_t m = lock_get();
+    if (!m) return false;
+    xSemaphoreTake(m, portMAX_DELAY);
+    if (gen) *gen = s_ss_gen;  // read with the slot, under the same lock
+    bool have = s_ss_px != NULL;
+    if (have) {
+        if (px) *px = s_ss_px;
+        if (w) *w = s_ss_w;
+        if (h) *h = s_ss_h;
+        s_ss_px = NULL;  // ownership moves to the caller
+        s_ss_w = s_ss_h = 0;
     }
     xSemaphoreGive(m);
     return have;

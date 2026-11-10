@@ -97,9 +97,14 @@ bool pitch_detect(const int16_t *pcm, float fs, float *freq_hz, float *rms)
     return true;
 }
 
-void pitch_note_from_freq(float freq_hz, int *midi, float *cents)
+static float semitones(float freq_hz, float a4_hz)
 {
-    float semis = 69.0f + 12.0f * log2f(freq_hz / 440.0f);
+    return 69.0f + 12.0f * log2f(freq_hz / a4_hz);
+}
+
+void pitch_note_from_freq(float freq_hz, float a4_hz, int *midi, float *cents)
+{
+    float semis = semitones(freq_hz, a4_hz);
     int note = (int)lroundf(semis);
     if (note < 0) note = 0;
     if (note > 127) note = 127;
@@ -109,4 +114,24 @@ void pitch_note_from_freq(float freq_hz, int *midi, float *cents)
     if (cents) {
         *cents = (semis - note) * 100.0f;
     }
+}
+
+bool pitch_nearest_string(float freq_hz, float a4_hz, const uint8_t *midis, int n,
+                          int *idx, float *cents)
+{
+    // Written as "not greater than" so a NaN is refused too.
+    if (!midis || n <= 0 || !(freq_hz > 0.0f) || !(a4_hz > 0.0f) || !isfinite(freq_hz)) return false;
+    float semis = semitones(freq_hz, a4_hz);
+    int best = 0;
+    float best_d = semis - (float)midis[0];
+    for (int i = 1; i < n; i++) {
+        float d = semis - (float)midis[i];
+        if (fabsf(d) < fabsf(best_d)) {  // strict: a tie keeps the lower string
+            best = i;
+            best_d = d;
+        }
+    }
+    if (idx) *idx = best;
+    if (cents) *cents = best_d * 100.0f;
+    return true;
 }

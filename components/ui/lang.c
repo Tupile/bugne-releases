@@ -181,6 +181,9 @@ static const lang_def_t LANGS[] = {
             [STR_TIMER]              = "Timer",
             [STR_TIMER_MIN_FMT]      = "%d min",
             [STR_TIMER_DONE]         = "Time's up!",
+            [STR_TUNER_MODE_CHROMATIC] = "Chromatic",
+            [STR_TUNER_MODE_GUITAR]  = "Guitar",
+            [STR_TUNER_MODE_BASS]    = "Bass",
         },
     },
     {
@@ -353,6 +356,9 @@ static const lang_def_t LANGS[] = {
             [STR_TIMER]              = "Minuteur",
             [STR_TIMER_MIN_FMT]      = "%d min",
             [STR_TIMER_DONE]         = "Terminé !",
+            [STR_TUNER_MODE_CHROMATIC] = "Chromatique",
+            [STR_TUNER_MODE_GUITAR]  = "Guitare",
+            [STR_TUNER_MODE_BASS]    = "Basse",
         },
     },
     {
@@ -525,6 +531,9 @@ static const lang_def_t LANGS[] = {
             [STR_TIMER]              = "Timer",
             [STR_TIMER_MIN_FMT]      = "%d min",
             [STR_TIMER_DONE]         = "Zeit ist um!",
+            [STR_TUNER_MODE_CHROMATIC] = "Chromatisch",
+            [STR_TUNER_MODE_GUITAR]  = "Gitarre",
+            [STR_TUNER_MODE_BASS]    = "Bass",
         },
     },
 };

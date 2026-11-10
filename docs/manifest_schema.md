@@ -46,7 +46,7 @@ reads the manifest only. It never reads the raw RSS.
 | `generated_at` | string | ISO 8601 UTC timestamp. It records when the writer wrote the manifest. |
 | `episodes` | array | Newest first. The writer emits one episode at a time and the reader parses one at a time, so the list is not bounded by RAM. `PODCAST_MAX_EPISODES` (300) is a safety cap against a pathological feed. |
 | `episodes[].title` | string | Episode title. |
-| `episodes[].date` | string | ISO 8601 publication date. |
+| `episodes[].date` | string | Publication date as the source gives it: the raw RSS `pubDate` (RFC 822, e.g. `Thu, 18 Jun 2026 06:00:00 GMT`) when written on-device, or an ISO 8601 date. Readers accept both. |
 | `episodes[].duration_seconds` | int | Duration in seconds. 0 means unknown. |
 | `episodes[].episode_url` | string | Remote audio URL. The device streams it over HTTPS when the episode is not cached. |
 | `episodes[].cache_path` | string | Local SD path of the cached episode: `/sdcard/podcasts/<podcast title>/<episode title>.<ext>`. The writer sanitizes both name parts for FAT: it drops the illegal characters and bounds the length. |

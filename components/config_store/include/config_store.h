@@ -43,7 +43,7 @@ typedef struct {
     char title[CFG_PODCAST_TITLE_MAX];
     char rss_url[CFG_URL_MAX];
     int  skip_seconds;  // intro/ads to skip: trimmed off at download, skipped at stream playback
-    int  keep_episodes; // episodes kept on the SD card, newest first (0 = no limit)
+    int  keep_episodes; // episodes kept on the SD card, the latest by date (0 = no limit)
 } config_podcast_t;
 
 // One alarm: time + weekday mask + source. See docs/config_schema.md. Up to

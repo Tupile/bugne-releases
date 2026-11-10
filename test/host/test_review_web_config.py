@@ -137,3 +137,15 @@ with tempfile.TemporaryDirectory(prefix="bugne-web-config-") as directory:
     source.write_text(prelude + body + cases)
     subprocess.run(["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
+
+# Crash attribution (2026-11-10): a stored dump outlives firmware updates, so
+# the report must name the build that crashed, and /api/status the build that
+# runs. Both carry the ELF SHA prefix that release.sh uses to archive the ELF.
+def handler_body(name):
+    start = src.index("static esp_err_t " + name + "(httpd_req_t *req)")
+    return src[start:src.index("\n}\n", start)]
+
+assert "app_elf_sha256" in handler_body("coredump_get"), "coredump report lacks elf_sha"
+assert '"elf_sha"' in handler_body("coredump_get")
+assert "esp_app_get_elf_sha256" in handler_body("status_get"), "status lacks elf_sha"
+print("ok: crash attribution fields")

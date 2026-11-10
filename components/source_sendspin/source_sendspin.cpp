@@ -6,6 +6,7 @@
 #include "board.h"
 #include "net.h"
 #include "config_store.h"
+#include "art.h"
 
 #include <atomic>
 #include <cstring>
@@ -15,6 +16,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "freertos/idf_additions.h"  // xTaskCreateWithCaps
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -26,6 +28,7 @@
 #include "sendspin/player_role.h"
 #include "sendspin/metadata_role.h"
 #include "sendspin/controller_role.h"
+#include "sendspin/artwork_role.h"
 
 using namespace sendspin;
 
@@ -195,8 +198,60 @@ public:
     }
 };
 
+// ---- Cover art (artwork role) ----
+// The library decodes an image on its own thread, whose stack is a fixed
+// 4 KB: too small to trust with a JPEG decode and a log line. So the decode
+// runs on a task of ours and the library thread only waits for it. The wait
+// has NO timeout on purpose: the bytes are valid only during the callback, so
+// returning while our task still reads them would be a use-after-reuse; a
+// decode always ends, and the role is added only when this task exists.
+static SemaphoreHandle_t s_art_req, s_art_done;
+static const uint8_t *s_art_data;
+static size_t s_art_len;
+
+static void ssart_task(void *)
+{
+    bool logged = false;
+    for (;;) {
+        xSemaphoreTake(s_art_req, portMAX_DELAY);
+        art_ss_stage_jpeg(s_art_data, s_art_len);
+        s_art_data = nullptr;
+        if (!logged) {
+            logged = true;
+            ESP_LOGI(TAG, "cover decode task: %u B of stack never used",
+                     (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+        }
+        xSemaphoreGive(s_art_done);
+    }
+}
+
+// Stage at decode, commit at display, clear on clear (see art.h). Slot 0 is
+// the only slot asked for.
+class BugneArtworkListener : public ArtworkRoleListener {
+public:
+    void on_image_decode(uint8_t slot, const uint8_t *data, size_t length,
+                         SendspinImageFormat format) override {
+        if (slot != 0) return;
+        if (format != SendspinImageFormat::JPEG) {
+            art_ss_stage_none();  // the display that follows clears the old cover
+            return;
+        }
+        s_art_data = data;
+        s_art_len = length;
+        xSemaphoreGive(s_art_req);
+        xSemaphoreTake(s_art_done, portMAX_DELAY);
+    }
+    void on_image_display(uint8_t slot, uint32_t /*lateness_ms*/) override {
+        if (slot == 0) art_ss_commit();
+    }
+    void on_image_clear(uint8_t slot) override {
+        if (slot == 0) art_ss_clear();
+    }
+};
+
 SendspinClient *g_client = nullptr;
 BugnePlayerListener g_player_listener;
+BugneArtworkListener g_artwork_listener;
 BugneNetworkProvider g_net_provider;
 BugneMetadataListener g_metadata_listener;
 BugneControllerListener g_controller_listener;
@@ -343,6 +398,22 @@ extern "C" esp_err_t source_sendspin_init(void)
     // Assistant; its listener tracks whether the current track is seekable.
     g_controller = &g_client->add_controller();
     g_controller->set_listener(&g_controller_listener);
+
+    // Artwork role: the album cover for the now-playing screen. Cosmetic, so a
+    // failure here only skips the role; playback is unaffected. The cover is
+    // asked at the size it is shown (the server scales, nothing to resample).
+    s_art_req = xSemaphoreCreateBinary();
+    s_art_done = xSemaphoreCreateBinary();
+    if (s_art_req && s_art_done &&
+        xTaskCreateWithCaps(ssart_task, "ssart", 8192, nullptr, 3, nullptr, MALLOC_CAP_SPIRAM) == pdPASS) {
+        ArtworkRoleConfig acfg;
+        acfg.preferred_formats = {{SendspinImageSource::ALBUM, SendspinImageFormat::JPEG, ART_BOX, ART_BOX}};
+        acfg.psram_stack = true;  // the library's decode thread never writes flash
+        ArtworkRole &artwork = g_client->add_artwork(std::move(acfg));
+        artwork.set_listener(&g_artwork_listener);
+    } else {
+        ESP_LOGW(TAG, "cover decode task not created: no cover art for Music Assistant");
+    }
 
     g_client->set_network_provider(&g_net_provider);
 

@@ -79,6 +79,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_sleep_fade"
 
+echo "=== building updcheck host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -o "$OUT/test_updcheck" \
+    test_updcheck.c ../../components/ui/updcheck.c
+
+echo "=== running ==="
+"$OUT/test_updcheck"
+
 echo "=== building tone host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -129,8 +138,9 @@ echo "=== building epmeta host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
     -I ../../components/decode/include -I ../../components/decode \
+    -I "$SRC/include" \
     -o "$OUT/test_epmeta" \
-    test_epmeta.c ../../components/ui/epmeta.c ../../components/decode/tags.c
+    test_epmeta.c ../../components/ui/epmeta.c ../../components/decode/tags.c "$SRC/podcast_keep.c"
 
 echo "=== running ==="
 "$OUT/test_epmeta"

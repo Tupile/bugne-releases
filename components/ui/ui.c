@@ -24,6 +24,7 @@
 #include "usage.h"
 #include "sleep_fade.h"
 #include "tone.h"
+#include "updcheck.h"
 #include "chrono.h"
 #include "alarm_next.h"
 #include "stats.h"
@@ -233,6 +234,13 @@ static bool      s_ss_seeking;  // same, for the Sendspin screen's progress slid
 static uint8_t     *s_art_px;
 static lv_image_dsc_t s_art_dsc;
 static uint32_t     s_art_gen_seen;
+// The Music Assistant cover: its own bitmap, fed by the art module's second
+// slot (art_ss_*), drawn only by build_sendspin_playing. Kept apart from the
+// local cover above so neither screen can show the other source's art.
+static uint8_t     *s_ss_art_px;
+static lv_image_dsc_t s_ss_art_dsc;
+static uint32_t     s_ss_art_gen_seen;
+static void ss_art_set(uint8_t *px, uint16_t w, uint16_t h);  // defined with tick_ss_art
 // Cover file the worker should load for the next play (podcast episodes,
 // whose art is a file on the SD card rather than a tag). Written on the LVGL
 // task before req_post, read by the worker when it picks the request up.
@@ -298,7 +306,7 @@ static char s_meta_artist[64];  // tag artist of the playing SD file
 // and podcast RSS refresh (network fetch + parse).
 typedef enum { REQ_PLAY, REQ_REFRESH, REQ_REFRESH_ALL, REQ_DOWNLOAD_JOB, REQ_BEEP,
                REQ_MEMO_RECORD, REQ_MEMO_PLAY, REQ_MEMO_PEERS, REQ_MEMO_SEND,
-               REQ_TALKIE_SEND, REQ_TALKIE_PLAY, REQ_TONE } req_kind_t;
+               REQ_TALKIE_SEND, REQ_TALKIE_PLAY, REQ_TONE, REQ_UPDATE_CHECK } req_kind_t;
 typedef struct {
     req_kind_t kind;
     uint32_t generation;
@@ -438,14 +446,19 @@ static volatile bool s_maint_done_since_boot; // one auto-maintenance has run si
 // Low SD space message (tick_sd_low_alert): next check time, last time shown.
 static int64_t s_sd_alert_next_us = 20LL * 1000000;
 static int64_t s_sd_alert_shown_us = -1;
-// GitHub firmware update check, run as an extra auto-maintenance phase (A1).
+// Daily GitHub firmware update check. It is its own worker request
+// (REQ_UPDATE_CHECK), queued by tick_download_scheduler when the device is
+// idle: it needs Wi-Fi but no SD card, unlike auto-maintenance.
 // web_config already depends on ui, so ui cannot REQUIRE web_config back
 // (circular); bugne_main wires this function pointer to web_config_gh_check
 // once web_config_start() succeeds. NULL means web_config is not up, so the
-// phase is skipped silently.
+// check is never queued.
+// Ownership: the two throttle variables are LVGL-task-only. They are set
+// when the request is posted; a dropped request clears s_ghota_checked_once
+// (req_abandoned) so the check is due again. The worker reads neither.
 static ui_ghota_check_fn_t s_ghota_check_fn;
-static bool s_ghota_checked_once;      // false until the first auto-check attempt
-static int64_t s_ghota_last_check_us;  // esp_timer time of the last auto-check attempt
+static bool s_ghota_checked_once;      // false until an auto-check has been queued
+static int64_t s_ghota_last_check_us;  // esp_timer time the last auto-check was queued
 #define GHOTA_CHECK_INTERVAL_US (24LL * 60 * 60 * 1000000) // at most once per day
 static int s_play_podcast_skip_s;     // skip_seconds of the podcast currently playing
 static int s_play_podcast_id;         // id of the podcast currently playing (0 = none)
@@ -1156,6 +1169,18 @@ static lv_obj_t *podnew_dot(lv_obj_t *parent)
     return dot;
 }
 
+// Publication-date sort keys of a manifest, for the "keep N" window
+// (podcast_keep_in_window). PSRAM, caller frees. NULL when there is no limit
+// or the allocation fails: NULL keys mean the positional window.
+static int *keep_date_keys(const podcast_episode_t *eps, size_t n, int keep)
+{
+    if (keep <= 0 || n == 0) return NULL;
+    int *keys = heap_caps_malloc(n * sizeof(int), MALLOC_CAP_SPIRAM);
+    if (!keys) return NULL;
+    for (size_t e = 0; e < n; e++) keys[e] = podcast_date_key(eps[e].date);
+    return keys;
+}
+
 // Run the persisted background download job on the worker. Resumes from the saved
 // cursor, refreshes first when in "new" mode, skips cached episodes, and persists
 // the cursor as it goes. On a pause/cancel (s_dl_cancel) it saves the cursor and
@@ -1177,8 +1202,9 @@ static bool keep_protected(const char *abs, const config_t *c)
 }
 
 // Apply keep_episodes to every in-scope podcast: delete the downloaded files
-// past the first N entries of its manifest (feed order, newest first). The
-// episodes stay listed and stream. Worker task only (SD I/O).
+// outside the N latest by date (the first N of the manifest when any date is
+// unreadable, see podcast_keep_in_window). The episodes stay listed and
+// stream. Worker task only (SD I/O).
 static void job_prune(const config_t *c)
 {
     for (size_t i = 0; i < c->podcast_count && !s_dl_cancel; i++) {
@@ -1192,6 +1218,11 @@ static void job_prune(const config_t *c)
         }
         bool *flags = heap_caps_calloc(3 * n, sizeof(bool), MALLOC_CAP_SPIRAM);
         if (!flags) { free(eps); continue; }
+        // No keys here means the allocation failed (keep > 0 and n > keep). Do
+        // not prune by position then: the download loop may get its keys and
+        // re-fetch what a positional prune deleted. Not pruning is the safe miss.
+        int *keys = keep_date_keys(eps, n, p->keep_episodes);
+        if (!keys) { free(flags); free(eps); continue; }
         bool *cached = flags, *prot = flags + n, *del = flags + 2 * n;
         for (size_t e = 0; e < n; e++) {
             cached[e] = eps[e].cached;
@@ -1199,7 +1230,7 @@ static void job_prune(const config_t *c)
         }
         int removed = 0;
         uint64_t freed = 0;
-        if (podcast_keep_select(cached, prot, n, p->keep_episodes, del) > 0) {
+        if (podcast_keep_select(cached, prot, keys, n, p->keep_episodes, del) > 0) {
             for (size_t e = 0; e < n && !s_dl_cancel; e++) {
                 if (!del[e]) continue;
                 struct stat st;
@@ -1214,8 +1245,25 @@ static void job_prune(const config_t *c)
             ESP_LOGI(TAG, "podcast %d: keep %d, deleted %d older episode(s), %llu MB freed",
                      p->id, p->keep_episodes, removed, (unsigned long long)(freed / (1024 * 1024)));
         }
+        free(keys);
         free(flags);
         free(eps);
+    }
+}
+
+// The daily firmware update check (REQ_UPDATE_CHECK): header-only fetch of
+// the latest release, result cached by web_config for the Settings red dot.
+// Install stays manual. Not cancellable: bounded by the HTTP timeouts.
+static void update_check_run(void)
+{
+    if (!s_ghota_check_fn) return;
+    char latest[32];
+    bool update = false;
+    if (s_ghota_check_fn(latest, sizeof(latest), &update) == ESP_OK) {
+        ESP_LOGI(TAG, "ghota auto-check: current=%s latest=%s update=%s",
+                 esp_app_get_description()->version, latest, update ? "true" : "false");
+    } else {
+        ESP_LOGW(TAG, "ghota auto-check: failed (no release reachable or check error)");
     }
 }
 
@@ -1284,9 +1332,14 @@ static void worker_run_job(void)
             s_dljob.cur_ep_idx = (int)start_ep;
             dljob_persist();
 
-            size_t lim = podcast_keep_window(got, p->keep_episodes);  // episode limit
-            for (size_t e = start_ep; e < lim; e++) {
-                if (s_dl_cancel) { s_dljob.cur_ep_idx = (int)e; dljob_persist(); free(eps); s_downloading = false; return; }
+            // Episode limit: only the `keep` latest by date are fetched. The
+            // cursor stays a manifest position; entries outside the window are
+            // skipped without counting. No keys (failed allocation) means the
+            // positional window.
+            int *keys = keep_date_keys(eps, got, p->keep_episodes);
+            for (size_t e = start_ep; e < got; e++) {
+                if (s_dl_cancel) { s_dljob.cur_ep_idx = (int)e; dljob_persist(); free(keys); free(eps); s_downloading = false; return; }
+                if (!podcast_keep_in_window(keys, got, p->keep_episodes, e)) continue;
                 if (!s_dljob.force && eps[e].cached) {
                     s_dl_done++;
                 } else {
@@ -1300,13 +1353,14 @@ static void worker_run_job(void)
                         s_dljob.cur_ep_idx = (int)e;
                         s_dljob.active = false;
                         dljob_persist();
+                        free(keys);
                         free(eps);
                         s_dl_phase = UI_DL_SDFULL;
                         s_downloading = false;
                         return;
                     }
                     esp_err_t r = podcast_download_episode(&eps[e], skip_s, &s_dl_cancel);
-                    if (r != ESP_OK && s_dl_cancel) { s_dljob.cur_ep_idx = (int)e; dljob_persist(); free(eps); s_downloading = false; return; }
+                    if (r != ESP_OK && s_dl_cancel) { s_dljob.cur_ep_idx = (int)e; dljob_persist(); free(keys); free(eps); s_downloading = false; return; }
                     if (r != ESP_OK) ESP_LOGW(TAG, "  episode %u of podcast %d failed (%d)", (unsigned)e, p->id, r);
                     // Only a first download is "new" (not a forced re-download),
                     // and only while the setting is on.
@@ -1321,6 +1375,7 @@ static void worker_run_job(void)
                 if ((e & 0x7) == 0) dljob_persist();  // throttle flash writes
             }
             podnew_retain_cached(p->id, eps, got);  // forget markers of episodes gone from feed/card
+            free(keys);
             free(eps);
         }
 
@@ -1336,26 +1391,6 @@ static void worker_run_job(void)
         ESP_LOGI(TAG, "auto-maintenance: scanning the SD music library");
         library_scan_cancelable(&s_dl_cancel);
         if (s_dl_cancel) { dljob_persist(); s_downloading = false; return; }  // paused: re-scan on resume
-    }
-
-    // Phase 4 (auto-maintenance only, A1): check GitHub for a firmware update,
-    // at most once per 24 h. Install stays manual (web Firmware tab). Skipped
-    // silently when web_config is not up (s_ghota_check_fn is NULL until
-    // bugne_main wires it, right after a successful web_config_start()).
-    if (s_dljob.maint && s_ghota_check_fn) {
-        int64_t now = esp_timer_get_time();
-        if (!s_ghota_checked_once || (now - s_ghota_last_check_us) >= GHOTA_CHECK_INTERVAL_US) {
-            s_ghota_checked_once = true;
-            s_ghota_last_check_us = now;
-            char latest[32];
-            bool update = false;
-            if (s_ghota_check_fn(latest, sizeof(latest), &update) == ESP_OK) {
-                ESP_LOGI(TAG, "ghota auto-check: current=%s latest=%s update=%s",
-                         esp_app_get_description()->version, latest, update ? "true" : "false");
-            } else {
-                ESP_LOGW(TAG, "ghota auto-check: failed (no release reachable or check error)");
-            }
-        }
     }
 
     s_dljob.active = false;  // job fully complete
@@ -1436,7 +1471,14 @@ static volatile bool s_tone_running;   // set by tone_start, cleared by the work
 static volatile int  s_tone_mode;
 static volatile int  s_metro_bpm = 100;
 static volatile int  s_metro_beats = 4;
+static volatile int  s_metro_subdiv = 1;  // clicks per beat, 1..TONE_SUBDIV_MAX
 static volatile int  s_drone_midi = 69;  // A4
+// Reference pitch of A4 in Hz, shared by the reference tone and the tuner.
+// RAM-only like the other tool settings. Written by the LVGL task (a4_set),
+// read per frame by the tone worker.
+#define A4_HZ_MIN 430
+#define A4_HZ_MAX 450
+static volatile float s_a4_hz = 440.0f;
 static volatile uint32_t s_metro_beats_started;  // published per frame, for the beat dots
 static volatile int  s_metro_beat;
 
@@ -1463,16 +1505,16 @@ static void tone_run(void)
     bool drone = (s_tone_mode == TONE_DRONE);
     while (!s_tone_stop && uxQueueMessagesWaiting(s_play_q) == 0) {
         if (drone) {
-            tone_drone_fill(&st, frame, TONE_FRAME, tone_midi_hz(s_drone_midi), true);
+            tone_drone_fill(&st, frame, TONE_FRAME, tone_midi_hz(s_drone_midi, s_a4_hz), true);
         } else {
-            tone_metro_fill(&st, frame, TONE_FRAME, s_metro_bpm, s_metro_beats);
+            tone_metro_fill(&st, frame, TONE_FRAME, s_metro_bpm, s_metro_beats, s_metro_subdiv);
             s_metro_beat = st.beat;
             s_metro_beats_started = st.beats_started;
         }
         if (audio_write(frame, sizeof(frame)) != ESP_OK) break;
     }
     if (drone) {  // 10 ms fade-out, no click at the stop
-        tone_drone_fill(&st, frame, TONE_FRAME, tone_midi_hz(s_drone_midi), false);
+        tone_drone_fill(&st, frame, TONE_FRAME, tone_midi_hz(s_drone_midi, s_a4_hz), false);
         audio_write(frame, sizeof(frame));
     }
     audio_close();
@@ -1557,6 +1599,10 @@ static void play_task(void *arg)
             }
             if (req.kind == REQ_TONE) {
                 tone_run();
+                continue;
+            }
+            if (req.kind == REQ_UPDATE_CHECK) {
+                update_check_run();
                 continue;
             }
             if (req.kind == REQ_MEMO_RECORD) {
@@ -1720,9 +1766,7 @@ static void play_task(void *arg)
 #define TUNER_IN_TUNE_CENTS 5.0f
 static volatile bool s_tuner_run;        // capture task loops while true
 static volatile bool s_tuner_active;     // task alive; cleared by the task itself
-static volatile int s_tuner_midi = -1;   // last detected MIDI note
-static volatile float s_tuner_cents;     // deviation from s_tuner_midi, in cents
-static volatile float s_tuner_freq;      // smoothed frequency, Hz
+static volatile float s_tuner_freq;      // smoothed frequency, Hz (the tick maps it to a note)
 static volatile int64_t s_tuner_hit_us;  // esp_timer time of the last detection
 static lv_obj_t *s_tuner_note_lbl, *s_tuner_freq_lbl, *s_tuner_bar;
 static void build_tuner(lv_obj_t *scr);
@@ -1731,9 +1775,9 @@ static void build_drone(lv_obj_t *scr);
 static void on_open_metronome(lv_event_t *e);  // tuner screen buttons
 static void on_open_drone(lv_event_t *e);
 // Metronome / reference tone widgets, NULLed by show() like the tuner's.
-static lv_obj_t *s_tone_btn, *s_metro_bpm_lbl, *s_metro_slider, *s_metro_beats_lbl;
+static lv_obj_t *s_tone_btn, *s_metro_bpm_lbl, *s_metro_slider, *s_metro_beats_lbl, *s_metro_sub_lbl;
 static lv_obj_t *s_metro_dots[TONE_BEATS_MAX];
-static lv_obj_t *s_drone_note_lbl, *s_drone_hz_lbl;
+static lv_obj_t *s_drone_note_lbl, *s_drone_hz_lbl, *s_drone_a4_lbl;
 
 // Stop the tuner and wait for its task to release the arbiter (bounded by one
 // blocking mic read, ~128 ms). No-op when the tuner is not running.
@@ -1779,6 +1823,11 @@ static void req_abandoned(const play_req_t *req)
     case REQ_TONE:
         s_tone_running = false;       // the play button shows "stopped" again
         break;
+    case REQ_UPDATE_CHECK:
+        // Never served: it must not count for the 24 h throttle.
+        s_ghota_checked_once = false;
+        ESP_LOGI(TAG, "ghota auto-check: dropped, will retry");
+        break;
     case REQ_TALKIE_PLAY: {
         // The tick cleared s_talkie_rx_pending when it posted this request, so
         // a dropped one would never play: hand the file back to the tick,
@@ -1813,7 +1862,9 @@ static void req_post(const play_req_t *req)
     play_req_t next = *req;
     play_req_t old;
     refresh_cancel();
-    if (next.kind != REQ_DOWNLOAD_JOB) s_dl_cancel = true;
+    // The update check is only queued with no job running or queued, so it
+    // has nothing to cancel, and a stale cancel must not greet the next job.
+    if (next.kind != REQ_DOWNLOAD_JOB && next.kind != REQ_UPDATE_CHECK) s_dl_cancel = true;
     if (xQueuePeek(s_play_q, &old, 0) == pdTRUE && old.kind != next.kind) {
         req_abandoned(&old);
     }
@@ -1958,9 +2009,11 @@ static void show(screen_builder_t builder)
     s_metro_bpm_lbl = NULL;
     s_metro_slider = NULL;
     s_metro_beats_lbl = NULL;
+    s_metro_sub_lbl = NULL;
     for (int i = 0; i < TONE_BEATS_MAX; i++) s_metro_dots[i] = NULL;
     s_drone_note_lbl = NULL;
     s_drone_hz_lbl = NULL;
+    s_drone_a4_lbl = NULL;
     s_memo_time_lbl = NULL;  // same for the memo record/play widgets
     s_memo_prog_bar = NULL;
     s_memo_play_btn = NULL;
@@ -2635,6 +2688,21 @@ static void build_sendspin_playing(lv_obj_t *scr)
     add_back_button(scr);  // browse other screens while MA keeps streaming
     add_sleep_button(scr); // sleep timer, top-right (mirrors the back button)
 
+    // Cover art, landscape only (portrait has no room): same slot and same
+    // right-hand column as build_now_playing. Every widget below that would
+    // sit under the image moves into that column.
+    const bool has_art = ls && s_ss_art_px != NULL;
+    const int art_col_x = 2 * PAD_SIDE + ART_BOX;          // column left edge
+    const int art_col_w = scr_w() - art_col_x - PAD_SIDE;  // its width
+    const int art_dx = has_art ? art_col_x + art_col_w / 2 - scr_w() / 2 : 0;
+    if (has_art) {
+        lv_obj_t *img = lv_image_create(scr);
+        lv_image_set_src(img, &s_ss_art_dsc);
+        lv_obj_set_style_radius(img, RADIUS_BTN, 0);
+        lv_obj_set_style_clip_corner(img, true, 0);
+        lv_obj_align(img, LV_ALIGN_LEFT_MID, PAD_SIDE, -9);  // see build_now_playing
+    }
+
     // Overline: same text this screen always showed, now styled as a small
     // muted header instead of the big title (the track title takes that spot).
     lv_obj_t *over = lv_label_create(scr);
@@ -2649,11 +2717,11 @@ static void build_sendspin_playing(lv_obj_t *scr)
     const int tlines = ls ? 1 : 2;
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     // Narrowed to clear both corner buttons, same reasoning as build_now_playing.
-    lv_obj_set_size(name, scr_w() - 112,
+    lv_obj_set_size(name, has_art ? art_col_w : scr_w() - 112,
                     tlines * lv_font_get_line_height(&bugne_font_20));
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(name, t);
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, ls ? 54 : 40);  // clears back button
+    lv_obj_align(name, LV_ALIGN_TOP_MID, art_dx, ls ? 54 : 40);  // clears back button
     s_ss_title_lbl = name;
 
     char a[96];
@@ -2661,11 +2729,12 @@ static void build_sendspin_playing(lv_obj_t *scr)
     lv_obj_t *artist = lv_label_create(scr);
     lv_obj_set_style_text_font(artist, &bugne_font_14, 0);
     lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
-    lv_obj_set_size(artist, scr_w() - 2 * PAD_SIDE, lv_font_get_line_height(&bugne_font_14));
+    lv_obj_set_size(artist, has_art ? art_col_w : scr_w() - 2 * PAD_SIDE,
+                    lv_font_get_line_height(&bugne_font_14));
     lv_obj_set_style_text_align(artist, LV_TEXT_ALIGN_CENTER, 0);
     muted(artist);
     lv_label_set_text(artist, a);
-    lv_obj_align(artist, LV_ALIGN_TOP_MID, 0, ls ? 84 : 94);  // under the bounded title block
+    lv_obj_align(artist, LV_ALIGN_TOP_MID, art_dx, ls ? 84 : 94);  // under the bounded title block
     s_ss_artist_lbl = artist;
 
     // Progress slider plus an elapsed/total time label, same slots as
@@ -2674,10 +2743,10 @@ static void build_sendspin_playing(lv_obj_t *scr)
     // events are always attached and ss_refresh toggles knob + clickability.
     s_ss_seeking = false;
     lv_obj_t *bar = lv_slider_create(scr);
-    lv_obj_set_width(bar, scr_w() - 32);
+    lv_obj_set_width(bar, has_art ? art_col_w : scr_w() - 32);
     lv_slider_set_range(bar, 0, 1000);
     lv_slider_set_value(bar, 0, LV_ANIM_OFF);
-    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, ls ? 106 : 116);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, art_dx, ls ? 106 : 116);
     lv_obj_add_event_cb(bar, on_ss_seek_pressed, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(bar, on_ss_seek_released, LV_EVENT_RELEASED, NULL);
     ss_apply_seekable(bar, source_sendspin_seek_max() > 0);
@@ -2686,22 +2755,22 @@ static void build_sendspin_playing(lv_obj_t *scr)
     lv_obj_t *tm = lv_label_create(scr);
     muted(tm);
     lv_label_set_text(tm, "0:00 / 0:00");
-    lv_obj_align(tm, LV_ALIGN_TOP_MID, 0, ls ? 124 : 134);
+    lv_obj_align(tm, LV_ALIGN_TOP_MID, art_dx, ls ? 124 : 134);
     s_ss_time_lbl = tm;
 
     // Volume: icon plus slider, above the transport cluster (same slot as
     // build_now_playing).
     const int vy = ls ? 144 : 154;
     lv_obj_t *vol = lv_slider_create(scr);
-    lv_obj_set_width(vol, scr_w() - 60);
+    lv_obj_set_width(vol, has_art ? art_col_w - 28 : scr_w() - 60);
     lv_slider_set_range(vol, 0, audio_get_volume_limit());  // ceiling from config
     lv_slider_set_value(vol, audio_get_volume(), LV_ANIM_OFF);
-    lv_obj_align(vol, LV_ALIGN_TOP_MID, 12, vy);
+    lv_obj_align(vol, LV_ALIGN_TOP_MID, has_art ? art_dx + 14 : 12, vy);
     lv_obj_add_event_cb(vol, on_volume, LV_EVENT_VALUE_CHANGED, NULL);
     s_np_vol = vol;  // so a web volume change can move this slider too
     lv_obj_t *vicon = lv_label_create(scr);
     lv_label_set_text(vicon, LV_SYMBOL_VOLUME_MAX);
-    lv_obj_align(vicon, LV_ALIGN_TOP_LEFT, PAD_SIDE, vy - 2);
+    lv_obj_align(vicon, LV_ALIGN_TOP_LEFT, has_art ? art_col_x : PAD_SIDE, vy - 2);
 
     // Transport: round buttons, same layout and offsets as build_now_playing.
     // Next/previous skip the Music Assistant queue; always enabled (a session
@@ -4573,6 +4642,42 @@ static void note_text(int midi, char *txt, size_t n)
     }
 }
 
+// The bare name of a pitch class in the UI language ("La", "A"), for the
+// reference label only. Note and string names go through note_text.
+static const char *note_name_bare(int pc)
+{
+    if (strcmp(lang_code(), "fr") == 0) return TUNER_NOTE_FR[pc];
+    if (strcmp(lang_code(), "de") == 0) return TUNER_NOTE_DE[pc];
+    return TUNER_NOTE_EN[pc];
+}
+
+// "La = 440 Hz" / "A = 440 Hz": the reference pitch, named in the UI language.
+static void a4_text(char *txt, size_t n)
+{
+    snprintf(txt, n, "%s = %d Hz", note_name_bare(69 % 12), (int)lroundf(s_a4_hz));
+}
+
+// Tuner modes. The presets are the open strings as MIDI numbers, low to
+// high (pitch_nearest_string relies on the order); they are named on screen
+// by note_text, so they follow the UI language. RAM-only, LVGL task only.
+enum { TUNER_MODE_CHROMATIC, TUNER_MODE_GUITAR, TUNER_MODE_BASS, TUNER_MODE_N };
+static int s_tuner_mode = TUNER_MODE_CHROMATIC;
+static const uint8_t TUNER_GUITAR[6] = { 40, 45, 50, 55, 59, 64 };
+static const uint8_t TUNER_BASS[4] = { 28, 33, 38, 43 };  // bass guitar and double bass
+
+static const char *tuner_mode_name(void)
+{
+    return T(s_tuner_mode == TUNER_MODE_GUITAR ? STR_TUNER_MODE_GUITAR :
+             s_tuner_mode == TUNER_MODE_BASS ? STR_TUNER_MODE_BASS : STR_TUNER_MODE_CHROMATIC);
+}
+
+// Next mode. No rebuild: tick_tuner repaints the mode line and the note.
+static void on_tuner_mode(lv_event_t *e)
+{
+    (void)e;
+    s_tuner_mode = (s_tuner_mode + 1) % TUNER_MODE_N;
+}
+
 // Capture task: blocking 128 ms mic reads, YIN pitch detection (pitch.c),
 // median-of-3 smoothing, results published in the s_tuner_* statics read by
 // the 50 ms UI tick. PSRAM stack is safe: no flash API is called here.
@@ -4622,12 +4727,7 @@ static void tuner_task(void *arg)
                     m = (a > b) ? ((b > c) ? b : (a > c ? c : a))
                                 : ((a > c) ? a : (b > c ? c : b));
                 }
-                int midi;
-                float cents;
-                pitch_note_from_freq(m, &midi, &cents);
                 s_tuner_freq = m;
-                s_tuner_cents = cents;
-                s_tuner_midi = midi;
                 s_tuner_hit_us = esp_timer_get_time();
             } else {
                 nhit = 0;  // a gap breaks the median window
@@ -4663,7 +4763,6 @@ static void tuner_begin(void)
     if (source_sendspin_session_active()) {
         source_sendspin_command(SENDSPIN_CMD_STOP);
     }
-    s_tuner_midi = -1;
     s_tuner_hit_us = 0;
     s_tuner_run = true;
     s_tuner_active = true;
@@ -4694,7 +4793,10 @@ static void on_open_tuner(lv_event_t *e)
 static void build_tuner(lv_obj_t *scr)
 {
     add_back_cb(scr, on_tuner_back);
-    add_title_wide(scr, T(STR_TUNER));
+    add_title(scr, T(STR_TUNER));  // a button on both corners: not _wide
+    lv_obj_t *mode = make_round_btn(scr, LV_SYMBOL_LOOP, 44, false, NULL);
+    lv_obj_align(mode, LV_ALIGN_TOP_RIGHT, -8, 8);  // mirrors the back button
+    lv_obj_add_event_cb(mode, on_tuner_mode, LV_EVENT_CLICKED, NULL);
 
     // Big note name, refreshed by the 50 ms tick in sleep_timer_cb.
     s_tuner_note_lbl = lv_label_create(scr);
@@ -4702,6 +4804,8 @@ static void build_tuner(lv_obj_t *scr)
     lv_label_set_text(s_tuner_note_lbl, T(STR_TUNER_PLAY_NOTE));
     lv_obj_align(s_tuner_note_lbl, LV_ALIGN_CENTER, 0, -44);
 
+    // Mode line: "<mode> · 82.4 Hz" on a note, "<mode> · La = 440 Hz" waiting.
+    // Filled by the tick.
     s_tuner_freq_lbl = lv_label_create(scr);
     muted(s_tuner_freq_lbl);
     lv_label_set_text(s_tuner_freq_lbl, "");
@@ -4866,6 +4970,32 @@ static void on_metro_beats(lv_event_t *e)
     metro_show_beats();
 }
 
+// Subdivision chip: the multiplication sign and the clicks per beat.
+static void metro_show_subdiv(void)
+{
+    if (!s_metro_sub_lbl) return;
+    char t[8];
+    snprintf(t, sizeof(t), "\xC3\x97" "%d", s_metro_subdiv);  // U+00D7; keep the literal split
+    lv_label_set_text(s_metro_sub_lbl, t);
+}
+
+static void on_metro_subdiv(lv_event_t *e)
+{
+    (void)e;
+    s_metro_subdiv = s_metro_subdiv % TONE_SUBDIV_MAX + 1;  // 1..4, then back to 1
+    metro_show_subdiv();
+}
+
+// The subdivision button: a plain (accent) button with a 44 px tap target.
+static void metro_subdiv_btn(lv_obj_t *parent)
+{
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_set_size(b, 48, 44);
+    s_metro_sub_lbl = lv_label_create(b);
+    lv_obj_center(s_metro_sub_lbl);
+    lv_obj_add_event_cb(b, on_metro_subdiv, LV_EVENT_CLICKED, NULL);
+}
+
 // Tap tempo: the mean of the last taps (up to 4 intervals); a 2 s pause
 // starts a new measurement.
 static int64_t s_tap_us[5];
@@ -4913,8 +5043,15 @@ static void build_metronome(lv_obj_t *scr)
     lv_obj_add_event_cb(s_metro_slider, on_metro_slider, LV_EVENT_VALUE_CHANGED, NULL);
 
     // One dot per beat, the current one in the accent color (tick_tone).
-    lv_obj_t *dots = tone_row(c);
+    // Portrait: the subdivision button ends this row (the bottom row is
+    // full), so the dots sit in a fixed-width box: hidden dots leave the
+    // flex layout and the button would otherwise slide with the beat count.
+    const bool ls = scr_w() > scr_h();
+    lv_obj_t *dot_row = ls ? NULL : tone_row(c);
+    lv_obj_t *dots = tone_row(ls ? c : dot_row);
     lv_obj_set_style_pad_column(dots, 10, 0);
+    // The dots stay centered inside the box, as they were in the full row.
+    if (!ls) lv_obj_set_width(dots, TONE_BEATS_MAX * 14 + (TONE_BEATS_MAX - 1) * 10);
     for (int i = 0; i < TONE_BEATS_MAX; i++) {
         lv_obj_t *d = lv_obj_create(dots);
         lv_obj_set_size(d, 14, 14);
@@ -4925,6 +5062,7 @@ static void build_metronome(lv_obj_t *scr)
         lv_obj_set_style_bg_color(d, col_muted(), 0);
         s_metro_dots[i] = d;
     }
+    if (!ls) metro_subdiv_btn(dot_row);
 
     lv_obj_t *r3 = tone_row(c);
     lv_obj_t *bb = lv_button_create(r3);
@@ -4937,9 +5075,11 @@ static void build_metronome(lv_obj_t *scr)
     lv_label_set_text(tl, T(STR_METRO_TAP));
     lv_obj_center(tl);
     lv_obj_add_event_cb(tb, on_metro_tap, LV_EVENT_PRESSED, NULL);  // on press: tighter timing
+    if (ls) metro_subdiv_btn(r3);
 
     metro_show_bpm();
     metro_show_beats();
+    metro_show_subdiv();
 }
 
 #define DRONE_MIDI_MIN 28  // E1, a double bass low string
@@ -4950,8 +5090,24 @@ static void drone_show(void)
     char t[40];
     note_text(s_drone_midi, t, sizeof(t));
     if (s_drone_note_lbl) lv_label_set_text(s_drone_note_lbl, t);
-    snprintf(t, sizeof(t), "%.1f Hz", (double)tone_midi_hz(s_drone_midi));
+    snprintf(t, sizeof(t), "%.1f Hz", (double)tone_midi_hz(s_drone_midi, s_a4_hz));
     if (s_drone_hz_lbl) lv_label_set_text(s_drone_hz_lbl, t);
+    a4_text(t, sizeof(t));
+    if (s_drone_a4_lbl) lv_label_set_text(s_drone_a4_lbl, t);
+}
+
+// The one writer of the reference pitch: clamped, and the screen follows.
+static void a4_set(int hz)
+{
+    if (hz < A4_HZ_MIN) hz = A4_HZ_MIN;
+    if (hz > A4_HZ_MAX) hz = A4_HZ_MAX;
+    s_a4_hz = (float)hz;
+    drone_show();
+}
+
+static void on_a4_step(lv_event_t *e)
+{
+    a4_set((int)lroundf(s_a4_hz) + (int)(intptr_t)lv_event_get_user_data(e));
 }
 
 static void on_drone_step(lv_event_t *e)
@@ -4984,8 +5140,24 @@ static void build_drone(lv_obj_t *scr)
     lv_obj_set_style_text_align(s_drone_note_lbl, LV_TEXT_ALIGN_CENTER, 0);
     drone_step_btn(r1, LV_SYMBOL_RIGHT, 1);
 
-    s_drone_hz_lbl = lv_label_create(c);
-    muted(s_drone_hz_lbl);
+    // The note's frequency. Portrait only: in landscape the four rows fill
+    // the column and this line is the one that goes.
+    if (scr_h() > scr_w()) {
+        s_drone_hz_lbl = lv_label_create(c);
+        muted(s_drone_hz_lbl);
+    }
+
+    // Reference pitch: "[-] La = 440 Hz [+]". 14 px label: about 116 px
+    // remain between the buttons in portrait.
+    lv_obj_t *r2 = tone_row(c);
+    lv_obj_t *am = make_round_btn(r2, LV_SYMBOL_MINUS, 44, false, NULL);
+    lv_obj_add_event_cb(am, on_a4_step, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+    s_drone_a4_lbl = lv_label_create(r2);
+    lv_obj_set_flex_grow(s_drone_a4_lbl, 1);
+    lv_label_set_long_mode(s_drone_a4_lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_drone_a4_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *ap = make_round_btn(r2, LV_SYMBOL_PLUS, 44, false, NULL);
+    lv_obj_add_event_cb(ap, on_a4_step, LV_EVENT_CLICKED, (void *)(intptr_t)1);
 
     lv_obj_t *r3 = tone_row(c);
     drone_step_btn(r3, LV_SYMBOL_DOWN, -12);
@@ -8079,6 +8251,8 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "game",              build_game_setup },
     { "game_play",         build_game },
     { "tuner",             build_tuner },
+    { "tuner_guitar",      build_tuner },        // same screen, guitar strings
+    { "tuner_bass",        build_tuner },        // same screen, bass strings
     { "metronome",         build_metronome },
     { "metronome_play",    build_metronome },    // same screen, playing
     { "drone",             build_drone },
@@ -8104,6 +8278,7 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "favorites",         build_favorites },
     { "now_playing",       build_now_playing },
     { "sendspin",          build_sendspin_playing },
+    { "sendspin_cover",    build_sendspin_playing },  // same screen, with a test cover
     { "alarm_ringing",     build_alarm_ringing },
     { "lamp",              build_lamp },
     { "chrono",            build_chrono },
@@ -8307,7 +8482,24 @@ static void tick_nav_request(void)
                 s_game_tables = (strcmp(name, "game_play") == 0) ? GAME_TABLES_ALL : 0;
                 s_game_a = 0;
             }
-        } else if (strcmp(name, "tuner") == 0) {
+        } else if (strcmp(name, "sendspin_cover") == 0) {
+            // A generated test cover, so a remote screenshot can show the
+            // landscape layout: a real one needs Music Assistant playing.
+            uint16_t *px = heap_caps_malloc((size_t)ART_BOX * ART_BOX * 2, MALLOC_CAP_SPIRAM);
+            if (px) {
+                for (int y = 0; y < ART_BOX; y++) {
+                    for (int x = 0; x < ART_BOX; x++) {
+                        int r = x * 31 / (ART_BOX - 1), g = y * 63 / (ART_BOX - 1);
+                        px[y * ART_BOX + x] = (uint16_t)((r << 11) | (g << 5) | (31 - r));
+                    }
+                }
+                ss_art_set((uint8_t *)px, ART_BOX, ART_BOX);
+            }
+        } else if (strcmp(name, "tuner") == 0 || strcmp(name, "tuner_guitar") == 0 ||
+                   strcmp(name, "tuner_bass") == 0) {
+            // The mode tap cannot be synthesized: the two extra names set it.
+            if (strcmp(name, "tuner_guitar") == 0) s_tuner_mode = TUNER_MODE_GUITAR;
+            if (strcmp(name, "tuner_bass") == 0) s_tuner_mode = TUNER_MODE_BASS;
             tuner_begin();  // mimic on_open_tuner: takeover + capture task
         } else if (strcmp(name, "metronome_play") == 0 || strcmp(name, "drone_play") == 0) {
             // Press play remotely (no touch injection exists): same gate and
@@ -8362,6 +8554,27 @@ static void tick_download_scheduler(void)
         if (audio_is_active()) { s_audio_idle_since_us = now; s_played_since_maint = true; }
         bool idle_5min = (now - s_audio_idle_since_us) >= DL_IDLE_RESUME_US;
         bool net_ok = !s_refreshing && source_sd_present() && net_state() == NET_STATE_CONNECTED;
+        // Daily update check. Its own block, BEFORE the job chain: a device
+        // with no SD card can hold a persisted job that never resumes
+        // (net_ok needs the card), and the check must not wait behind it.
+        // Wi-Fi is tested alone here, never through net_ok. "Free" covers
+        // every user of the worker: a queued request ends a memo recording.
+        portENTER_CRITICAL(&s_upd_lock);
+        bool upd_busy = s_upd_busy;
+        portEXIT_CRITICAL(&s_upd_lock);
+        bool dev_free = !s_play_worker_busy && !s_downloading && !s_dl_queued && !s_refreshing &&
+                        uxQueueMessagesWaiting(s_play_q) == 0 && s_memo_state == MEMO_UI_IDLE &&
+                        !s_tone_running && !s_tuner_active && !upd_busy;
+        if (update_check_due(s_ghota_check_fn != NULL, net_state() == NET_STATE_CONNECTED,
+                             idle_5min, dev_free, s_ghota_checked_once, now,
+                             s_ghota_last_check_us, GHOTA_CHECK_INTERVAL_US)) {
+            s_ghota_checked_once = true;
+            s_ghota_last_check_us = now;
+            ESP_LOGI(TAG, "ghota auto-check: queued");
+            play_req_t req = { .kind = REQ_UPDATE_CHECK };
+            req_post(&req);
+            return;  // one request per tick: the job chain runs on the next one
+        }
         if (s_downloading || s_dl_queued) {
             // Running or queued: pause it the moment audio plays (a queued job
             // picks the cancel up in worker_run_job's early guard).
@@ -8557,12 +8770,26 @@ static void tick_tuner(void)
 
     // Refresh the tuner readout from the capture task's published state.
     if (s_active_builder == build_tuner && s_tuner_note_lbl) {
-        char txt[40];
+        char txt[40], line[56];
         int64_t now = esp_timer_get_time();
         bool fresh = s_tuner_hit_us && (now - s_tuner_hit_us) < 800000;
-        if (fresh) {
-            int midi = s_tuner_midi;
-            float cents = s_tuner_cents;
+        float freq = s_tuner_freq, a4 = s_a4_hz;  // one read each per tick
+        if (fresh && freq > 0.0f) {
+            // Frequency to note: the nearest note, or the nearest string of
+            // the preset. Done here so a mode or reference change shows on
+            // the next tick.
+            int midi = 0;
+            float cents = 0.0f;
+            const uint8_t *set = s_tuner_mode == TUNER_MODE_GUITAR ? TUNER_GUITAR :
+                                 s_tuner_mode == TUNER_MODE_BASS ? TUNER_BASS : NULL;
+            int nset = s_tuner_mode == TUNER_MODE_GUITAR ? (int)sizeof(TUNER_GUITAR) :
+                       s_tuner_mode == TUNER_MODE_BASS ? (int)sizeof(TUNER_BASS) : 0;
+            int idx = 0;
+            if (set && pitch_nearest_string(freq, a4, set, nset, &idx, &cents)) {
+                midi = set[idx];
+            } else {
+                pitch_note_from_freq(freq, a4, &midi, &cents);
+            }
             note_text(midi, txt, sizeof(txt));
             if (fabsf(cents) <= TUNER_IN_TUNE_CENTS) {
                 lv_obj_set_style_text_color(s_tuner_note_lbl, col_accent(), 0);
@@ -8572,10 +8799,9 @@ static void tick_tuner(void)
             if (strcmp(lv_label_get_text(s_tuner_note_lbl), txt) != 0) {
                 lv_label_set_text(s_tuner_note_lbl, txt);
             }
-            char fz[20];
-            snprintf(fz, sizeof(fz), "%.1f Hz", (double)s_tuner_freq);
-            if (s_tuner_freq_lbl && strcmp(lv_label_get_text(s_tuner_freq_lbl), fz) != 0) {
-                lv_label_set_text(s_tuner_freq_lbl, fz);
+            snprintf(line, sizeof(line), "%s \xC2\xB7 %.1f Hz", tuner_mode_name(), (double)freq);
+            if (s_tuner_freq_lbl && strcmp(lv_label_get_text(s_tuner_freq_lbl), line) != 0) {
+                lv_label_set_text(s_tuner_freq_lbl, line);
             }
             int c = (int)lroundf(cents);
             if (c < -50) c = -50;
@@ -8588,8 +8814,12 @@ static void tick_tuner(void)
             if (strcmp(lv_label_get_text(s_tuner_note_lbl), T(STR_TUNER_PLAY_NOTE)) != 0) {
                 lv_label_set_text(s_tuner_note_lbl, T(STR_TUNER_PLAY_NOTE));
             }
-            if (s_tuner_freq_lbl && lv_label_get_text(s_tuner_freq_lbl)[0]) {
-                lv_label_set_text(s_tuner_freq_lbl, "");
+            // Waiting: the mode and the reference pitch, rebuilt every tick so
+            // a mode or reference change shows without a note.
+            a4_text(txt, sizeof(txt));
+            snprintf(line, sizeof(line), "%s \xC2\xB7 %s", tuner_mode_name(), txt);
+            if (s_tuner_freq_lbl && strcmp(lv_label_get_text(s_tuner_freq_lbl), line) != 0) {
+                lv_label_set_text(s_tuner_freq_lbl, line);
             }
             if (s_tuner_bar && lv_bar_get_value(s_tuner_bar) != 0) {
                 lv_bar_set_value(s_tuner_bar, 0, LV_ANIM_OFF);
@@ -8850,6 +9080,44 @@ static void tick_sendspin(void)
         ss_refresh();
     }
     s_ss_prev = ss;
+}
+
+// Point the Music Assistant image descriptor at a bitmap the UI now owns.
+static void ss_art_set(uint8_t *px, uint16_t w, uint16_t h)
+{
+    if (s_ss_art_px) heap_caps_free(s_ss_art_px);
+    s_ss_art_px = px;
+    if (!px) return;
+    s_ss_art_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+    s_ss_art_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+    s_ss_art_dsc.header.w      = w;
+    s_ss_art_dsc.header.h      = h;
+    s_ss_art_dsc.header.stride = (uint32_t)w * 2;
+    s_ss_art_dsc.data          = px;
+    s_ss_art_dsc.data_size     = (uint32_t)w * h * 2;
+}
+
+// Music Assistant cover: take a newly committed bitmap (or notice a clear)
+// and rebuild the Sendspin screen, whose layout depends on it.
+static void tick_ss_art(void)
+{
+    if (art_ss_gen() == s_ss_art_gen_seen) return;
+    const bool shown = s_active_builder == build_sendspin_playing;
+    // Never while a finger is down on that screen: a rebuild under a dragged
+    // seek or volume slider orphans the press. Nothing is taken or freed yet
+    // either (the live image still points at the old bitmap); the change is
+    // applied on a later tick, once the touch is released.
+    if (shown && s_touch_indev && lv_indev_get_state(s_touch_indev) == LV_INDEV_STATE_PRESSED) return;
+
+    uint8_t *px = NULL;
+    uint16_t w = 0, h = 0;
+    // The generation is recorded from the take itself (same lock), never
+    // from a separate read: see art.h.
+    bool got = art_ss_take(&px, &w, &h, &s_ss_art_gen_seen);
+    if (!got && !s_ss_art_px) return;  // cleared and nothing was shown: no rebuild
+    ss_art_set(got ? px : NULL, w, h);
+    // The image is only drawn in landscape: a portrait screen needs no rebuild.
+    if (shown && scr_w() > scr_h()) show(build_sendspin_playing);
 }
 
 // Playback died on its own (unreachable stream, lost connection, decode
@@ -9604,6 +9872,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_volume_limit();
     tick_sendspin();
     tick_art();  // before tick_now_playing: a rebuild here re-creates its labels
+    tick_ss_art();  // after tick_sendspin: a rebuild here re-creates its labels too
     tick_now_playing();
     tick_remote();
     tick_advance();

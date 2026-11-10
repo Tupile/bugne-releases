@@ -26,10 +26,19 @@ extern "C" {
 // caller can log input level while tuning the mic gain.
 bool pitch_detect(const int16_t *pcm, float fs, float *freq_hz, float *rms);
 
-// Map a frequency to the nearest equal-tempered note, A4 = 440 Hz.
-// *midi gets the MIDI note number (69 = A4, 40 = E2, 28 = E1),
-// *cents the signed deviation from that note, -50..+50.
-void pitch_note_from_freq(float freq_hz, int *midi, float *cents);
+// Map a frequency to the nearest equal-tempered note, with A4 = a4_hz
+// (440 is the standard). *midi gets the MIDI note number (69 = A4, 40 = E2,
+// 28 = E1), *cents the signed deviation from that note, -50..+50.
+void pitch_note_from_freq(float freq_hz, float a4_hz, int *midi, float *cents);
+
+// Instrument preset: find the string nearest to freq_hz among `n` MIDI notes
+// (ordered low to high), with A4 = a4_hz. *idx gets its index, *cents the
+// signed deviation from that string, NOT clamped (a string tuned far off
+// reads hundreds of cents). On an exact tie the first (lower) string wins.
+// No octave folding: an octave harmonic reads as whatever string is nearest.
+// False when there is nothing to match (n <= 0, NULL table, freq <= 0).
+bool pitch_nearest_string(float freq_hz, float a4_hz, const uint8_t *midis, int n,
+                          int *idx, float *cents);
 
 #ifdef __cplusplus
 }

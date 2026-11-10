@@ -128,9 +128,9 @@ void ui_download_status(ui_dl_status_t *out);
 
 // Signature matching web_config_gh_check. ui cannot REQUIRE web_config (that
 // would be circular: web_config already depends on ui), so bugne_main wires
-// this pointer once web_config_start() succeeds. The maintenance engine calls
-// it at most once per 24 h; a NULL pointer (web_config not up) skips the
-// scheduled check silently.
+// this pointer once web_config_start() succeeds. The download scheduler queues
+// the check at most once per 24 h, when the device is idle and online (no SD
+// card needed); a NULL pointer (web_config not up) skips it silently.
 typedef esp_err_t (*ui_ghota_check_fn_t)(char *latest, size_t cap, bool *update);
 void ui_set_ghota_check_fn(ui_ghota_check_fn_t fn);
 

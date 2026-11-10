@@ -93,7 +93,7 @@ configuration:
 | `podcasts[].title` | string | Display title. |
 | `podcasts[].rss_url` | string | Podcast RSS feed URL. |
 | `podcasts[].skip_seconds` | int | Intro/ads to skip (0 = none). Trimmed off each MP3 at download, and skipped at the start of streamed playback. |
-| `podcasts[].keep_episodes` | int | Episodes kept on the SD card, 0 to 300, default 0 (no limit). Only the first N of the feed are downloaded; older downloaded files are deleted by the next download job (the episodes stay listed and stream). The playing episode, favorites and alarm tracks are never deleted. |
+| `podcasts[].keep_episodes` | int | Episodes kept on the SD card, 0 to 300, default 0 (no limit). Only the N most recent episodes by publication date are downloaded, whatever the order of the feed; downloaded files outside those N are deleted by the next download job (the episodes stay listed and stream). If any episode of the feed has no readable date, the first N of the feed are used instead. The playing episode, favorites and alarm tracks are never deleted. |
 | `ui.volume` | int | 0 to 100. |
 | `ui.volume_max` | int | Volume ceiling 1 to 100 (child-ear protection); every volume request is clamped to it. Default 100. |
 | `ui.screen_sleep_seconds` | int | Idle seconds before the screen sleeps. |
