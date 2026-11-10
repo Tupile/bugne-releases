@@ -277,6 +277,48 @@ static void serializer_failures(void) {
     real_serializer = 0;
     assert(!remove(CONFIG_PATH));
 }
+'''
+# The loader: an unusable config.json is kept and the device runs on
+# defaults, but config_store_loaded() must then say false, so the boot-time
+# manifest prune does not treat the default podcast list as the user's.
+cases += '''#define ESP_LOGW(...) ((void)0)
+static bool s_cfg_loaded;
+static esp_err_t loader_save(void) { before = live; return real_save(&live); }
+'''
+cases += function(STORE, 'load_config').replace('save_to_disk(&s_config)', 'loader_save()')
+cases += function(STORE, 'config_store_loaded')
+cases += r'''
+static void put_file(const char *text, size_t pad) {
+    FILE *f = fopen(CONFIG_PATH, "w");
+    assert(f);
+    fputs(text, f);
+    for (size_t i = 0; i < pad; i++) fputc(' ', f);
+    assert(!fclose(f));
+}
+static void loader_cases(void) {
+    real_serializer = 1;
+    json_fail_at = array_fail_at = 0;
+    remove(CONFIG_PATH);
+    assert(load_config() == ESP_OK && config_store_loaded());   /* missing: defaults written */
+    put_file("{\"schema_version\":1,\"podcasts\":[{\"id\":7,\"title\":\"P\",\"rss_url\":\"http://x/r\"}]}", 0);
+    assert(load_config() == ESP_OK && config_store_loaded());
+    assert(live.podcast_count == 1 && live.podcasts[0].id == 7);
+    put_file("{\"schema_version\":1,", 0);                       /* unparseable */
+    assert(load_config() == ESP_OK && !config_store_loaded());
+    put_file("{\"schema_version\":99}", 0);                      /* unknown schema */
+    assert(load_config() == ESP_OK && !config_store_loaded());
+    put_file("{\"schema_version\":1}", CONFIG_FILE_MAX);         /* over the size limit */
+    assert(load_config() == ESP_OK && !config_store_loaded());
+    char kept[64] = "";
+    FILE *f = fopen(CONFIG_PATH, "r");
+    assert(f && fgets(kept, sizeof(kept), f) && !strncmp(kept, "{\"schema_version\":1}", 20));
+    fclose(f);                                                   /* the file was not overwritten */
+    put_file("", 0);                                             /* empty: defaults written */
+    assert(load_config() == ESP_OK && config_store_loaded());
+    real_serializer = 0;
+    assert(!remove(CONFIG_PATH));
+    printf("config loader: loaded flag false on unusable files, file kept: passed\n");
+}
 static httpd_req_t request(const char *s) {
     return (httpd_req_t){.body = s, .content_len = strlen(s), .authed = true};
 }
@@ -380,6 +422,7 @@ int main(void) {
     assert(config_store_clear_password() == ESP_FAIL);
     nvs_commit_error = 0;
 
+    loader_cases();
     serializer_failures();
     puts("lot4 config: candidate failures/success, stable pointer, token auth/bounds/NVS/legacy rejection passed");
 }

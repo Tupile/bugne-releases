@@ -470,13 +470,26 @@ static int mp4_read_cb(int64_t offset, void *buffer, size_t size, void *token)
 #define AAC_MAX_BAD_FRAMES 10
 #define AAC_PCM_CAP_INIT 16384  // one AAC frame: 1024 (LC) or 2048 (HE) samples * 2ch * 2B
 
+// A run of this many empty samples ends the track. A sample the chunk
+// tables do not cover reads as 0 bytes after a full walk of those tables,
+// and that path never touches the byte source, so it never sees a stop: a
+// crafted file declaring millions of samples would pin the worker for
+// minutes with the alarm beep queued behind it.
+#define MP4_MAX_EMPTY_RUN 16
+
 // First sample of the MP4 track at or after target_ms; not_found when none is.
 static unsigned mp4_find_sample(const MP4D_demux_t *mp4, unsigned trk, uint32_t target_ms,
                                 uint32_t ts, unsigned not_found)
 {
+    unsigned empty = 0;
     for (unsigned k = 0; k < mp4->track[trk].sample_count; k++) {
-        unsigned fb, t, d;
+        unsigned fb = 0, t = 0, d = 0;
         MP4D_frame_offset(mp4, trk, k, &fb, &t, &d);
+        if (fb == 0) {
+            if (++empty >= MP4_MAX_EMPTY_RUN) break;
+            continue;
+        }
+        empty = 0;
         if ((uint64_t)t * 1000 / ts >= target_ms) return k;
     }
     return not_found;
@@ -541,6 +554,7 @@ static esp_err_t run_aac_mp4(const decode_source_t *src, uint32_t skip_ms)
     if (skip_ms > 0) {
         ns = mp4_find_sample(&mp4, trk, skip_ms, ts, tr->sample_count);
     }
+    unsigned empty = 0;
     for (; ns < tr->sample_count; ns++) {
         int32_t seek = s_seek_ms;
         s_seek_ms = -1;
@@ -550,7 +564,11 @@ static esp_err_t run_aac_mp4(const decode_source_t *src, uint32_t skip_ms)
         }
         unsigned fbytes = 0, tstamp = 0, dur = 0;
         MP4D_file_offset_t off = MP4D_frame_offset(&mp4, trk, ns, &fbytes, &tstamp, &dur);
-        if (fbytes == 0) continue;
+        if (fbytes == 0) {
+            if (++empty >= MP4_MAX_EMPTY_RUN) break;
+            continue;
+        }
+        empty = 0;
         // Same bound as mp4_read_cb: a sample past 2 GB would wrap negative in
         // the int cast below and fail every seek with an opaque stop.
         if (off > INT32_MAX) break;

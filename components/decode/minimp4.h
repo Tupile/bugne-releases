@@ -2561,12 +2561,21 @@ static void my_fseek(MP4D_demux_t *mp4, boxsize_t pos, int *eof_flag)
 */
 enum { MINIMP4_MAX_ALLOC_BYTES = 256u * 1024u * 1024u };
 
-static void *minimp4_bounded_malloc(size_t size)
+// Bugne: the size is uint64_t, NOT size_t. On the 32-bit target a size_t
+// parameter truncated the callers' 64-bit products before this check, so
+// a wrapped count passed it and the fill loop overran a tiny block (the
+// upstream fuzzing ran on a 64-bit host only).
+static void *minimp4_bounded_malloc(uint64_t size)
 {
     if (size > MINIMP4_MAX_ALLOC_BYTES)
         return NULL;
-    return malloc(size);
+    return malloc((size_t)size);
 }
+
+// Bugne: a table cannot hold more entries than the bytes left in its box.
+// Checked before any allocation or fill loop on a file-declared count.
+#define CHECK_COUNT(count, entry_bytes) \
+    if ((uint64_t)(count) * (entry_bytes) > (uint64_t)payload_bytes) { ERROR("table count exceeds its box"); }
 
 // A malformed file can carry the same table box (stsc, stco/co64, ...)
 // twice for one track; re-running a MALLOC for a field that's already
@@ -2869,6 +2878,14 @@ broken_android_meta_hack:
                 // minimp4_bounded_malloc's size check, allocating far
                 // fewer bytes than the loop below then writes -- a
                 // fuzzer-found heap-buffer-overflow.
+                if (box_name == BOX_stsz)
+                {
+                    if (!sample_size)
+                        CHECK_COUNT(tr->sample_count, 4);
+                } else if ((uint64_t)tr->sample_count * (sample_size & 0xFF) > (uint64_t)payload_bytes * 8)
+                {   // stz2: 4, 8 or 16 bits per entry
+                    ERROR("table count exceeds its box");
+                }
                 MALLOC(unsigned int*, tr->entry_size, (uint64_t)tr->sample_count*4);
                 for (i = 0; i < tr->sample_count; i++)
                 {
@@ -2906,7 +2923,8 @@ broken_android_meta_hack:
             if (!tr)
                 break;
             tr->sample_to_chunk_count = READ(4);
-            MALLOC(MP4D_sample_to_chunk_t*, tr->sample_to_chunk, tr->sample_to_chunk_count*sizeof(tr->sample_to_chunk[0]));
+            CHECK_COUNT(tr->sample_to_chunk_count, 12);
+            MALLOC(MP4D_sample_to_chunk_t*, tr->sample_to_chunk, (uint64_t)tr->sample_to_chunk_count*sizeof(tr->sample_to_chunk[0]));
             for (i = 0; i < tr->sample_to_chunk_count; i++)
             {
                 tr->sample_to_chunk[i].first_chunk = READ(4);
@@ -2928,6 +2946,7 @@ broken_android_meta_hack:
                 if (!tr)
                     break;
                 count = READ(4);
+                CHECK_COUNT(count, 8);
                 ts_capacity = count;
 #if MP4D_TIMESTAMPS_SUPPORTED
                 // (uint64_t) cast: same native-arithmetic-overflow gap as
@@ -2984,11 +3003,18 @@ broken_android_meta_hack:
                             ERROR("out of memory");
                         }
                         ts_capacity = (unsigned)new_capacity;
-                        tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_capacity * sizeof(unsigned));
-                        tr->duration  = (unsigned int*)realloc(tr->duration,  ts_capacity * sizeof(unsigned));
-                        if (!tr->timestamp || !tr->duration)
+                        // Bugne: grow through temporaries. A failed realloc
+                        // leaves the old block valid; assigning its NULL
+                        // straight to the field leaked that block.
                         {
-                            ERROR("out of memory");
+                            unsigned int *nt = (unsigned int*)realloc(tr->timestamp, ts_capacity * sizeof(unsigned));
+                            if (nt) tr->timestamp = nt;
+                            unsigned int *nd = (unsigned int*)realloc(tr->duration, ts_capacity * sizeof(unsigned));
+                            if (nd) tr->duration = nd;
+                            if (!nt || !nd)
+                            {
+                                ERROR("out of memory");
+                            }
                         }
                     }
                     for (j = 0; j < sc; j++)
@@ -3033,7 +3059,8 @@ broken_android_meta_hack:
             if (!tr)
                 break;
             tr->chunk_count = READ(4);
-            MALLOC(MP4D_file_offset_t*, tr->chunk_offset, tr->chunk_count*sizeof(MP4D_file_offset_t));
+            CHECK_COUNT(tr->chunk_count, box_name == BOX_co64 ? 8 : 4);
+            MALLOC(MP4D_file_offset_t*, tr->chunk_offset, (uint64_t)tr->chunk_count*sizeof(MP4D_file_offset_t));
             for (i = 0; i < tr->chunk_count; i++)
             {
                 tr->chunk_offset[i] = READ(4);

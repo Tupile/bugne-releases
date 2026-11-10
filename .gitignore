@@ -3,7 +3,8 @@ build/
 
 # Managed components fetched from the registry (resolved from idf_component.yml)
 managed_components/
-dependencies.lock
+# dependencies.lock IS tracked: idf_component.yml uses ^ ranges, the lock is
+# what makes a clean build resolve the exact versions that were validated.
 
 # Generated sdkconfig (sdkconfig.defaults is tracked instead)
 sdkconfig

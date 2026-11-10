@@ -34,6 +34,10 @@ static const char *TAG = "config_store";
 static config_t *s_cfg;
 #define s_config (*s_cfg)
 static bool s_ready;
+// True when s_config reflects config.json (parsed, or freshly written as
+// defaults). False when the file exists but could not be used and the device
+// runs on in-memory defaults: see config_store_loaded().
+static bool s_cfg_loaded;
 static SemaphoreHandle_t s_lock;
 
 static int clampi(int v, int lo, int hi)
@@ -569,10 +573,12 @@ no_mem:
 static esp_err_t load_config(void)
 {
     set_defaults(&s_config);
+    s_cfg_loaded = false;
 
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) {
         ESP_LOGW(TAG, "no config.json, writing defaults");
+        s_cfg_loaded = true;  // the defaults ARE the config now
         return save_to_disk(&s_config);
     }
 
@@ -582,6 +588,7 @@ static esp_err_t load_config(void)
     if (sz <= 0) {
         fclose(f);
         ESP_LOGE(TAG, "config.json is empty, writing defaults");
+        s_cfg_loaded = true;
         return save_to_disk(&s_config);
     }
     if (sz > CONFIG_FILE_MAX) {
@@ -616,6 +623,7 @@ static esp_err_t load_config(void)
 
     load_from_json(&s_config, root);
     cJSON_Delete(root);
+    s_cfg_loaded = true;
     ESP_LOGI(TAG, "config loaded: %u webradios, %u podcasts, %u favorites",
              (unsigned)s_config.webradio_count, (unsigned)s_config.podcast_count,
              (unsigned)s_config.favorite_count);
@@ -663,6 +671,11 @@ esp_err_t config_store_init(void)
     ESP_RETURN_ON_ERROR(load_config(), TAG, "config load failed");
     s_ready = true;
     return ESP_OK;
+}
+
+bool config_store_loaded(void)
+{
+    return s_cfg_loaded;
 }
 
 const config_t *config_store_get(void)

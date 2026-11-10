@@ -138,7 +138,12 @@ static void bg_init_task(void *arg)
     }
     TRY(source_sd_init());
     podcast_resume_init();
-    {
+    if (!config_store_loaded()) {
+        // Running on defaults over an unusable config.json: the podcast list
+        // in memory is not the user's, pruning against it would delete the
+        // manifests of every podcast they configured.
+        ESP_LOGW(TAG, "config.json not loaded, podcast manifest prune skipped");
+    } else {
         // Manifests of podcasts deleted before this boot (older firmware
         // never removed them). bg_init has an internal stack: flash writes OK.
         const config_t *c = config_store_get();

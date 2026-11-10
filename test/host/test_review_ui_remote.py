@@ -85,6 +85,10 @@ static void source_sendspin_artist(char *o, size_t n) { strlcpy(o, "SsArtist", n
 static void source_sendspin_progress(uint32_t *p, uint32_t *d) { *p = 1; *d = 2; }
 static void source_stream_title(char *o, size_t n) { strlcpy(o, "IcyNow", n); }
 static bool play_denied(void) { return denied; }
+enum { AUDIO_SOURCE_NONE, AUDIO_SOURCE_BEEP, AUDIO_SOURCE_TONE };
+static int arbiter_src;
+static int audio_arbiter_active(void) { return arbiter_src; }
+static volatile bool s_tone_stop;
 static bool audio_is_paused(void) { return paused; }
 static void audio_set_paused(bool p) { paused = p; }
 static bool audio_is_active(void) { return active; }
@@ -134,6 +138,16 @@ int main(void)
 
     // Toggle: pausing always works, resuming is refused while denied.
     paused = false; denied = true;
+    // A generated source is never paused (its loop would park in
+    // audio_write, deaf to its own Stop): the toggle stops a tone and leaves
+    // an alarm / timer beep alone.
+    paused = false; arbiter_src = AUDIO_SOURCE_TONE; s_tone_stop = false;
+    ui_remote_apply(UI_REMOTE_TOGGLE, 0);
+    assert(!paused && s_tone_stop);
+    arbiter_src = AUDIO_SOURCE_BEEP; s_tone_stop = false;
+    ui_remote_apply(UI_REMOTE_TOGGLE, 0);
+    assert(!paused && !s_tone_stop);
+    arbiter_src = AUDIO_SOURCE_NONE;
     ui_remote_apply(UI_REMOTE_TOGGLE, 0);
     assert(paused);
     ui_remote_apply(UI_REMOTE_TOGGLE, 0);

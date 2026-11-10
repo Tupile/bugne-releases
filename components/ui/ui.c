@@ -279,8 +279,9 @@ static char s_as_src_title[CFG_ALARM_SD_TITLE_MAX];
 // build_alarm_edit, read by its VALUE_CHANGED callback (same task).
 enum { AS_DD_FAV_RADIO, AS_DD_FAV_SD, AS_DD_SD, AS_DD_RADIO };
 #define AS_DD_MAX      (CFG_MAX_FAVORITES + 1 + CFG_MAX_WEBRADIOS)
-#define AS_DD_NAME_MAX 36  // name bytes after the icon; keeps the buffer under ~2 KB
-static char    s_as_dd_opts[AS_DD_MAX * (AS_DD_NAME_MAX + 5)];
+#define AS_DD_NAME_MAX 36  // name bytes after the icon
+#define AS_DD_OPTS_SIZE (AS_DD_MAX * (AS_DD_NAME_MAX + 5))  // ~2.3 KB: PSRAM, allocated in ui_start
+static char   *s_as_dd_opts;
 static uint8_t s_as_dd_kind[AS_DD_MAX];
 static int     s_as_dd_ref[AS_DD_MAX];
 static int     s_as_dd_n;
@@ -1380,7 +1381,19 @@ static bool beep_pattern_on(uint32_t t_ms)
 // the loop like the decoders, so no explicit delay and no watchdog concern.
 static void beep_run(void)
 {
-    if (audio_arbiter_acquire(AUDIO_SOURCE_BEEP) != ESP_OK) return;
+    // The source this beep takes over may release the arbiter a moment later
+    // (a Sendspin session ends only after the round trip to Music Assistant),
+    // so retry for a few seconds like tone_run: a single attempt left the
+    // timer's "time is up" screen silent.
+    bool acquired = false;
+    for (int i = 0; i < 80 && !s_beep_stop; i++) {
+        if (audio_arbiter_acquire(AUDIO_SOURCE_BEEP) == ESP_OK) { acquired = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!acquired) {
+        if (!s_beep_stop) ESP_LOGW(TAG, "beep: arbiter busy, giving up");
+        return;
+    }
     if (audio_open(BEEP_RATE, 16, 1) != ESP_OK) {
         audio_arbiter_release(AUDIO_SOURCE_BEEP);
         return;
@@ -2015,6 +2028,16 @@ static void toast(const char *text); // top-layer toast, defined after the scree
 // RULE: never inside ui_play or the alarm code, so the alarm stays exempt by
 // construction). Quiet hours first, then the daily usage limit. Toasts the
 // reason and returns true when the action must be refused.
+// A metronome, reference tone or beep is generated, not decoded: pausing it
+// parks its worker loop in audio_write, where its own Stop (a flag the loop
+// reads) can no longer end it. So these sources are never paused: every
+// pause entry point checks this first.
+static bool generated_source_active(void)
+{
+    audio_source_t a = audio_arbiter_active();
+    return a == AUDIO_SOURCE_TONE || a == AUDIO_SOURCE_BEEP;
+}
+
 static bool play_denied(void)
 {
     if (quiet_active()) { toast(T(STR_QUIET_HOURS)); return true; }
@@ -2115,6 +2138,7 @@ static void on_stop(lv_event_t *e)
 static void on_pause(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
+    if (generated_source_active()) return;
     bool paused = !audio_is_paused();
     audio_set_paused(paused);
     if (paused) {
@@ -2972,6 +2996,10 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
             if (source_sendspin_active()) source_sendspin_command(SENDSPIN_CMD_PAUSE);
             else if (play_denied()) break;
             else source_sendspin_command(SENDSPIN_CMD_PLAY);
+        } else if (audio_arbiter_active() == AUDIO_SOURCE_TONE) {
+            s_tone_stop = true;  // a tone cannot pause: the toggle stops it
+        } else if (audio_arbiter_active() == AUDIO_SOURCE_BEEP) {
+            // the alarm / timer beep is ended from its own screen
         } else {
             if (audio_is_paused()) {
                 if (play_denied()) break;
@@ -3883,7 +3911,10 @@ static void build_episodes(lv_obj_t *scr)
     s_ep_new_n = 0;
     char blanks[8] = "";
     if (podnew_on()) {
-        podnew_retain_cached(s_nav_podcast_id, s_episodes, s_ep_count);
+        // Only with the card mounted: without it every episode reads as not
+        // downloaded and the retain would drop (and persist the loss of)
+        // every marker. The UI is up before the boot-time SD mount.
+        if (source_sd_present()) podnew_retain_cached(s_nav_podcast_id, s_episodes, s_ep_count);
         if (podcast_new_count(s_nav_podcast_id) > 0) {
             free(s_ep_new);
             s_ep_new = heap_caps_calloc(s_ep_count, sizeof(bool), MALLOC_CAP_SPIRAM);
@@ -6680,7 +6711,7 @@ static void as_dd_add(int kind, int ref, const char *icon, const char *name)
     snprintf(label, sizeof(label), "%.*s", AS_DD_NAME_MAX, name);
     tags_utf8_trim_partial(label);
     size_t len = strlen(s_as_dd_opts);
-    snprintf(s_as_dd_opts + len, sizeof(s_as_dd_opts) - len, "%s%s %s",
+    snprintf(s_as_dd_opts + len, AS_DD_OPTS_SIZE - len, "%s%s %s",
              s_as_dd_n ? "\n" : "", icon, label);
     s_as_dd_kind[s_as_dd_n] = (uint8_t)kind;
     s_as_dd_ref[s_as_dd_n] = ref;
@@ -7434,6 +7465,7 @@ static void on_mini_pause(lv_event_t *e)
     if (source_sendspin_session_active()) {
         source_sendspin_command(source_sendspin_active() ? SENDSPIN_CMD_PAUSE : SENDSPIN_CMD_PLAY);
     } else {
+        if (generated_source_active()) return;
         bool paused = !audio_is_paused();
         audio_set_paused(paused);
         if (paused) {
@@ -7782,9 +7814,10 @@ static void build_timer(lv_obj_t *scr)
 static void timer_ring_end(void)
 {
     s_tmr_ringing = false;
-    if (s_alarm_state != ALARM_RINGING && audio_arbiter_active() == AUDIO_SOURCE_BEEP) {
-        s_beep_stop = true;
-    }
+    // No "is the beep already sounding" test: a Stop tapped before the worker
+    // reached beep_run must still cancel it, or the beep started afterwards
+    // with no ring screen and no 60 s cap.
+    if (s_alarm_state != ALARM_RINGING) s_beep_stop = true;
 }
 
 static void on_tmr_done_stop(lv_event_t *e)
@@ -7826,6 +7859,9 @@ static void timer_ring_start(void)
         return;
     }
     podcast_resume_save_current_position();  // the takeover ends a podcast like a stop
+    // Like alarm_fire: an armed sleep timer would fade this beep, then stop
+    // it at its deadline under a silent "time is up" screen.
+    sleep_clear();
     beep_takeover(T(STR_TIMER_DONE));
     s_tmr_ringing = true;
     s_tmr_ring_start_us = esp_timer_get_time();
@@ -8491,6 +8527,9 @@ static void tick_tone(void)
     bool drone = (s_active_builder == build_drone);
     bool own = (metro && s_tone_mode == TONE_METRO) || (drone && s_tone_mode == TONE_DRONE);
     if (s_tone_running && !own) s_tone_stop = true;
+    // Belt for the rule above generated_source_active(): never leave a
+    // generated source paused, whatever path paused it.
+    if (audio_is_paused() && generated_source_active()) audio_set_paused(false);
     if (!s_tone_btn) return;
     bool run = s_tone_running && own;
     lv_obj_t *icon = lv_obj_get_child(s_tone_btn, 0);
@@ -8595,7 +8634,10 @@ static void tick_memo_talkie(void)
         // rebuild) must not leave the worker parked in audio_write with the
         // file open: end the playback, like on_memo_play_back does.
         if (s_memo_playing && audio_is_paused() && s_active_builder != build_memo_play) {
-            s_memo_stop = true;
+            // On the talkie screen the message is ephemeral (deleted after
+            // playback): stopping it here would lose it unheard, so a pause
+            // from the external button or the web is just undone.
+            if (s_active_builder != build_talkie) s_memo_stop = true;
             audio_set_paused(false);
         }
         if (s_memo_play_btn && s_active_builder == build_memo_play) {
@@ -9403,7 +9445,8 @@ static void tick_parental_block(void)
         if ((int)blocked != s_block_applied) {
             bool first = (s_block_applied == -1);
             s_block_applied = (int)blocked;
-            if (blocked && !first && s_alarm_state == ALARM_IDLE && !s_alarm_beeping) {
+            if (blocked && !first && s_alarm_state == ALARM_IDLE && !s_alarm_beeping &&
+                !s_tmr_ringing) {  // the countdown ring is exempt, like the alarm
                 if (source_sendspin_session_active())
                     source_sendspin_command(SENDSPIN_CMD_STOP);
                 // Also stop a stream reconnect in progress (audio is inactive
@@ -9583,7 +9626,8 @@ esp_err_t ui_start(i2c_master_bus_handle_t i2c_bus)
     s_sd_names = heap_caps_calloc(SD_LIST_MAX, sizeof(*s_sd_names), MALLOC_CAP_SPIRAM);
     s_lib_names = heap_caps_calloc(LIB_DISP_MAX, sizeof(*s_lib_names), MALLOC_CAP_SPIRAM);
     s_lib_albumartists = heap_caps_calloc(LIB_DISP_MAX, sizeof(*s_lib_albumartists), MALLOC_CAP_SPIRAM);
-    ESP_RETURN_ON_FALSE(s_sd_names && s_lib_names && s_lib_albumartists,
+    s_as_dd_opts = heap_caps_calloc(1, AS_DD_OPTS_SIZE, MALLOC_CAP_SPIRAM);
+    ESP_RETURN_ON_FALSE(s_sd_names && s_lib_names && s_lib_albumartists && s_as_dd_opts,
                         ESP_ERR_NO_MEM, TAG, "browse tables alloc failed");
 
     // Resume any persisted background download job after a reboot. Set the idle

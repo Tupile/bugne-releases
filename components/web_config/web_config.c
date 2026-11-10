@@ -1242,6 +1242,9 @@ static esp_err_t memo_post(httpd_req_t *req)
     httpd_req_get_url_query_str(req, query, sizeof(query));
     httpd_query_key_value(query, "from", raw_from, sizeof(raw_from));
     httpd_query_key_value(query, "talkie", talkie_v, sizeof(talkie_v));
+    // The web page percent-encodes the name: decode it first, or "Père"
+    // was sanitized from its escapes into "P-C3-A8re".
+    url_decode(raw_from);
     memo_sanitize_sender(from, sizeof(from), raw_from);
     // A talkie message is ephemeral (auto-played then deleted) only when this
     // device is on the talkie screen right now; otherwise it falls back to a

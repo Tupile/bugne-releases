@@ -171,6 +171,13 @@ esp_err_t config_store_init(void);
 // config_store_init(). Never NULL after that.
 const config_t *config_store_get(void);
 
+// False when config.json exists but could not be used at boot (too large,
+// unparseable, unknown schema_version): the device then runs on in-memory
+// defaults and the file is kept. Anything that DELETES data based on the
+// config's lists (podcast manifest prune) must check this first, or it
+// would treat the default list as the user's.
+bool config_store_loaded(void);
+
 // Set the UI language ISO code and persist it (used by the on-device selector;
 // the web config sets it through the full-config save). Returns ESP_OK on success.
 esp_err_t config_store_set_lang(const char *code);

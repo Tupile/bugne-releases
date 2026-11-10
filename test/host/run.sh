@@ -116,6 +116,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_adts"
 
+echo "=== building minimp4 bounds host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/decode \
+    -o "$OUT/test_minimp4_bounds" \
+    test_minimp4_bounds.c
+
+echo "=== running ==="
+"$OUT/test_minimp4_bounds"
+
 echo "=== building epmeta host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ui/include \
@@ -405,3 +414,4 @@ echo "=== running web page tests ==="
 # handler, then drives the save/install handlers against a scripted fetch.
 node test_lot4_web_actions.js
 node test_web_voice.js
+node test_web_ids.js
