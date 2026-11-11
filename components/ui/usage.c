@@ -35,6 +35,12 @@ bool usage_tick(int date)
     return rolled;  // persist the reset promptly on a day change
 }
 
+void usage_reset(void)
+{
+    s_seconds = 0;
+    s_ticks_since_save = 0;
+}
+
 int usage_today(int date)
 {
     return (date > 0 && date == s_date) ? s_seconds : 0;

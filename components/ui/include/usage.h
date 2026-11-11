@@ -19,6 +19,10 @@ void usage_seed(int date, int seconds);
 // the reset lands promptly).
 bool usage_tick(int date);
 
+// Parent reset: put the tracked day's count back to 0. The day is kept, so
+// this is not a rollover. The caller persists the 0 itself.
+void usage_reset(void);
+
 // Seconds accumulated for `date`; 0 when `date` is not the tracked day (so a
 // query right after midnight reads 0 without waiting for the first tick).
 int usage_today(int date);

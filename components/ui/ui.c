@@ -215,6 +215,7 @@ static char s_nav_req[24];
 // sleep_timer_cb performs stats_reset() on the LVGL task, which owns both the
 // stats RAM and the stats file (no cross-task races).
 static volatile bool s_stats_reset_req;
+static volatile bool s_usage_reset_req;  // POST /api/usage/reset, applied by tick_usage_reset
 
 // Persistent now-playing mini bar on the top layer (survives screen changes),
 // shown while something plays and we are not on a full now-playing screen.
@@ -3216,6 +3217,13 @@ bool ui_podcast_refreshing(void)
 void ui_stats_reset(void)
 {
     s_stats_reset_req = true;
+}
+
+// Request a reset of today's usage counter (daily limit) from the web task.
+// Deferred to sleep_timer_cb: the LVGL task is the only writer of the counter.
+void ui_usage_reset(void)
+{
+    s_usage_reset_req = true;
 }
 
 void ui_set_ghota_check_fn(ui_ghota_check_fn_t fn)
@@ -8397,6 +8405,22 @@ static void tick_stats_reset(void)
     }
 }
 
+// Apply a pending reset of today's usage (POST /api/usage/reset). Runs on the
+// LVGL task, the only writer of the usage counter. The 0 is written to NVS at
+// once: waiting for the next periodic save would let a reboot bring the old
+// value back. The "5 minutes left" warning is re-armed for the day.
+static void tick_usage_reset(void)
+{
+    if (!s_usage_reset_req) return;
+    s_usage_reset_req = false;
+    usage_reset();
+    s_limit_warn_date = 0;
+    if (usage_date() > 0) {
+        config_saved(config_store_set_usage(usage_date(), 0));
+    }
+    ESP_LOGI(TAG, "daily limit: usage reset from the web");
+}
+
 // Apply a pending remote navigation request (POST /api/debug/nav).
 static void tick_nav_request(void)
 {
@@ -9859,6 +9883,7 @@ static void sleep_timer_cb(lv_timer_t *t)
 
     tick_screenshot();
     tick_stats_reset();
+    tick_usage_reset();  // before tick_1hz and tick_parental_block: the block lifts in this tick
     tick_nav_request();
     tick_download_scheduler();
     tick_apply_config();

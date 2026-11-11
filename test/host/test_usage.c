@@ -70,12 +70,30 @@ static void test_seed(void)
     CHECK_INT(usage_today(DAY2), 0, "negative seconds clamp to 0");
 }
 
+static void test_reset(void)
+{
+    // Parent reset (web page): today's count goes back to 0, the day is kept.
+    usage_seed(DAY2, 3000);
+    for (int i = 0; i < 59; i++) usage_tick(DAY2);  // one tick before a save
+    usage_reset();
+    CHECK_INT(usage_today(DAY2), 0, "reset clears today");
+    CHECK_INT(usage_date(), DAY2, "reset keeps the tracked day");
+    CHECK_INT(usage_tick(DAY2), false, "no rollover and save cadence restarted");
+    CHECK_INT(usage_today(DAY2), 1, "count restarts from 0");
+    int signals = 0;
+    for (int i = 0; i < 59; i++) {
+        if (usage_tick(DAY2)) signals++;
+    }
+    CHECK_INT(signals, 1, "next save 60 ticks after the reset");
+}
+
 int main(void)
 {
     test_invalid_date();
     test_accumulate_and_save_signal();
     test_rollover();
     test_seed();
+    test_reset();
 
     if (g_fail) {
         printf("%d FAILURE(S)\n", g_fail);

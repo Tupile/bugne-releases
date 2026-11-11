@@ -102,6 +102,10 @@ bool ui_podcast_refreshing(void);
 // task, which owns the stats RAM and file.
 void ui_stats_reset(void);
 
+// Request a reset of today's usage counter (parental daily limit). Safe from
+// any task: it only sets a flag, the UI task applies it.
+void ui_usage_reset(void);
+
 // Background download job state for the web page to poll.
 typedef enum {
     UI_DL_IDLE,         // no job

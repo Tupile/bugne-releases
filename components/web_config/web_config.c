@@ -491,6 +491,17 @@ static esp_err_t stats_reset_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Put today's usage counter (parental daily limit) back to 0. Applied on the
+// UI task, the only writer of the counter; this just requests it.
+static esp_err_t usage_reset_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_FAIL);
+    ui_usage_reset();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // Firmware update over Wi-Fi: stream the uploaded .bin into the inactive OTA
 // partition, then boot it. The body is the raw firmware image.
 // One OTA writer at a time. The local upload, the web GitHub install and the
@@ -1787,7 +1798,7 @@ esp_err_t web_config_start(void)
                                // class of bug as the Sendspin httpd fix). Stays
                                // internal RAM: these handlers write flash.
     cfg.max_open_sockets = 3;  // keep lwip sockets free for streaming + Sendspin
-    cfg.max_uri_handlers = 40; // default 8 is below our route count (registration
+    cfg.max_uri_handlers = 42; // default 8 is below our route count (registration
                                // past the limit fails silently, e.g. /api/playback).
                                // Keep a couple of spare slots above the table below.
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd start failed");
@@ -1829,6 +1840,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/debug/nav",  .method = HTTP_POST, .handler = debug_nav_post},
         {.uri = "/api/stats",       .method = HTTP_GET,  .handler = stats_get},
         {.uri = "/api/stats/reset", .method = HTTP_POST, .handler = stats_reset_post},
+        {.uri = "/api/usage/reset", .method = HTTP_POST, .handler = usage_reset_post},
         {.uri = "/api/status",      .method = HTTP_GET,  .handler = status_get},
         {.uri = "/api/reboot",      .method = HTTP_POST, .handler = reboot_post},
     };

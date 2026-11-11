@@ -177,7 +177,9 @@ alarm always rings and never consumes the quota. The child reads the counted
 time and the time left on the device, under Settings, then "Listening time".
 This file does not hold the counter. NVS holds it, in `use_day` and `use_sec`,
 written about once per minute of usage, so a power cut cannot reset it. The
-device counts and blocks nothing before the first SNTP sync. Like quiet hours,
+device counts and blocks nothing before the first SNTP sync. A parent puts the
+counter of the day back to 0 with the "Reset today's usage" button of the web
+page (`POST /api/usage/reset`); a block in progress then lifts. Like quiet hours,
 the web page is the only writer of this object.
 
 Favorites are up to 24 quick-play entries, behind a Favorites home tile. The

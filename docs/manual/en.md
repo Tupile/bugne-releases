@@ -397,7 +397,8 @@ Everything else is here:
   listening time and the time in the game. It warns the child 5 minutes before
   the limit, then refuses to play. The count survives a restart, and starts
   again at midnight. The child reads the time left on the device, under
-  Settings, then "Listening time".
+  Settings, then "Listening time". To give the full time back before
+  midnight, press "Reset today's usage" in this card.
 - Listening statistics: minutes per day and per source over the last week, and
   the most played titles. The data never leaves the device. You can erase it at
   any time.

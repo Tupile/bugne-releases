@@ -419,7 +419,8 @@ Tout le reste est ici :
   temps d'écoute et le temps passé dans le jeu. Il prévient l'enfant 5 minutes
   avant la limite, puis refuse de jouer. Le compteur survit à un redémarrage,
   et repart à minuit. L'enfant lit le temps qui lui reste sur l'appareil, dans
-  Réglages, puis « Temps d'écoute ».
+  Réglages, puis « Temps d'écoute ». Pour rendre tout le temps avant minuit,
+  appuyez sur « Réinitialiser le temps du jour » dans cette carte.
 - Statistiques d'écoute : minutes par jour et par source sur la dernière
   semaine, et les titres les plus écoutés. Les données ne quittent jamais
   l'appareil. Vous pouvez les remettre à zéro à tout moment.
