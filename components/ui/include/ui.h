@@ -37,6 +37,7 @@ typedef enum {
     UI_REMOTE_REDOWNLOAD_ALL,      // background job: re-download every episode of every podcast
     UI_REMOTE_CANCEL_DOWNLOAD,     // clear the download job (no auto-resume)
     UI_REMOTE_PLAY_PATH,           // play an SD path sent by the web page
+    UI_REMOTE_PLAY_PLAYLIST,       // play a playlist (name staged by ui_remote_play_playlist)
     UI_REMOTE_SLEEP,               // sleep timer: arg = minutes, 0 = off, -1 = end-of-track
     UI_REMOTE_SEEK,                // arg = target position in ms (seekable file only)
 } ui_remote_t;
@@ -49,6 +50,10 @@ void ui_remote(ui_remote_t cmd, int arg);
 // path is relative to the SD root, as returned by /api/library. title is the
 // display title (library tag); NULL or empty falls back to the file name.
 void ui_remote_play_path(const char *rel_path, const char *title);
+
+// Play the playlist `name` from the track at `index` (a position in the
+// playlist file). Flag only: applied on the UI task, parental gate included.
+void ui_remote_play_playlist(const char *name, int index);
 
 // ---- Remote debug helpers (web server) ----
 

@@ -32,6 +32,7 @@ prelude = r'''
 #include "ui.h"
 
 #define LIB_PATH_MAX 256
+#define PLAYLIST_NAME_MAX 49
 #define LV_ANIM_OFF 0
 enum { PLAY_CTX_NONE, PLAY_CTX_SD, PLAY_CTX_PODCAST };
 enum { REQ_REFRESH_ALL = 1 };
@@ -110,6 +111,14 @@ static void ui_play(bool sd, const char *path, const char *title, int x)
     strlcpy(played_title, title, sizeof(played_title));
 }
 static void req_post(play_req_t *r) { (void)r; }
+static int pl_started, pl_index;
+static char pl_name[64];
+static bool playlist_start(const char *name, int file_index)
+{
+    pl_started++; pl_index = file_index;
+    strlcpy(pl_name, name, sizeof(pl_name));
+    return true;
+}
 static void dljob_persist(void) { persisted++; }
 static void sleep_arm(int m) { sleep_armed = m; }
 static void sleep_label_refresh(void) {}
@@ -199,6 +208,17 @@ int main(void)
     assert(played == 0);
     denied = false;
 
+    // Play playlist: name and file index reach the snapshot builder, and the
+    // parental gate comes before it (it rewrites the playing list).
+    ui_remote_play_playlist("Rock", 3);
+    assert(s_remote_cmd == UI_REMOTE_PLAY_PLAYLIST && s_remote_arg == 3);
+    ui_remote_apply(UI_REMOTE_PLAY_PLAYLIST, s_remote_arg);
+    assert(pl_started == 1 && pl_index == 3 && strcmp(pl_name, "Rock") == 0);
+    denied = true;
+    ui_remote_apply(UI_REMOTE_PLAY_PLAYLIST, 3);
+    assert(pl_started == 1);
+    denied = false;
+
     // Download jobs: scope and force per command, a running worker is cancelled.
     ui_remote_apply(UI_REMOTE_REDOWNLOAD_PODCAST, 7);
     assert(s_dljob.active && !s_dljob.scope_all && s_dljob.force && s_dljob.pod_id == 7);
@@ -265,7 +285,7 @@ int main(void)
 '''
 
 body = "\n".join(function(name) for name in (
-    "ui_remote_apply", "ui_remote", "ui_remote_play_path", "ui_download_status", "ui_status"
+    "ui_remote_apply", "ui_remote", "ui_remote_play_path", "ui_remote_play_playlist", "ui_download_status", "ui_status"
 ))
 
 with tempfile.TemporaryDirectory(prefix="bugne-ui-remote-") as directory:

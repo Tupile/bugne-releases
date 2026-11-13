@@ -7,3 +7,5 @@ typedef int BaseType_t;
 #define pdFALSE 0
 
 #define pdPASS pdTRUE
+
+#define pdMS_TO_TICKS(ms) (ms)

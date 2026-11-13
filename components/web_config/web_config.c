@@ -40,6 +40,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "cJSON.h"
+#include "playlist.h"
 #include "mbedtls/base64.h"
 
 static const char *TAG = "web_config";
@@ -1423,6 +1424,17 @@ static esp_err_t playback_post(httpd_req_t *req)
                 ok = false;
             }
         }
+        else if (!strcmp(a, "playlist")) {
+            // value = playlist name, index = position in the playlist file.
+            // Parental gate, SD read and snapshot all happen on the UI task.
+            const cJSON *index = cJSON_GetObjectItemCaseSensitive(root, "index");
+            if (cJSON_IsString(value) && playlist_name_valid(value->valuestring)) {
+                ui_remote_play_playlist(value->valuestring,
+                                        cJSON_IsNumber(index) ? index->valueint : 0);
+            } else {
+                ok = false;
+            }
+        }
         else ok = false;
     }
     cJSON_Delete(root);
@@ -1624,6 +1636,174 @@ static esp_err_t library_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Playlists (components/playlist): one URI, GET and POST, because the handler
+// table is nearly full. The httpd task may wait for the playlist lock (the
+// device screens hold it for a few ms at most).
+#define PLAYLIST_BODY_MAX   (64 * 1024)  // 128 tracks of 255 + 63 bytes is about 45 KB
+#define PLAYLIST_WEB_WAIT_MS 5000
+
+static esp_err_t playlist_reply(httpd_req_t *req, const char *status, const char *msg, esp_err_t rv)
+{
+    httpd_resp_set_status(req, status);
+    httpd_resp_sendstr(req, msg);
+    return rv;
+}
+
+// Answer for a playlist_* result. rv is what the handler returns: ESP_FAIL
+// when a body was left unread.
+static esp_err_t playlist_result(httpd_req_t *req, esp_err_t err, esp_err_t rv)
+{
+    switch (err) {
+    case ESP_OK:
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":true}");
+    case ESP_ERR_INVALID_ARG:   return playlist_reply(req, "400 Bad Request", "invalid playlist", rv);
+    case ESP_ERR_NOT_FOUND:     return playlist_reply(req, "404 Not Found", "no such playlist", rv);
+    case ESP_ERR_NOT_ALLOWED:   return playlist_reply(req, "409 Conflict", "name already used", rv);
+    case ESP_ERR_NO_MEM:        return playlist_reply(req, "507 Insufficient Storage", "too many playlists", rv);
+    case ESP_ERR_INVALID_STATE: return playlist_reply(req, "503 Service Unavailable", "no SD card", rv);
+    case ESP_ERR_TIMEOUT:       return playlist_reply(req, "503 Service Unavailable", "busy, retry", rv);
+    default:                    return playlist_reply(req, "500 Internal Server Error", "write failed", rv);
+    }
+}
+
+// The name comes URL-encoded (up to 3 bytes per byte) and is validated after
+// decoding.
+#define PLAYLIST_QUERY_MAX (PLAYLIST_NAME_MAX * 3)
+
+// GET /api/playlist: {"playlists":[{"name"}]}.
+// GET /api/playlist?name=N: {"name","truncated","tracks":[{"title","path"}]}.
+static esp_err_t playlist_get(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_OK);
+    char name[PLAYLIST_QUERY_MAX];
+    query_param(req, "name", name, sizeof(name));
+    if (name[0] && !playlist_name_valid(name)) return playlist_result(req, ESP_ERR_INVALID_ARG, ESP_OK);
+
+    cJSON *o = cJSON_CreateObject();
+    if (!o) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    esp_err_t err;
+    if (!name[0]) {
+        char (*names)[PLAYLIST_NAME_MAX] = heap_caps_malloc(PLAYLIST_MAX_LISTS * PLAYLIST_NAME_MAX, MALLOC_CAP_SPIRAM);
+        cJSON *arr = cJSON_AddArrayToObject(o, "playlists");
+        size_t n = 0;
+        err = (names && arr) ? playlist_list(names, PLAYLIST_MAX_LISTS, &n, PLAYLIST_WEB_WAIT_MS) : ESP_FAIL;
+        for (size_t i = 0; err == ESP_OK && i < n; i++) {
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "name", names[i]);
+            cJSON_AddItemToArray(arr, e);
+        }
+        free(names);
+    } else {
+        char (*titles)[PLAYLIST_TITLE_MAX] = heap_caps_malloc(PLAYLIST_MAX_TRACKS * PLAYLIST_TITLE_MAX, MALLOC_CAP_SPIRAM);
+        char (*paths)[PLAYLIST_PATH_MAX] = heap_caps_malloc(PLAYLIST_MAX_TRACKS * PLAYLIST_PATH_MAX, MALLOC_CAP_SPIRAM);
+        cJSON *arr = cJSON_AddArrayToObject(o, "tracks");
+        size_t n = 0;
+        bool truncated = false;
+        err = (titles && paths && arr)
+            ? playlist_read(name, titles, paths, PLAYLIST_MAX_TRACKS, &n, &truncated, PLAYLIST_WEB_WAIT_MS)
+            : ESP_FAIL;
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddBoolToObject(o, "truncated", truncated);
+        for (size_t i = 0; err == ESP_OK && i < n; i++) {
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "title", titles[i]);
+            cJSON_AddStringToObject(e, "path", paths[i]);
+            cJSON_AddItemToArray(arr, e);
+        }
+        free(titles);
+        free(paths);
+    }
+    char *txt = (err == ESP_OK) ? cJSON_PrintUnformatted(o) : NULL;
+    cJSON_Delete(o);
+    if (err != ESP_OK) return playlist_result(req, err, ESP_OK);
+    if (!txt) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, txt);
+    cJSON_free(txt);
+    return ESP_OK;
+}
+
+// Fill the tables from the "tracks" array of a parsed body. Returns false on
+// anything unexpected: the whole request is refused, never half applied.
+static bool playlist_tracks_from_json(const cJSON *tracks, char (*titles)[PLAYLIST_TITLE_MAX],
+                                      char (*paths)[PLAYLIST_PATH_MAX], size_t *count)
+{
+    size_t n = 0;
+    const cJSON *t;
+    cJSON_ArrayForEach(t, tracks) {
+        const cJSON *path = cJSON_GetObjectItemCaseSensitive(t, "path");
+        const cJSON *title = cJSON_GetObjectItemCaseSensitive(t, "title");
+        if (n >= PLAYLIST_MAX_TRACKS || !cJSON_IsString(path) || !path->valuestring[0] ||
+            strlen(path->valuestring) >= PLAYLIST_PATH_MAX ||
+            !source_sd_rel_path_safe(path->valuestring) ||
+            !playlist_path_normalize(path->valuestring, paths[n], PLAYLIST_PATH_MAX)) {
+            return false;
+        }
+        // An over-long title is cut on a character boundary by the writer.
+        strlcpy(titles[n], cJSON_IsString(title) ? title->valuestring : "", PLAYLIST_TITLE_MAX);
+        n++;
+    }
+    *count = n;
+    return true;
+}
+
+// POST /api/playlist?name=N                      body {"tracks":[{"path","title"}]}: replace or create
+// POST /api/playlist?name=N&action=rename&to=M   no body
+// POST /api/playlist?name=N&action=delete        no body
+static esp_err_t playlist_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_FAIL);  // body not read yet
+    // Every reject before the body is read closes the connection (ESP_FAIL):
+    // httpd would otherwise drain the declared body on its single task.
+    if (req->content_len >= PLAYLIST_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "playlist too large");
+        return ESP_FAIL;
+    }
+    char name[PLAYLIST_QUERY_MAX], action[12], to[PLAYLIST_QUERY_MAX];
+    query_param(req, "name", name, sizeof(name));
+    query_param(req, "action", action, sizeof(action));
+    query_param(req, "to", to, sizeof(to));
+    if (!playlist_name_valid(name)) return playlist_result(req, ESP_ERR_INVALID_ARG, ESP_FAIL);
+
+    if (action[0]) {
+        esp_err_t rv = req->content_len ? ESP_FAIL : ESP_OK;  // a body here is never read
+        if (!strcmp(action, "delete")) return playlist_result(req, playlist_delete(name, PLAYLIST_WEB_WAIT_MS), rv);
+        if (!strcmp(action, "rename")) return playlist_result(req, playlist_rename(name, to, PLAYLIST_WEB_WAIT_MS), rv);
+        return playlist_result(req, ESP_ERR_INVALID_ARG, rv);
+    }
+    if (!source_sd_present()) return playlist_result(req, ESP_ERR_INVALID_STATE, ESP_FAIL);
+
+    char *body = heap_caps_malloc(req->content_len + 1, MALLOC_CAP_SPIRAM);
+    char (*titles)[PLAYLIST_TITLE_MAX] = heap_caps_malloc(PLAYLIST_MAX_TRACKS * PLAYLIST_TITLE_MAX, MALLOC_CAP_SPIRAM);
+    char (*paths)[PLAYLIST_PATH_MAX] = heap_caps_malloc(PLAYLIST_MAX_TRACKS * PLAYLIST_PATH_MAX, MALLOC_CAP_SPIRAM);
+    esp_err_t rv = ESP_FAIL;  // until the body is consumed
+    esp_err_t err = ESP_FAIL;
+    if (body && titles && paths && read_body(req, body, req->content_len + 1, NULL) == ESP_OK) {
+        rv = ESP_OK;
+        cJSON *root = cJSON_Parse(body);
+        const cJSON *tracks = root ? cJSON_GetObjectItemCaseSensitive(root, "tracks") : NULL;
+        size_t n = 0;
+        if (cJSON_IsArray(tracks) && playlist_tracks_from_json(tracks, titles, paths, &n)) {
+            err = playlist_write(name, titles, paths, n, PLAYLIST_WEB_WAIT_MS);
+        } else {
+            err = ESP_ERR_INVALID_ARG;
+        }
+        cJSON_Delete(root);
+    }
+    free(body);
+    free(titles);
+    free(paths);
+    if (err == ESP_OK) ESP_LOGI(TAG, "playlist \"%s\" saved", name);
+    return playlist_result(req, err, rv);
+}
+
 // GET /api/screenshot: the current on-device screen as a 16bpp BMP (BI_BITFIELDS,
 // top-down). Permanent debug aid so the UI can be verified remotely on the bench
 // (tools/screenshot.py fetches and converts it). Serialized by ui_screenshot.
@@ -1798,7 +1978,7 @@ esp_err_t web_config_start(void)
                                // class of bug as the Sendspin httpd fix). Stays
                                // internal RAM: these handlers write flash.
     cfg.max_open_sockets = 3;  // keep lwip sockets free for streaming + Sendspin
-    cfg.max_uri_handlers = 42; // default 8 is below our route count (registration
+    cfg.max_uri_handlers = 44; // default 8 is below our route count (registration
                                // past the limit fails silently, e.g. /api/playback).
                                // Keep a couple of spare slots above the table below.
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd start failed");
@@ -1829,6 +2009,8 @@ esp_err_t web_config_start(void)
         {.uri = "/api/sd/delete", .method = HTTP_POST, .handler = sd_delete_post},
         {.uri = "/api/memo",      .method = HTTP_POST, .handler = memo_post},
         {.uri = "/api/library",      .method = HTTP_GET,  .handler = library_get},
+        {.uri = "/api/playlist",     .method = HTTP_GET,  .handler = playlist_get},
+        {.uri = "/api/playlist",     .method = HTTP_POST, .handler = playlist_post},
         {.uri = "/api/library/scan", .method = HTTP_POST, .handler = library_scan_post},
         {.uri = "/api/podcasts/refresh", .method = HTTP_POST, .handler = podcasts_refresh_post},
         {.uri = "/api/podcasts/refresh", .method = HTTP_GET,  .handler = podcasts_refresh_get},

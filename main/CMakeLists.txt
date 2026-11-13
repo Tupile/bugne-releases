@@ -20,5 +20,6 @@ idf_component_register(
         podcast
         stats
         memo
+        playlist
         decode
 )

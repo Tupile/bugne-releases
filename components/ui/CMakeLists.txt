@@ -7,7 +7,7 @@ idf_component_register(
                   espressif__esp_lcd_ili9341 espressif__esp_lcd_touch_ft5x06
                   espressif__esp_lvgl_port lvgl__lvgl
                   espressif__esp_jpeg
-                  board net config_store source_sd source_stream source_sendspin podcast audio decode library stats tuner memo ha_client
+                  board net config_store source_sd source_stream source_sendspin podcast audio decode library stats tuner memo playlist ha_client
     WHOLE_ARCHIVE  # keep lv_mem_psram.c: LVGL (a dependency) calls lv_*_core but
                    # nothing here references them, so the linker would drop them.
 )

@@ -333,6 +333,32 @@ echo "=== running ==="
 "$OUT/test_tags"
 
 
+echo "=== building playlist_m3u host tests ==="
+# playlist_m3u.c has no ESP dependency; tags.c provides the UTF-8 trim. The
+# real source_sd.h comes first (path-guard parity), stubs/ gives esp_err.h.
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/playlist/include -I ../../components/decode/include \
+    -I ../../components/source_sd/include -I stubs \
+    -o "$OUT/test_playlist_m3u" \
+    test_playlist_m3u.c ../../components/playlist/playlist_m3u.c ../../components/decode/tags.c
+
+echo "=== running ==="
+"$OUT/test_playlist_m3u"
+
+echo "=== building playlist_store host tests ==="
+# playlist_store.c scans a real directory: PLAYLIST_ABS_DIR is redirected to
+# /tmp through the #ifndef seam in playlist.h. _DEFAULT_SOURCE: strcasecmp.
+gcc -std=c11 -Wall -Wextra -g -D_DEFAULT_SOURCE \
+    -DPLAYLIST_ABS_DIR='"/tmp/bugne-playlist-test"' \
+    -I stubs \
+    -I ../../components/playlist/include -I ../../components/decode/include \
+    -o "$OUT/test_playlist_store" \
+    test_playlist_store.c ../../components/playlist/playlist_store.c \
+    ../../components/playlist/playlist_m3u.c ../../components/decode/tags.c
+
+echo "=== running ==="
+"$OUT/test_playlist_store"
+
 echo "=== building library host tests ==="
 gcc -std=c11 -Wall -Wextra -g -D_DEFAULT_SOURCE \
     -DSD_MOUNT='"/tmp/bugne-lib-test"' \
@@ -409,6 +435,7 @@ for t in test_review_playback_worker.py \
          test_review_ui_save_feedback.py \
          test_review_ui_remote.py \
          test_review_web_body_rules.py \
+         test_review_playlist.py \
          test_review_web_config.py \
          test_review_net_task_faults.py \
          test_review_net.py \
@@ -425,3 +452,4 @@ echo "=== running web page tests ==="
 node test_lot4_web_actions.js
 node test_web_voice.js
 node test_web_ids.js
+node test_web_playlist.js

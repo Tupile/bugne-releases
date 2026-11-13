@@ -30,6 +30,7 @@
 #include "stats.h"
 #include "pitch.h"
 #include "memo.h"
+#include "playlist.h"
 #include "ha_client.h"
 #include "podcast_resume.h"
 #include <stdio.h>
@@ -390,7 +391,7 @@ static int s_play_index;  // index in s_sd_names / s_episodes of the playing ite
 static volatile bool s_advance;  // a track ended on its own: UI task moves to the next item
 static volatile int s_remote_cmd = -1;  // pending web command (ui_remote_t), -1 = none
 static volatile int s_remote_arg;
-static char s_remote_path[LIB_PATH_MAX];   // pending UI_REMOTE_PLAY_PATH argument
+static char s_remote_path[LIB_PATH_MAX];   // pending UI_REMOTE_PLAY_PATH argument (or the playlist name)
 static char s_remote_title[LIB_NAME_MAX];  // its display title ("" = use file name)
 
 // Navigation data buffers (single screen shown at a time).
@@ -3055,6 +3056,8 @@ static void on_prev(lv_event_t *e) { (void)e; play_ctx_at(s_play_index - 1); }
 // ---- Remote control from the web server ----
 // ui_remote() just records the command; this runs it on the UI task (called from
 // sleep_timer_cb) so it reuses the same playback paths as the on-screen buttons.
+static bool playlist_start(const char *name, int file_index);  // playlists section
+
 static void ui_remote_apply(ui_remote_t cmd, int arg)
 {
     bool ss = source_sendspin_session_active();
@@ -3165,6 +3168,17 @@ static void ui_remote_apply(ui_remote_t cmd, int arg)
         show(build_now_playing);
         break;
     }
+    case UI_REMOTE_PLAY_PLAYLIST:
+        // The gate comes first: playlist_start rewrites the playing snapshot.
+        if (play_denied()) break;
+        if (s_remote_path[0]) {
+            // A copy: the httpd task may stage the next command into
+            // s_remote_path while this one reads the card.
+            char name[PLAYLIST_NAME_MAX];
+            strlcpy(name, s_remote_path, sizeof(name));
+            playlist_start(name, arg);
+        }
+        break;
     case UI_REMOTE_SLEEP: {
         // Accept arbitrary 1..180 minute values (the web select only offers the
         // fixed steps, but this lets a short bench test use e.g. 1 minute).
@@ -3205,6 +3219,13 @@ void ui_remote_play_path(const char *rel_path, const char *title)
     strlcpy(s_remote_title, title ? title : "", sizeof(s_remote_title));
     s_remote_arg = 0;
     s_remote_cmd = (int)UI_REMOTE_PLAY_PATH;
+}
+
+void ui_remote_play_playlist(const char *name, int index)
+{
+    strlcpy(s_remote_path, name, sizeof(s_remote_path));
+    s_remote_arg = index;
+    s_remote_cmd = (int)UI_REMOTE_PLAY_PLAYLIST;
 }
 
 bool ui_podcast_refreshing(void)
@@ -3562,6 +3583,7 @@ static void on_sd_dir(lv_event_t *e)
 }
 
 static void on_sd_up(lv_event_t *e) { (void)e; sd_dir_pop(); show(build_sd); }
+static void on_open_playlists(lv_event_t *e);  // playlists section, below the library
 
 static void build_sd(lv_obj_t *scr)
 {
@@ -3591,10 +3613,15 @@ static void build_sd(lv_obj_t *scr)
     if (s_sd_dir[0]) {  // a way back to the parent folder
         lv_obj_t *up = list_add_row(list, LV_SYMBOL_LEFT, "..");
         lv_obj_add_event_cb(up, on_sd_up, LV_EVENT_CLICKED, NULL);
+    } else {            // the root is the entry to the playlists
+        lv_obj_t *pl = list_add_row(list, LV_SYMBOL_LIST, T(STR_PLAYLISTS));
+        lv_obj_add_event_cb(pl, on_open_playlists, LV_EVENT_CLICKED, NULL);
     }
     // Folders first (tap to enter).
     for (size_t i = 0; i < s_sd_entry_count; i++) {
         if (!s_sd_entries[i].is_dir) continue;
+        // The playlists folder holds no playable file: the row above is its entry.
+        if (!s_sd_dir[0] && strcasecmp(s_sd_entries[i].name, PLAYLIST_DIR) == 0) continue;
         lv_obj_t *btn = list_add_row(list, LV_SYMBOL_DIRECTORY, s_sd_entries[i].name);
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, on_sd_dir, LV_EVENT_CLICKED, NULL);
@@ -3798,6 +3825,210 @@ static void build_library_tracks(lv_obj_t *scr)
         lv_obj_add_event_cb(btn, on_lib_track, LV_EVENT_CLICKED, NULL);
     }
     list_titles_static(list);
+}
+
+// Playlists ---------------------------------------------------------------
+// One .m3u file per playlist on the SD card (components/playlist). Lot 1: the
+// device only plays them, the web page creates and edits them. Playback
+// reuses the library context: a playlist is a list of titles and paths, which
+// is exactly what s_play_lib_* and PLAY_CTX_LIBRARY already handle (next,
+// previous, auto-advance, end of list, statistics, /api/playback).
+
+#define PLAYLIST_UI_WAIT_MS 250  // LVGL task: never wait long behind a web write
+
+static char   s_pl_names[PLAYLIST_MAX_LISTS][PLAYLIST_NAME_MAX];  // playlists screen rows
+static size_t s_pl_count;
+static char   s_pl_name[PLAYLIST_NAME_MAX];        // playlist shown by the tracks screen
+static size_t s_pl_track_count;                    // rows of the tracks screen
+static uint8_t s_pl_avail[(LIB_DISP_MAX + 7) / 8]; // bit i: the file of row i exists
+
+static void build_playlists(lv_obj_t *scr);
+static void build_playlist_tracks(lv_obj_t *scr);
+
+static bool playlist_file_present(const char *rel)
+{
+    char path[16 + LIB_PATH_MAX];
+    struct stat st;
+    snprintf(path, sizeof(path), "/sdcard/%s", rel);
+    return stat(path, &st) == 0;
+}
+
+// The playing snapshot (s_play_lib_*) now holds `count` playlist tracks: make
+// it the playing list and start at `start`. The one place where a playlist
+// becomes the play context, for the row tap and for the web action.
+static void playlist_play(size_t count, int start)
+{
+    s_play_lib_count = count;
+    s_play_ctx = PLAY_CTX_LIBRARY;
+    play_ctx_at(start);
+}
+
+// Web play action: make the playlist the playing list and start it at
+// file_index (a position in the FILE). Missing files are left out of the
+// snapshot, so next, previous and auto-advance never land on one. LVGL task
+// only. Returns false when nothing was started (unknown playlist, or the
+// track at file_index is missing).
+//
+// The playlist is read straight into the playing snapshot: there is no third
+// table, and the library screen's display tables must not be clobbered by a
+// web action. Cost: when nothing can be started while a library album is
+// playing, that album's snapshot is already gone, so it is emptied (its
+// current track goes on, next and previous become no-ops).
+static bool playlist_start(const char *name, int file_index)
+{
+    if (!lib_alloc()) return false;
+    size_t n = 0;
+    if (playlist_read(name, s_play_lib_titles, s_play_lib_paths, LIB_DISP_MAX, &n, NULL,
+                      PLAYLIST_UI_WAIT_MS) != ESP_OK) {
+        n = 0;
+    }
+    int start = -1;
+    size_t kept = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!playlist_file_present(s_play_lib_paths[i])) continue;
+        if ((int)i == file_index) start = (int)kept;
+        if (kept != i) {
+            memcpy(s_play_lib_titles[kept], s_play_lib_titles[i], LIB_NAME_MAX);
+            memcpy(s_play_lib_paths[kept], s_play_lib_paths[i], LIB_PATH_MAX);
+        }
+        kept++;
+    }
+    if (start < 0) {
+        // Only when rows were really overwritten (n > 0): a failed read left
+        // the album's snapshot intact.
+        if (n > 0 && s_play_ctx == PLAY_CTX_LIBRARY) s_play_lib_count = 0;
+        ESP_LOGW(TAG, "playlist: nothing to start at index %d (%u of %u files present)",
+                 file_index, (unsigned)kept, (unsigned)n);
+        return false;
+    }
+    playlist_play(kept, start);
+    return true;
+}
+
+static bool playlist_row_present(size_t i)
+{
+    return (s_pl_avail[i / 8] & (1u << (i % 8))) != 0;
+}
+
+// Row tap: parental gate first, at the user entry point (GATE PLACEMENT RULE).
+// The snapshot is built from what the screen shows (its tables and its
+// availability map): the tapped row is the track that plays even if the web
+// page changed the file since, and the tap does no SD access.
+static void on_playlist_track(lv_event_t *e)
+{
+    if (play_denied()) return;
+    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (i < 0 || (size_t)i >= s_pl_track_count || !lib_alloc()) return;
+    if (!playlist_row_present((size_t)i)) {
+        toast(T(STR_FAV_MISSING));
+        return;
+    }
+    int start = 0;
+    size_t kept = 0;
+    for (size_t r = 0; r < s_pl_track_count; r++) {
+        if (!playlist_row_present(r)) continue;
+        if ((int)r == i) start = (int)kept;
+        memcpy(s_play_lib_titles[kept], s_lib_titles[r], LIB_NAME_MAX);
+        memcpy(s_play_lib_paths[kept], s_lib_paths[r], LIB_PATH_MAX);
+        kept++;
+    }
+    playlist_play(kept, start);
+}
+
+static void on_playlist(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (i < 0 || (size_t)i >= s_pl_count) return;
+    strlcpy(s_pl_name, s_pl_names[i], sizeof(s_pl_name));
+    show(build_playlist_tracks);
+}
+
+static void on_open_playlists(lv_event_t *e) { (void)e; show(build_playlists); }
+static void on_pl_back_sd(lv_event_t *e)     { (void)e; show(build_sd); }
+static void on_pl_back_lists(lv_event_t *e)  { (void)e; show(build_playlists); }
+
+static void build_playlists(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_pl_back_sd);
+    add_title_wide(scr, T(STR_PLAYLISTS));
+    if (!source_sd_present()) {
+        lv_obj_t *l = lv_label_create(scr);
+        lv_label_set_text(l, T(STR_NO_SD));
+        lv_obj_center(l);
+        return;
+    }
+    s_pl_count = 0;
+    esp_err_t err = playlist_list(s_pl_names, PLAYLIST_MAX_LISTS, &s_pl_count, PLAYLIST_UI_WAIT_MS);
+    if (err != ESP_OK) ESP_LOGW(TAG, "playlist: list failed (%s)", esp_err_to_name(err));
+    if (s_pl_count == 0) {
+        empty_state_label(scr, STR_NO_PLAYLISTS);
+        return;
+    }
+    lv_obj_t *list = list_create(scr);
+    lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
+    lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);
+    lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+    for (size_t i = 0; i < s_pl_count; i++) {
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_LIST, s_pl_names[i]);
+        lv_obj_set_user_data(btn, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn, on_playlist, LV_EVENT_CLICKED, NULL);
+    }
+    list_titles_static(list);
+}
+
+// The rows are read into the library screen's display tables: the library
+// screens refill them on every build, so sharing costs nothing.
+static void build_playlist_tracks(lv_obj_t *scr)
+{
+    add_back_cb(scr, on_pl_back_lists);
+    add_title_wide(scr, s_pl_name);
+    s_pl_track_count = 0;
+    if (!source_sd_present()) {
+        lv_obj_t *l = lv_label_create(scr);
+        lv_label_set_text(l, T(STR_NO_SD));
+        lv_obj_center(l);
+        return;
+    }
+    if (!lib_alloc()) return;
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t err = playlist_read(s_pl_name, s_lib_titles, s_lib_paths, LIB_DISP_MAX,
+                                  &s_pl_track_count, NULL, PLAYLIST_UI_WAIT_MS);
+    if (err != ESP_OK) ESP_LOGW(TAG, "playlist: read failed (%s)", esp_err_to_name(err));
+    int64_t t_read = esp_timer_get_time() - t0, t_stat = 0;
+    if (s_pl_track_count == 0) {
+        empty_state_label(scr, STR_EMPTY_FOLDER);
+        return;
+    }
+    lv_obj_t *list = list_create(scr);
+    lv_obj_set_size(list, scr_w(), scr_h() - 56);  // below the 44 px round back button (8+44)
+    lv_obj_set_style_pad_bottom(list, MINI_CLEAR, 0);
+    lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
+    memset(s_pl_avail, 0, sizeof(s_pl_avail));
+    unsigned missing = 0;
+    for (size_t i = 0; i < s_pl_track_count; i++) {
+        lv_obj_t *btn = list_add_row(list, LV_SYMBOL_FILE, s_lib_titles[i]);
+        lv_obj_set_user_data(btn, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn, on_playlist_track, LV_EVENT_CLICKED, NULL);
+        // One stat() per row, on the LVGL task: accepted because the list is
+        // capped at LIB_DISP_MAX, and measured by the log line below. A missing
+        // row stays tappable so the tap can say why (toast).
+        int64_t ts = esp_timer_get_time();
+        bool present = playlist_file_present(s_lib_paths[i]);
+        t_stat += esp_timer_get_time() - ts;
+        if (present) {
+            s_pl_avail[i / 8] |= (uint8_t)(1u << (i % 8));
+        } else {
+            missing++;
+            lv_obj_t *lbl = lv_obj_get_child(btn, -1);  // label is last child
+            if (lbl) muted(lbl);
+        }
+    }
+    list_titles_static(list);
+    // The split tells what the time is spent on: the file read, the stat()
+    // calls, or (the rest) building the rows.
+    ESP_LOGI(TAG, "playlist: %u tracks, %u missing, %d ms (read %d, stat %d)",
+             (unsigned)s_pl_track_count, missing, (int)((esp_timer_get_time() - t0) / 1000),
+             (int)(t_read / 1000), (int)(t_stat / 1000));
 }
 
 static void on_open_library(lv_event_t *e) { (void)e; show(build_library); }
@@ -8256,6 +8487,8 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "library",           build_library },
     { "library_artists",   build_library_artists },
     { "library_albums",    build_library_albums },
+    { "playlists",         build_playlists },
+    { "playlist_tracks",   build_playlist_tracks },  // the first playlist, see tick_nav_request
     { "game",              build_game_setup },
     { "game_play",         build_game },
     { "tuner",             build_tuner },
@@ -8441,6 +8674,14 @@ static void tick_nav_request(void)
         }
         if (strcmp(name, "memo_play") == 0) {
             memo_open_row(0);
+            return;
+        }
+        if (strcmp(name, "playlist_tracks") == 0) {
+            // No touch injection: open the first playlist (name order).
+            s_pl_count = 0;
+            playlist_list(s_pl_names, PLAYLIST_MAX_LISTS, &s_pl_count, PLAYLIST_UI_WAIT_MS);
+            strlcpy(s_pl_name, s_pl_count ? s_pl_names[0] : "", sizeof(s_pl_name));
+            show(build_playlist_tracks);
             return;
         }
         // "memo_send_self": send an uploaded memos/.rec.wav to this device over
