@@ -291,6 +291,7 @@ network. A parent can switch it off.
 | `/api/stats` | GET | Read the listening statistics |
 | `/api/stats/reset` | POST | Erase the listening statistics |
 | `/api/usage/reset` | POST | Put today's usage counter (daily limit) back to 0 |
+| `/api/agenda` | POST | Agenda and weather text for the agenda screen, pushed by the Home Assistant integration |
 | `/api/status` | GET | Snapshot: id, name, version, uptime, free RAM, RSSI, IP, SD card usage, reset reason, crash flag |
 | `/api/logs` | GET | Read the recent log lines |
 | `/api/coredump` | GET | Read the crash report |

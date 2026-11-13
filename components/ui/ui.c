@@ -26,6 +26,7 @@
 #include "tone.h"
 #include "updcheck.h"
 #include "chrono.h"
+#include "agenda.h"
 #include "alarm_next.h"
 #include "stats.h"
 #include "pitch.h"
@@ -254,6 +255,23 @@ static lv_obj_t *s_np_vol;      // volume slider on the current screen (NULL if 
 static lv_obj_t *s_sleep_lbl;   // sleep timer remaining-time label, shared like s_np_vol
 static lv_obj_t *s_ep_msg;      // episodes-screen status line (refresh errors/hints)
 static lv_obj_t *s_home_clock;  // home screen wall-clock label (NULL if not built, or net offline)
+// Agenda + weather pushed by Home Assistant (agenda.h). RAM only: the
+// integration pushes again after a reboot. s_agenda and its companions are
+// LVGL-task-only; the httpd task writes s_agenda_pending under the mux and
+// only READS s_agenda_fresh.
+static lv_obj_t *s_home_card;   // clickable card around the clock when the agenda is fresh, else NULL
+static agenda_t s_agenda;
+static bool s_agenda_have;      // s_agenda holds something to show
+static int64_t s_agenda_rx_s;   // monotonic seconds of the last push
+static volatile bool s_agenda_fresh;
+static agenda_t s_agenda_pending;
+static bool s_agenda_pending_set;
+static portMUX_TYPE s_agenda_mux = portMUX_INITIALIZER_UNLOCKED;
+static void on_open_agenda(lv_event_t *e);
+// Which now-playing source owns the mini bar (np_current is defined with the
+// mini bar; declared here because build_agenda needs it earlier in the file).
+typedef enum { NP_NONE, NP_LOCAL, NP_SENDSPIN } np_source_t;
+static np_source_t np_current(void);
 static char s_meta_title[64];   // tag title of the playing SD file (empty if none yet)
 
 // build_alarm_ringing: big clock label, refreshed by the 1 Hz tick in sleep_timer_cb.
@@ -2023,6 +2041,7 @@ static void show(screen_builder_t builder)
     s_sleep_lbl = NULL;  // same for the sleep timer label
     s_ep_msg = NULL;  // same for the episodes status line (rebuilt by its builder)
     s_home_clock = NULL;  // same for the home clock label (rebuilt by build_home)
+    s_home_card = NULL;
     s_alarm_time_lbl = NULL;  // same for the alarm-ringing big clock label
     s_alarm_src_lbl = NULL;   // and its muted source line
     s_as_switch = NULL;       // same for the alarm settings widgets
@@ -3245,6 +3264,22 @@ void ui_stats_reset(void)
 void ui_usage_reset(void)
 {
     s_usage_reset_req = true;
+}
+
+// Hand agenda data over from the web task. tick_agenda takes it on the LVGL
+// task; a second push before that tick simply replaces the first.
+void ui_agenda_set(const agenda_t *agenda)
+{
+    if (!agenda) return;
+    portENTER_CRITICAL(&s_agenda_mux);
+    s_agenda_pending = *agenda;
+    s_agenda_pending_set = true;
+    portEXIT_CRITICAL(&s_agenda_mux);
+}
+
+bool ui_agenda_fresh(void)
+{
+    return s_agenda_fresh;
 }
 
 void ui_set_ghota_check_fn(ui_ghota_check_fn_t fn)
@@ -6523,10 +6558,58 @@ static void build_home(lv_obj_t *scr)
         // are mutually exclusive: this is only built once connected). Created
         // hidden; the 1 Hz tick in sleep_timer_cb sets its text and shows it
         // once a wall time is available and nothing is playing.
-        s_home_clock = lv_label_create(scr);
-        lv_obj_set_style_text_font(s_home_clock, &bugne_font_20, 0);
-        lv_obj_align(s_home_clock, LV_ALIGN_BOTTOM_MID, 0, -(MINI_BAR_GAP + 12));
-        lv_obj_set_hidden(s_home_clock, true);
+        // With fresh agenda data the clock sits in a clickable card with the
+        // current weather (icon, time, temperature); a tap opens the agenda
+        // screen. The card is 36 px high so it clears the snooze reminder
+        // above it; the extended click area makes the tap target 44 px.
+        if (s_agenda_fresh) {
+            lv_obj_t *card = lv_button_create(scr);
+            lv_obj_add_style(card, &s_round_surface, 0);
+            lv_obj_add_style(card, &s_round_surface_pr, LV_STATE_PRESSED);
+            lv_obj_set_size(card, LV_SIZE_CONTENT, 36);
+            lv_obj_set_style_pad_hor(card, 14, 0);
+            lv_obj_set_style_pad_ver(card, 0, 0);
+            lv_obj_set_style_pad_column(card, 8, 0);
+            lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                                  LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_ext_click_area(card, 4);
+            lv_obj_align(card, LV_ALIGN_BOTTOM_MID, 0, -MINI_BAR_GAP);
+            lv_obj_add_event_cb(card, on_open_agenda, LV_EVENT_CLICKED, NULL);
+            // Time on the left, weather (icon + temperature) grouped on the
+            // right, a hairline between the two: with the temperature right
+            // after the time the two numbers read as one.
+            s_home_clock = lv_label_create(card);
+            lv_obj_set_style_text_font(s_home_clock, &bugne_font_20, 0);
+            lv_label_set_text(s_home_clock, "");
+            const char *glyph = agenda_cond_icon(s_agenda.cond);
+            if (glyph || s_agenda.temp[0]) {
+                lv_obj_t *sep = lv_obj_create(card);
+                lv_obj_remove_style_all(sep);
+                lv_obj_set_size(sep, 2, 18);
+                lv_obj_set_style_bg_color(sep, col_muted(), 0);
+                lv_obj_set_style_bg_opa(sep, LV_OPA_50, 0);
+                lv_obj_set_style_radius(sep, 1, 0);
+                lv_obj_set_style_margin_hor(sep, 4, 0);
+            }
+            if (glyph) {
+                lv_obj_t *ic = lv_label_create(card);
+                lv_obj_set_style_text_font(ic, &bugne_icons_20, 0);
+                lv_label_set_text(ic, glyph);
+            }
+            if (s_agenda.temp[0]) {
+                lv_obj_t *tl = lv_label_create(card);
+                lv_obj_set_style_text_font(tl, &bugne_font_20, 0);
+                lv_label_set_text(tl, s_agenda.temp);
+            }
+            lv_obj_set_hidden(card, true);
+            s_home_card = card;
+        } else {
+            s_home_clock = lv_label_create(scr);
+            lv_obj_set_style_text_font(s_home_clock, &bugne_font_20, 0);
+            lv_obj_align(s_home_clock, LV_ALIGN_BOTTOM_MID, 0, -(MINI_BAR_GAP + 12));
+            lv_obj_set_hidden(s_home_clock, true);
+        }
     }
 
     // When the alarm is snoozed, a muted reminder sits just above the clock.
@@ -6846,6 +6929,134 @@ static void on_open_usage(lv_event_t *e)
 {
     (void)e;
     show(build_settings_usage);
+}
+
+// Agenda + weather (data pushed by Home Assistant, see agenda.h) ------------
+
+// A bare layout box: no background, border or padding of its own.
+static lv_obj_t *agenda_box(lv_obj_t *parent, lv_flex_flow_t flow)
+{
+    lv_obj_t *b = lv_obj_create(parent);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_flex_flow(b, flow);
+    lv_obj_set_flex_align(b, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    return b;
+}
+
+// Read-only and silent, so it is not gated by quiet hours or the daily limit
+// (like the listening-time screen). Every string comes ready to display from
+// Home Assistant; only the weather pictogram is chosen here. tick_agenda
+// rebuilds the screen on a new push and leaves it when the data goes stale.
+static void build_agenda(lv_obj_t *scr)
+{
+    add_back_button(scr);
+    add_title_wide(scr, T(STR_AGENDA));
+    const bool ls = scr_w() > scr_h();
+    const agenda_t *a = &s_agenda;
+    const bool show_data = s_agenda_fresh;
+    const int top = 60;
+    int ev_x = PAD_SIDE, ev_y = top;
+
+    if (show_data && (a->temp[0] || a->cond[0])) {
+        lv_obj_t *wx = agenda_box(scr, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(wx, 4, 0);
+        lv_obj_set_scrollable(wx, false);
+
+        lv_obj_t *now = agenda_box(wx, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(now, 8, 0);
+        const char *glyph = agenda_cond_icon(a->cond);
+        if (glyph) {
+            lv_obj_t *ic = lv_label_create(now);
+            lv_obj_set_style_text_font(ic, &bugne_icons_28, 0);
+            lv_label_set_text(ic, glyph);
+        }
+        if (a->temp[0]) {
+            lv_obj_t *tl = lv_label_create(now);
+            lv_obj_set_style_text_font(tl, &bugne_font_20, 0);
+            lv_label_set_text(tl, a->temp);
+        }
+        if (a->rain) {  // rain forecast within the hour
+            lv_obj_t *dr = lv_label_create(now);
+            lv_obj_set_style_text_font(dr, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_color(dr, lv_palette_main(LV_PALETTE_BLUE), 0);
+            lv_label_set_text(dr, LV_SYMBOL_TINT);
+        }
+
+        // Minimum and maximum of the day: one line in portrait, two in the
+        // narrow landscape column.
+        char buf[2 * AGENDA_TEMP_MAX + 16];
+        if (ls) {
+            if (a->tmax[0]) {
+                snprintf(buf, sizeof(buf), LV_SYMBOL_UP " %.15s", a->tmax);
+                lv_obj_t *l = lv_label_create(wx);
+                lv_label_set_text(l, buf);
+                muted(l);
+            }
+            if (a->tmin[0]) {
+                snprintf(buf, sizeof(buf), LV_SYMBOL_DOWN " %.15s", a->tmin);
+                lv_obj_t *l = lv_label_create(wx);
+                lv_label_set_text(l, buf);
+                muted(l);
+            }
+        } else if (a->tmin[0] || a->tmax[0]) {
+            int n = 0;
+            buf[0] = '\0';
+            if (a->tmin[0]) n = snprintf(buf, sizeof(buf), LV_SYMBOL_DOWN " %.15s", a->tmin);
+            if (a->tmax[0]) {
+                snprintf(buf + n, sizeof(buf) - n, "%s" LV_SYMBOL_UP " %.15s", n ? "   " : "", a->tmax);
+            }
+            lv_obj_t *l = lv_label_create(wx);
+            lv_label_set_text(l, buf);
+            muted(l);
+        }
+
+        if (ls) {
+            const int col = 116;  // weather column on the left, events on the right
+            lv_obj_set_width(wx, col);
+            lv_obj_align(wx, LV_ALIGN_TOP_LEFT, PAD_SIDE, top + 8);
+            ev_x = PAD_SIDE + col + 8;
+        } else {
+            lv_obj_set_width(wx, scr_w() - 2 * PAD_SIDE);
+            lv_obj_align(wx, LV_ALIGN_TOP_MID, 0, top);
+            ev_y = top + 66;
+        }
+    }
+
+    // Events: "when" in muted text, "what" under it. The box scrolls if three
+    // long titles do not fit. It stays above the mini bar when something plays.
+    const int bottom = (np_current() == NP_NONE) ? 8 : MINI_CLEAR;
+    lv_obj_t *ev = lv_obj_create(scr);
+    lv_obj_remove_style_all(ev);
+    lv_obj_set_flex_flow(ev, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_pos(ev, ev_x, ev_y);
+    lv_obj_set_size(ev, scr_w() - ev_x - PAD_SIDE, scr_h() - ev_y - bottom);
+    const int count = show_data ? a->count : 0;
+    // "Nothing planned" only when a calendar was sent: a weather-only setup
+    // has no event list at all.
+    if (count == 0 && (!show_data || a->has_events)) {
+        lv_obj_t *l = lv_label_create(ev);
+        lv_obj_set_width(l, LV_PCT(100));
+        lv_label_set_text(l, T(STR_AGENDA_EMPTY));
+        muted(l);
+        if (!ls) lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    for (int i = 0; i < count && i < AGENDA_EVENTS_MAX; i++) {
+        lv_obj_t *wl = lv_label_create(ev);
+        lv_obj_set_width(wl, LV_PCT(100));
+        lv_label_set_text(wl, a->ev[i].when);
+        muted(wl);
+        lv_obj_t *tl = lv_label_create(ev);
+        lv_obj_set_width(tl, LV_PCT(100));
+        lv_label_set_text(tl, a->ev[i].what);
+        lv_obj_set_style_margin_bottom(tl, 10, 0);
+    }
+}
+
+static void on_open_agenda(lv_event_t *e)
+{
+    (void)e;
+    show(build_agenda);
 }
 
 // 1 Hz refresh of an open listening-time screen. A live web toggle of
@@ -7833,7 +8044,6 @@ static void toast(const char *text)
 
 // ---- Now-playing mini bar (persistent across screens) ----
 
-typedef enum { NP_NONE, NP_LOCAL, NP_SENDSPIN } np_source_t;
 
 // What is currently playing. Sendspin wins if engaged; otherwise any open local
 // source (the audio layer is open between audio_open/close).
@@ -8514,6 +8724,7 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "settings_web",      build_settings_web },
     { "settings_ap",       build_settings_ap },
     { "settings_usage",    build_settings_usage },
+    { "agenda",            build_agenda },
     { "settings_update",   build_settings_update },
     { "setup",             build_setup },
     { "favorites",         build_favorites },
@@ -8635,6 +8846,52 @@ static void tick_stats_reset(void)
     if (s_stats_reset_req) {
         s_stats_reset_req = false;
         stats_reset();
+    }
+}
+
+// Take agenda data pushed by Home Assistant (ui_agenda_set) and track its
+// freshness. The LVGL task is the only writer of s_agenda. The home screen is
+// rebuilt only when what its clock card shows changed (freshness, weather
+// icon, temperature): a push that only moves an event must not rebuild home
+// under a finger. An open agenda screen follows every push and goes back home
+// when the data becomes stale.
+static void tick_agenda(void)
+{
+    bool got = false;
+    bool changed = false;
+    bool home_changed = false;
+    portENTER_CRITICAL(&s_agenda_mux);
+    if (s_agenda_pending_set) {
+        changed = memcmp(&s_agenda, &s_agenda_pending, sizeof(s_agenda)) != 0;
+        home_changed = strcmp(s_agenda.cond, s_agenda_pending.cond) != 0 ||
+                       strcmp(s_agenda.temp, s_agenda_pending.temp) != 0;
+        s_agenda = s_agenda_pending;
+        s_agenda_pending_set = false;
+        got = true;
+    }
+    portEXIT_CRITICAL(&s_agenda_mux);
+    const int64_t now_s = esp_timer_get_time() / 1000000;
+    if (got) {
+        s_agenda_have = !agenda_empty(&s_agenda);
+        s_agenda_rx_s = now_s;
+        ESP_LOGI(TAG, "agenda: %d event(s), weather %s", s_agenda.count,
+                 s_agenda.cond[0] ? s_agenda.cond : "none");
+    }
+    const bool fresh = agenda_fresh(s_agenda_have, s_agenda_rx_s, now_s);
+    if (fresh != s_agenda_fresh) {
+        s_agenda_fresh = fresh;
+        home_changed = true;
+        if (!fresh && !got) ESP_LOGI(TAG, "agenda: data is stale, hidden");
+    } else if (!got) {
+        return;
+    }
+    if (s_active_builder == build_home) {
+        if (home_changed) show(build_home);
+    } else if (s_active_builder == build_agenda) {
+        // The integration re-sends unchanged data every 30 minutes: that must
+        // not rebuild the screen under a finger on the back button.
+        if (!fresh) show(build_home);
+        else if (changed || home_changed) show(build_agenda);
     }
 }
 
@@ -9707,10 +9964,9 @@ static void tick_clock_labels(void)
                 if (strcmp(lv_label_get_text(s_home_clock), buf) != 0) {
                     lv_label_set_text(s_home_clock, buf);
                 }
-                lv_obj_set_hidden(s_home_clock, false);
-            } else {
-                lv_obj_set_hidden(s_home_clock, true);
             }
+            // The weather card, when built, is what shows and hides.
+            lv_obj_set_hidden(s_home_card ? s_home_card : s_home_clock, !visible);
         }
         if (s_alarm_time_lbl) {
             time_t nowt = time(NULL);
@@ -10125,6 +10381,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_screenshot();
     tick_stats_reset();
     tick_usage_reset();  // before tick_1hz and tick_parental_block: the block lifts in this tick
+    tick_agenda();  // before tick_nav_request: a debug-nav to the agenda sees the data just pushed
     tick_nav_request();
     tick_download_scheduler();
     tick_apply_config();

@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "agenda.h"
 #include "driver/i2c_master.h"
 
 // Start the UI task. Touch shares the same I2C bus as the codec, so the shared
@@ -110,6 +111,14 @@ void ui_stats_reset(void);
 // Request a reset of today's usage counter (parental daily limit). Safe from
 // any task: it only sets a flag, the UI task applies it.
 void ui_usage_reset(void);
+
+// Agenda + weather data pushed by Home Assistant (POST /api/agenda). Safe
+// from any task: the data is copied and the UI task takes it on its next
+// tick. An empty structure clears what the device holds.
+void ui_agenda_set(const agenda_t *agenda);
+
+// True while the device holds fresh agenda data (GET /api/status "agenda").
+bool ui_agenda_fresh(void);
 
 // Background download job state for the web page to poll.
 typedef enum {

@@ -12,6 +12,7 @@
 #include "logstore.h"
 #include "ui.h"
 #include "usage.h"
+#include "agenda.h"
 #include "source_sd.h"
 #include "library.h"
 #include "memo.h"
@@ -494,6 +495,60 @@ static esp_err_t stats_reset_post(httpd_req_t *req)
 
 // Put today's usage counter (parental daily limit) back to 0. Applied on the
 // UI task, the only writer of the counter; this just requests it.
+// Agenda + weather pushed by Home Assistant (the bugne-hass integration).
+// Every key is optional and "{}" clears the data. All text arrives ready to
+// display and is untrusted: agenda_copy_field bounds and cleans each field.
+// Plain-text answer, like the other command POSTs.
+static esp_err_t agenda_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_FAIL);  // body not read yet
+    // Non-ASCII text arrives as 6-byte JSON escapes: three long accented
+    // titles need more than 2 KB.
+    enum { BODY_MAX = 4096 };
+    char *body = heap_caps_malloc(BODY_MAX, MALLOC_CAP_SPIRAM);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_FAIL;
+    }
+    if (read_body(req, body, BODY_MAX, NULL) != ESP_OK) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;  // body not consumed: close instead of parsing leftovers
+    }
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+        return ESP_OK;  // body was read
+    }
+    agenda_t a;
+    memset(&a, 0, sizeof(a));
+    const cJSON *wx = cJSON_GetObjectItemCaseSensitive(root, "weather");
+    if (cJSON_IsObject(wx)) {
+        agenda_copy_field(a.temp, sizeof(a.temp), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(wx, "temp")));
+        agenda_copy_field(a.tmin, sizeof(a.tmin), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(wx, "min")));
+        agenda_copy_field(a.tmax, sizeof(a.tmax), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(wx, "max")));
+        agenda_copy_field(a.cond, sizeof(a.cond), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(wx, "cond")));
+        a.rain = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(wx, "rain"));
+    }
+    const cJSON *evs = cJSON_GetObjectItemCaseSensitive(root, "events");
+    const cJSON *e;
+    a.has_events = cJSON_IsArray(evs);
+    cJSON_ArrayForEach(e, evs) {
+        if (a.count >= AGENDA_EVENTS_MAX) break;  // the rest is ignored
+        if (!cJSON_IsObject(e)) continue;
+        agenda_event_t *d = &a.ev[a.count];
+        agenda_copy_field(d->when, sizeof(d->when), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(e, "when")));
+        agenda_copy_field(d->what, sizeof(d->what), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(e, "what")));
+        if (d->when[0] || d->what[0]) a.count++;
+    }
+    cJSON_Delete(root);
+    ui_agenda_set(&a);
+    httpd_resp_sendstr(req, "ok");
+    return ESP_OK;
+}
+
 static esp_err_t usage_reset_post(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
@@ -1924,6 +1979,10 @@ static esp_err_t status_get(httpd_req_t *req)
                   : 0;
         cJSON_AddNumberToObject(o, "usage_today_s", usage_today(today));
     }
+    // Home Assistant pushes the agenda only when this field exists (older
+    // firmware answers an unknown route with the captive-portal redirect) and
+    // pushes again when it is false (data lost by a reboot, or gone stale).
+    cJSON_AddBoolToObject(o, "agenda", ui_agenda_fresh());
     cJSON *sd = cJSON_AddObjectToObject(o, "sd");
     if (sd) {
         cJSON_AddBoolToObject(sd, "present", sd_present);
@@ -2023,6 +2082,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/stats",       .method = HTTP_GET,  .handler = stats_get},
         {.uri = "/api/stats/reset", .method = HTTP_POST, .handler = stats_reset_post},
         {.uri = "/api/usage/reset", .method = HTTP_POST, .handler = usage_reset_post},
+        {.uri = "/api/agenda", .method = HTTP_POST, .handler = agenda_post},
         {.uri = "/api/status",      .method = HTTP_GET,  .handler = status_get},
         {.uri = "/api/reboot",      .method = HTTP_POST, .handler = reboot_post},
     };

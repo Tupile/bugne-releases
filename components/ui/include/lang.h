@@ -187,6 +187,8 @@ typedef enum {
     STR_TUNER_MODE_BASS,      // tuner mode line: bass and double bass strings
     STR_PLAYLISTS,          // SD screen row and playlists screen title
     STR_NO_PLAYLISTS,       // playlists screen, empty state
+    STR_AGENDA,             // agenda + weather screen title
+    STR_AGENDA_EMPTY,       // agenda screen: no upcoming event
     STR__COUNT
 } str_id_t;
 

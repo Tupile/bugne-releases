@@ -145,6 +145,16 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_epmeta"
 
+echo "=== building agenda host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -I ../../components/decode/include \
+    -o "$OUT/test_agenda" \
+    test_agenda.c ../../components/ui/agenda.c ../../components/decode/tags.c
+
+echo "=== running ==="
+"$OUT/test_agenda"
+
 echo "=== building alarm_next host tests ==="
 # config_store.h (included by alarm_next.h) pulls in esp_err.h and podcast.h
 # just for a typedef and PODCAST_URL_MAX; stubs/ satisfies both without IDF.
