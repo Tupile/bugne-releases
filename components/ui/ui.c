@@ -260,6 +260,19 @@ static lv_obj_t *s_home_clock;  // home screen wall-clock label (NULL if not bui
 // LVGL-task-only; the httpd task writes s_agenda_pending under the mux and
 // only READS s_agenda_fresh.
 static lv_obj_t *s_home_card;   // clickable card around the clock when the agenda is fresh, else NULL
+static lv_obj_t *s_agenda_date; // today's date line on the agenda screen, else NULL
+// Home header, two forms built side by side (home_header_sync picks one):
+// the big device name before the time is known, then a two-line block.
+// Idle: small name, big short date. Playing (the mini bar hides the bottom
+// clock): small short date, then time and weather.
+static lv_obj_t *s_home_title;
+static lv_obj_t *s_home_hdr;
+static lv_obj_t *s_home_hdr_top;   // line 1: device name or short date
+static lv_obj_t *s_home_hdr_date;  // line 2 when idle: big short date
+static lv_obj_t *s_home_hdr_row;   // line 2 when playing: time | weather
+static lv_obj_t *s_home_hdr_time;
+static char s_home_name[40];       // device name shown on home (set by build_home)
+static bool s_home_top_is_name;    // line 1 currently holds the name
 static agenda_t s_agenda;
 static bool s_agenda_have;      // s_agenda holds something to show
 static int64_t s_agenda_rx_s;   // monotonic seconds of the last push
@@ -2041,6 +2054,13 @@ static void show(screen_builder_t builder)
     s_sleep_lbl = NULL;  // same for the sleep timer label
     s_ep_msg = NULL;  // same for the episodes status line (rebuilt by its builder)
     s_home_clock = NULL;  // same for the home clock label (rebuilt by build_home)
+    s_agenda_date = NULL; // same for the agenda date line (rebuilt by build_agenda)
+    s_home_title = NULL;  // same for the two home header forms (rebuilt by build_home)
+    s_home_hdr = NULL;
+    s_home_hdr_top = NULL;
+    s_home_hdr_date = NULL;
+    s_home_hdr_row = NULL;
+    s_home_hdr_time = NULL;
     s_home_card = NULL;
     s_alarm_time_lbl = NULL;  // same for the alarm-ringing big clock label
     s_alarm_src_lbl = NULL;   // and its muted source line
@@ -6378,6 +6398,53 @@ static lv_obj_t *make_tile(lv_obj_t *scr, const char *icon, str_id_t label_id,
     return b;
 }
 
+// Pick the home header form. The ONE place that decides, so the parts
+// always switch together. Time not known: the big name. Time known: the
+// block, with name + big date when idle, date + time and weather while
+// something plays. Every text is set before its label shows, so nothing
+// appears empty. Called at the end of build_home (a rebuild shows the right
+// form at once) and at 1 Hz by tick_clock_labels: the playback edge, the
+// first time sync and midnight need no rebuild.
+static void home_header_sync(void)
+{
+    if (!s_home_title || !s_home_hdr || !s_home_hdr_top || !s_home_hdr_date ||
+        !s_home_hdr_row || !s_home_hdr_time) return;
+    const bool valid = time_valid();
+    const bool playing = np_current() != NP_NONE;
+    if (valid) {
+        time_t nowt = time(NULL);
+        struct tm tmv;
+        localtime_r(&nowt, &tmv);
+        char date[32];
+        agenda_date_fmt_short(date, sizeof(date), tmv.tm_wday, tmv.tm_mday, tmv.tm_mon, lang_code());
+        if (playing) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+            if (strcmp(lv_label_get_text(s_home_hdr_time), buf) != 0) {
+                lv_label_set_text(s_home_hdr_time, buf);
+            }
+            if (strcmp(lv_label_get_text(s_home_hdr_top), date) != 0) {
+                lv_label_set_text(s_home_hdr_top, date);
+            }
+            s_home_top_is_name = false;
+        } else {
+            // A flag, not a strcmp: LONG_DOT rewrites a long name in place,
+            // so the label text would never compare equal again.
+            if (!s_home_top_is_name) {
+                lv_label_set_text(s_home_hdr_top, s_home_name);
+                s_home_top_is_name = true;
+            }
+            if (strcmp(lv_label_get_text(s_home_hdr_date), date) != 0) {
+                lv_label_set_text(s_home_hdr_date, date);
+            }
+        }
+        lv_obj_set_hidden(s_home_hdr_date, playing);
+        lv_obj_set_hidden(s_home_hdr_row, !playing);
+    }
+    lv_obj_set_hidden(s_home_title, valid);
+    lv_obj_set_hidden(s_home_hdr, !valid);
+}
+
 static void build_home(lv_obj_t *scr)
 {
     // Use the configured device name; fall back to the unique "Bugne <id>".
@@ -6395,6 +6462,94 @@ static void build_home(lv_obj_t *scr)
     lv_obj_t *title = add_title(scr, t);
     lv_obj_set_width(title, scr_w() - 64);
     lv_obj_align(title, LV_ALIGN_TOP_MID, -24, 8);
+    s_home_title = title;
+    strlcpy(s_home_name, t, sizeof(s_home_name));
+
+    // Two-line header, shown instead of the title once the time is known.
+    // Line 1 is small: the name, or the date while something plays. Line 2
+    // is big: the date, or time | icon temperature while something plays
+    // (the mini bar then covers the bottom clock card). home_header_sync
+    // fills and picks the parts. With fresh agenda data the whole block is
+    // the tap target to the agenda screen.
+    // A stripped button: no accent layer, transparent until pressed. It ends
+    // 12 px before the gear. It does not depend on the bottom clock, which
+    // is only built when the network is up (SD playback works offline).
+    lv_obj_t *hdr = lv_button_create(scr);
+    lv_obj_remove_style_all(hdr);
+    lv_obj_set_pos(hdr, 4, 8);
+    lv_obj_set_size(hdr, scr_w() - 68, 44);
+    lv_obj_set_style_pad_hor(hdr, 4, 0);
+    lv_obj_set_style_radius(hdr, RADIUS_BTN, 0);
+    lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scrollable(hdr, false);
+    if (s_agenda_fresh) {
+        lv_obj_add_style(hdr, &s_round_surface_pr, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(hdr, on_open_agenda, LV_EVENT_CLICKED, NULL);
+    } else {
+        lv_obj_set_clickable(hdr, false);
+    }
+    s_home_hdr_top = lv_label_create(hdr);
+    lv_label_set_long_mode(s_home_hdr_top, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(s_home_hdr_top, LV_PCT(100), lv_font_get_line_height(&bugne_font_14));
+    lv_label_set_text(s_home_hdr_top, "");
+    muted(s_home_hdr_top);
+    s_home_top_is_name = false;
+    // The widest short date is 158 px at this size ("Mo., 30. Sept."), the
+    // block has 164 px in portrait; LONG_DOT is only a belt.
+    s_home_hdr_date = lv_label_create(hdr);
+    lv_obj_set_style_text_font(s_home_hdr_date, &bugne_font_20, 0);
+    lv_label_set_long_mode(s_home_hdr_date, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(s_home_hdr_date, LV_PCT(100), lv_font_get_line_height(&bugne_font_20));
+    lv_label_set_text(s_home_hdr_date, "");
+    lv_obj_t *hrow = lv_obj_create(hdr);
+    s_home_hdr_row = hrow;
+    lv_obj_remove_style_all(hrow);
+    lv_obj_set_size(hrow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(hrow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hrow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(hrow, 6, 0);
+    lv_obj_set_clickable(hrow, false);  // the tap goes to the block
+    lv_obj_set_scrollable(hrow, false);
+    s_home_hdr_time = lv_label_create(hrow);
+    lv_obj_set_style_text_font(s_home_hdr_time, &bugne_font_20, 0);
+    lv_label_set_text(s_home_hdr_time, "");
+    if (s_agenda_fresh) {
+        const char *glyph = agenda_cond_icon(s_agenda.cond);
+        lv_obj_t *ic = NULL;
+        if (glyph || s_agenda.temp[0]) {
+            lv_obj_t *sep = lv_obj_create(hrow);
+            lv_obj_remove_style_all(sep);
+            lv_obj_set_size(sep, 2, 18);
+            lv_obj_set_style_bg_color(sep, col_muted(), 0);
+            lv_obj_set_style_bg_opa(sep, LV_OPA_50, 0);
+            lv_obj_set_style_radius(sep, 1, 0);
+            lv_obj_set_clickable(sep, false);
+        }
+        if (glyph) {
+            ic = lv_label_create(hrow);
+            lv_obj_set_style_text_font(ic, &bugne_icons_20, 0);
+            lv_label_set_text(ic, glyph);
+        }
+        if (s_agenda.temp[0]) {
+            lv_obj_t *tl = lv_label_create(hrow);
+            lv_obj_set_style_text_font(tl, &bugne_font_20, 0);
+            lv_label_set_text(tl, s_agenda.temp);
+        }
+        // Width rule: a long temperature ("-12,5 °C") does not fit next to
+        // the icon in portrait. Measure with the widest time, drop the icon.
+        // The row must still be visible here: flex skips hidden children.
+        // home_header_sync, at the end of the build, does all the hiding.
+        if (ic && s_agenda.temp[0]) {
+            lv_label_set_text(s_home_hdr_time, "00:00");
+            lv_obj_update_layout(hdr);
+            if (lv_obj_get_width(hrow) > lv_obj_get_content_width(hdr)) lv_obj_delete(ic);
+            lv_label_set_text(s_home_hdr_time, "");
+        }
+    }
+    lv_obj_set_hidden(hdr, true);
+    s_home_hdr = hdr;
 
     // Settings button (gear), top-right: round, matches the round transport
     // buttons look (s_round_surface).
@@ -6626,6 +6781,7 @@ static void build_home(lv_obj_t *scr)
         muted(sn);
         lv_obj_align(sn, LV_ALIGN_BOTTOM_MID, 0, -(MINI_BAR_GAP + 12 + 26));
     }
+    home_header_sync();
 }
 
 // Setup (provisioning) ----------------------------------------------------
@@ -6944,10 +7100,21 @@ static lv_obj_t *agenda_box(lv_obj_t *parent, lv_flex_flow_t flow)
     return b;
 }
 
+// Today's date in the UI language, from the device clock (not from Home
+// Assistant: it must be right at midnight, between two pushes).
+static void agenda_date_now(char *buf, size_t n)
+{
+    time_t nowt = time(NULL);
+    struct tm tmv;
+    localtime_r(&nowt, &tmv);
+    agenda_date_fmt(buf, n, tmv.tm_wday, tmv.tm_mday, tmv.tm_mon, lang_code());
+}
+
 // Read-only and silent, so it is not gated by quiet hours or the daily limit
 // (like the listening-time screen). Every string comes ready to display from
-// Home Assistant; only the weather pictogram is chosen here. tick_agenda
-// rebuilds the screen on a new push and leaves it when the data goes stale.
+// Home Assistant; only the weather pictogram and the date line are made
+// here. tick_agenda rebuilds the screen on a new push and leaves it when the
+// data goes stale; tick_clock_labels keeps the date line current.
 static void build_agenda(lv_obj_t *scr)
 {
     add_back_button(scr);
@@ -6955,7 +7122,18 @@ static void build_agenda(lv_obj_t *scr)
     const bool ls = scr_w() > scr_h();
     const agenda_t *a = &s_agenda;
     const bool show_data = s_agenda_fresh;
-    const int top = 60;
+    int top = 60;
+    if (time_valid()) {
+        char date[48];
+        agenda_date_now(date, sizeof(date));
+        s_agenda_date = lv_label_create(scr);
+        lv_obj_set_style_text_align(s_agenda_date, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(s_agenda_date, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(s_agenda_date, scr_w() - 2 * PAD_SIDE, 18);
+        lv_obj_set_pos(s_agenda_date, PAD_SIDE, 52);
+        lv_label_set_text(s_agenda_date, date);
+        top = 76;  // the content starts under the date line
+    }
     int ev_x = PAD_SIDE, ev_y = top;
 
     if (show_data && (a->temp[0] || a->cond[0])) {
@@ -6975,12 +7153,6 @@ static void build_agenda(lv_obj_t *scr)
             lv_obj_t *tl = lv_label_create(now);
             lv_obj_set_style_text_font(tl, &bugne_font_20, 0);
             lv_label_set_text(tl, a->temp);
-        }
-        if (a->rain) {  // rain forecast within the hour
-            lv_obj_t *dr = lv_label_create(now);
-            lv_obj_set_style_text_font(dr, &lv_font_montserrat_20, 0);
-            lv_obj_set_style_text_color(dr, lv_palette_main(LV_PALETTE_BLUE), 0);
-            lv_label_set_text(dr, LV_SYMBOL_TINT);
         }
 
         // Minimum and maximum of the day: one line in portrait, two in the
@@ -9953,6 +10125,8 @@ static void tick_stats_and_usage(void)
 // the alarm screens. Only while the screen owning them is active.
 static void tick_clock_labels(void)
 {
+        // Not while asleep: nothing is rendered into a powered-off panel.
+        if (s_active_builder == build_home && !s_asleep) home_header_sync();
         if (s_home_clock && s_active_builder == build_home) {
             bool visible = (np_current() == NP_NONE) && time_valid() && !s_asleep;
             if (visible) {
@@ -9967,6 +10141,13 @@ static void tick_clock_labels(void)
             }
             // The weather card, when built, is what shows and hides.
             lv_obj_set_hidden(s_home_card ? s_home_card : s_home_clock, !visible);
+        }
+        if (s_agenda_date && s_active_builder == build_agenda) {
+            char date[48];
+            agenda_date_now(date, sizeof(date));
+            if (strcmp(lv_label_get_text(s_agenda_date), date) != 0) {
+                lv_label_set_text(s_agenda_date, date);
+            }
         }
         if (s_alarm_time_lbl) {
             time_t nowt = time(NULL);

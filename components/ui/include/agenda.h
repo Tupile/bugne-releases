@@ -45,6 +45,17 @@ bool agenda_empty(const agenda_t *a);
 // Assistant weather state. NULL for an unknown state or "exceptional".
 const char *agenda_cond_icon(const char *cond);
 
+// Today's date line for the agenda screen, from the device's own clock:
+// "Thursday 19 November", "jeudi 19 novembre", "Donnerstag, 19. November".
+// wday (0 = Sunday), mday (1..31) and mon (0..11) as in struct tm; lang is
+// the UI language code ("fr", "de", anything else is English). Out-of-range
+// input gives an empty string.
+void agenda_date_fmt(char *out, size_t n, int wday, int mday, int mon, const char *lang);
+
+// Short form of the same date, for the home header: "Thu 19 Nov",
+// "jeu. 19 nov.", "Do., 19. Nov.". Same arguments and same contract.
+void agenda_date_fmt_short(char *out, size_t n, int wday, int mday, int mon, const char *lang);
+
 // True while data received at `rx_s` is still fresh at `now_s` (monotonic
 // seconds). `have` false means nothing was ever received.
 bool agenda_fresh(bool have, int64_t rx_s, int64_t now_s);
