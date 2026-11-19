@@ -276,8 +276,16 @@ void sendspin_task(void *)
             case SENDSPIN_CMD_PLAY:  g_controller->send_command({.command = SendspinControllerCommand::PLAY});  break;
             case SENDSPIN_CMD_PAUSE: g_controller->send_command({.command = SendspinControllerCommand::PAUSE}); break;
             case SENDSPIN_CMD_STOP:
-                g_controller->send_command({.command = SendspinControllerCommand::STOP});
-                s_session.store(false);  // stop ends the session: close the screen
+                // Leave the group instead of stopping it: with other players
+                // grouped in Music Assistant, a controller STOP stops them
+                // all. client/leave moves this player to a stopped group of
+                // its own and the others keep playing; alone, the server
+                // stops playback. The library (0.8.0) has no call for it, so
+                // the message is sent as text (the payload object is
+                // expected by the server's parser).
+                g_client->send_text("{\"type\":\"client/leave\",\"payload\":{}}");
+                ESP_LOGI(TAG, "stop: left the group");
+                s_session.store(false);  // the session is over here: close the screen
                 break;
             case SENDSPIN_CMD_NEXT:     g_controller->send_command({.command = SendspinControllerCommand::NEXT});     break;
             case SENDSPIN_CMD_PREVIOUS: g_controller->send_command({.command = SendspinControllerCommand::PREVIOUS}); break;
