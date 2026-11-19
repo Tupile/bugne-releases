@@ -189,6 +189,12 @@ typedef enum {
     STR_NO_PLAYLISTS,       // playlists screen, empty state
     STR_AGENDA,             // agenda + weather screen title
     STR_AGENDA_EMPTY,       // agenda screen: no upcoming event
+    STR_NOTIF,              // notification screen title when none was sent
+    STR_NOTIF_NEW,          // toast: a notification without a title arrived
+    STR_NOTIF_SENDING,      // notification screen: the answer is being sent
+    STR_NOTIF_SENT,         // toast: the answer reached Home Assistant
+    STR_NOTIF_FAIL,         // toast: the answer could not be sent
+    STR_NOTIF_OK,           // button closing a notification without answers
     STR__COUNT
 } str_id_t;
 

@@ -295,5 +295,6 @@ with tempfile.TemporaryDirectory(prefix="bugne-ui-remote-") as directory:
     subprocess.run(["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
                     "-I", str(ROOT / "test/host/stubs"),
                     "-I", str(ROOT / "components/ui/include"),
+                    "-I", str(ROOT / "components/ha_client/include"),  # notif.h, included by ui.h
                     str(source), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

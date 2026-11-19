@@ -155,6 +155,15 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_agenda"
 
+echo "=== building notif host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ha_client/include \
+    -o "$OUT/test_notif" \
+    test_notif.c ../../components/ha_client/notif.c
+
+echo "=== running ==="
+"$OUT/test_notif"
+
 echo "=== building alarm_next host tests ==="
 # config_store.h (included by alarm_next.h) pulls in esp_err.h and podcast.h
 # just for a typedef and PODCAST_URL_MAX; stubs/ satisfies both without IDF.

@@ -15,7 +15,7 @@ def body(name):
 
 
 # POST routes that read a body reject unauthenticated calls with ESP_FAIL.
-for h in ("playback_post", "podcasts_download_post", "debug_nav_post"):
+for h in ("playback_post", "podcasts_download_post", "debug_nav_post", "notify_post"):
     assert "REQUIRE_AUTH(req, ESP_FAIL)" in body(h), h
 
 # memo_post: size check first, and its 413 closes the connection.

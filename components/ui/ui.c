@@ -27,6 +27,8 @@
 #include "updcheck.h"
 #include "chrono.h"
 #include "agenda.h"
+#include "notif.h"
+#include "ha_reply.h"
 #include "alarm_next.h"
 #include "stats.h"
 #include "pitch.h"
@@ -281,6 +283,20 @@ static agenda_t s_agenda_pending;
 static bool s_agenda_pending_set;
 static portMUX_TYPE s_agenda_mux = portMUX_INITIALIZER_UNLOCKED;
 static void on_open_agenda(lv_event_t *e);
+// Notification pushed by Home Assistant (notif.h), one at a time, RAM only.
+// Same hand-off as the agenda: the httpd task writes s_notif_pending under
+// the mux and only READS s_notif_have; everything else is LVGL-task-only.
+static notif_t s_notif;
+static volatile bool s_notif_have;   // s_notif holds a notification
+static notif_t s_notif_pending;
+static bool s_notif_pending_set;
+static portMUX_TYPE s_notif_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_notif_gen;         // bumped each time s_notif changes
+static bool s_notif_sending;         // an answer is on its way (ha_reply)
+static uint32_t s_notif_send_gen;    // s_notif_gen when that answer was sent
+static lv_obj_t *s_notif_status_lbl; // "sending" line of the open screen, else NULL
+static lv_obj_t *s_notif_btn[NOTIF_ACTIONS_MAX];
+static void on_open_notif(lv_event_t *e);
 // Which now-playing source owns the mini bar (np_current is defined with the
 // mini bar; declared here because build_agenda needs it earlier in the file).
 typedef enum { NP_NONE, NP_LOCAL, NP_SENDSPIN } np_source_t;
@@ -2055,6 +2071,8 @@ static void show(screen_builder_t builder)
     s_ep_msg = NULL;  // same for the episodes status line (rebuilt by its builder)
     s_home_clock = NULL;  // same for the home clock label (rebuilt by build_home)
     s_agenda_date = NULL; // same for the agenda date line (rebuilt by build_agenda)
+    s_notif_status_lbl = NULL;  // same for the notification screen widgets
+    for (int i = 0; i < NOTIF_ACTIONS_MAX; i++) s_notif_btn[i] = NULL;
     s_home_title = NULL;  // same for the two home header forms (rebuilt by build_home)
     s_home_hdr = NULL;
     s_home_hdr_top = NULL;
@@ -3300,6 +3318,23 @@ void ui_agenda_set(const agenda_t *agenda)
 bool ui_agenda_fresh(void)
 {
     return s_agenda_fresh;
+}
+
+// Hand a notification over from the web task. tick_notif takes it on the
+// LVGL task; a second push before that tick replaces the first. NULL clears
+// (an empty message is the "clear" marker in the pending slot).
+void ui_notif_set(const notif_t *notif)
+{
+    portENTER_CRITICAL(&s_notif_mux);
+    if (notif) s_notif_pending = *notif;
+    else       s_notif_pending.message[0] = '\0';
+    s_notif_pending_set = true;
+    portEXIT_CRITICAL(&s_notif_mux);
+}
+
+bool ui_notif_held(void)
+{
+    return s_notif_have;
 }
 
 void ui_set_ghota_check_fn(ui_ghota_check_fn_t fn)
@@ -6459,9 +6494,12 @@ static void build_home(lv_obj_t *scr)
     // sides for screens with a back button AND a gear/refresh icon. Home has
     // only the right-side gear, so reclaim the dead left margin: widen and
     // shift left to fill up to just before the gear (44 px wide, 8 px pad).
+    // While a notification is held, a bell sits left of the gear and takes
+    // 52 px (44 px button, 8 px gap) from the title and from the header.
+    const int bell_w = s_notif_have ? 52 : 0;
     lv_obj_t *title = add_title(scr, t);
-    lv_obj_set_width(title, scr_w() - 64);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, -24, 8);
+    lv_obj_set_width(title, scr_w() - 64 - bell_w);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, -24 - bell_w / 2, 8);
     s_home_title = title;
     strlcpy(s_home_name, t, sizeof(s_home_name));
 
@@ -6477,7 +6515,7 @@ static void build_home(lv_obj_t *scr)
     lv_obj_t *hdr = lv_button_create(scr);
     lv_obj_remove_style_all(hdr);
     lv_obj_set_pos(hdr, 4, 8);
-    lv_obj_set_size(hdr, scr_w() - 68, 44);
+    lv_obj_set_size(hdr, scr_w() - 68 - bell_w, 44);
     lv_obj_set_style_pad_hor(hdr, 4, 0);
     lv_obj_set_style_radius(hdr, RADIUS_BTN, 0);
     lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_COLUMN);
@@ -6498,8 +6536,13 @@ static void build_home(lv_obj_t *scr)
     s_home_top_is_name = false;
     // The widest short date is 158 px at this size ("Mo., 30. Sept."), the
     // block has 164 px in portrait; LONG_DOT is only a belt.
+    // Next to the bell the block is too narrow for that (112 px in
+    // portrait): the date then uses the 14 px font. Decided from the width,
+    // not by measuring the text: the date changes at midnight without a
+    // rebuild.
+    const bool date_small = scr_w() - 68 - bell_w - 8 < 158;
     s_home_hdr_date = lv_label_create(hdr);
-    lv_obj_set_style_text_font(s_home_hdr_date, &bugne_font_20, 0);
+    lv_obj_set_style_text_font(s_home_hdr_date, date_small ? &bugne_font_14 : &bugne_font_20, 0);
     lv_label_set_long_mode(s_home_hdr_date, LV_LABEL_LONG_DOT);
     lv_obj_set_size(s_home_hdr_date, LV_PCT(100), lv_font_get_line_height(&bugne_font_20));
     lv_label_set_text(s_home_hdr_date, "");
@@ -6518,8 +6561,10 @@ static void build_home(lv_obj_t *scr)
     if (s_agenda_fresh) {
         const char *glyph = agenda_cond_icon(s_agenda.cond);
         lv_obj_t *ic = NULL;
+        lv_obj_t *sep = NULL;
+        lv_obj_t *tl = NULL;
         if (glyph || s_agenda.temp[0]) {
-            lv_obj_t *sep = lv_obj_create(hrow);
+            sep = lv_obj_create(hrow);
             lv_obj_remove_style_all(sep);
             lv_obj_set_size(sep, 2, 18);
             lv_obj_set_style_bg_color(sep, col_muted(), 0);
@@ -6533,7 +6578,7 @@ static void build_home(lv_obj_t *scr)
             lv_label_set_text(ic, glyph);
         }
         if (s_agenda.temp[0]) {
-            lv_obj_t *tl = lv_label_create(hrow);
+            tl = lv_label_create(hrow);
             lv_obj_set_style_text_font(tl, &bugne_font_20, 0);
             lv_label_set_text(tl, s_agenda.temp);
         }
@@ -6541,10 +6586,21 @@ static void build_home(lv_obj_t *scr)
         // the icon in portrait. Measure with the widest time, drop the icon.
         // The row must still be visible here: flex skips hidden children.
         // home_header_sync, at the end of the build, does all the hiding.
-        if (ic && s_agenda.temp[0]) {
+        // Next to the notification bell even the temperature may not fit:
+        // the weather then goes, the time stays.
+        if (sep) {
             lv_label_set_text(s_home_hdr_time, "00:00");
             lv_obj_update_layout(hdr);
-            if (lv_obj_get_width(hrow) > lv_obj_get_content_width(hdr)) lv_obj_delete(ic);
+            if (ic && tl && lv_obj_get_width(hrow) > lv_obj_get_content_width(hdr)) {
+                lv_obj_delete(ic);
+                ic = NULL;
+                lv_obj_update_layout(hdr);
+            }
+            if (lv_obj_get_width(hrow) > lv_obj_get_content_width(hdr)) {
+                if (ic) lv_obj_delete(ic);
+                if (tl) lv_obj_delete(tl);
+                lv_obj_delete(sep);
+            }
             lv_label_set_text(s_home_hdr_time, "");
         }
     }
@@ -6555,6 +6611,14 @@ static void build_home(lv_obj_t *scr)
     // buttons look (s_round_surface).
     lv_obj_t *gear = make_round_btn(scr, LV_SYMBOL_SETTINGS, 44, false, on_open_settings);
     lv_obj_align(gear, LV_ALIGN_TOP_RIGHT, -8, 8);
+
+    // Notification bell, only while one is held. tick_notif rebuilds home on
+    // that edge.
+    if (s_notif_have) {
+        lv_obj_t *bell = make_round_btn(scr, LV_SYMBOL_BELL, 44, true, on_open_notif);
+        lv_obj_align(bell, LV_ALIGN_TOP_RIGHT, -60, 8);
+        lv_obj_align(podnew_dot(bell), LV_ALIGN_TOP_RIGHT, 2, -2);
+    }
 
     // Tile grid: margins PAD_SIDE, gutter 10. The grid starts below the round
     // gear button (y 8, height 44, so its bottom edge is at 54) so no tile
@@ -7229,6 +7293,142 @@ static void on_open_agenda(lv_event_t *e)
 {
     (void)e;
     show(build_agenda);
+}
+
+// Notification from Home Assistant (see notif.h) -----------------------------
+
+// True while the answer to the notification HELD is on its way. An answer
+// still being sent for a notification that was replaced does not count: the
+// new one must not show "sending" for something it never sent.
+static bool notif_sending_now(void)
+{
+    return s_notif_sending && s_notif_send_gen == s_notif_gen;
+}
+
+// Buttons are dead and the "sending" line shows while an answer is on its
+// way. In place, never a rebuild: this runs from a button's own event.
+static void notif_sync_sending(void)
+{
+    const bool sending = notif_sending_now();
+    for (int i = 0; i < NOTIF_ACTIONS_MAX; i++) {
+        if (!s_notif_btn[i]) continue;
+        if (sending) lv_obj_add_state(s_notif_btn[i], LV_STATE_DISABLED);
+        else         lv_obj_remove_state(s_notif_btn[i], LV_STATE_DISABLED);
+    }
+    if (s_notif_status_lbl) lv_obj_set_hidden(s_notif_status_lbl, !sending);
+}
+
+// Drop the notification held. The generation bump makes the result of an
+// answer still on its way a no-op.
+static void notif_drop(void)
+{
+    s_notif_have = false;
+    s_notif_gen++;
+}
+
+// Answer with action `i`, or just close a notification that has no action.
+// The answer leaves on the ha_reply task; tick_notif reads the result. The
+// notification stays until Home Assistant got the answer, so a failed send
+// can be tried again.
+static void notif_answer(int i)
+{
+    if (!s_notif_have || notif_sending_now()) return;
+    if (s_notif.count == 0) {
+        notif_drop();
+        show(build_home);
+        return;
+    }
+    if (i < 0 || i >= s_notif.count) return;
+    // ha_reply_send refuses while the answer to a replaced notification is
+    // still on its way: the toast says so and the buttons stay for a retry.
+    char body[NOTIF_REPLY_MAX];
+    if (notif_reply_json(body, sizeof(body), s_notif.id, s_notif.act[i].id) < 0 ||
+        !ha_reply_send(s_notif.reply_url, body)) {
+        toast(T(STR_NOTIF_FAIL));
+        return;
+    }
+    ESP_LOGI(TAG, "notification: answer \"%s\" sent", s_notif.act[i].id);
+    s_notif_sending = true;
+    s_notif_send_gen = s_notif_gen;
+    notif_sync_sending();
+}
+
+static void on_notif_action(lv_event_t *e)
+{
+    notif_answer((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+// Read-only and silent, so not gated by quiet hours or the daily limit, like
+// the agenda. Back keeps the notification (the bell stays on home).
+// tick_notif re-shows this screen when the notification is replaced and
+// leaves it when it is cleared.
+static void build_notif(lv_obj_t *scr)
+{
+    add_back_button(scr);
+    add_title_wide(scr, s_notif_have && s_notif.title[0] ? s_notif.title : T(STR_NOTIF));
+    if (!s_notif_have) return;
+
+    const bool ls = scr_w() > scr_h();
+    const int top = 60;
+    const int bottom = (np_current() == NP_NONE) ? 8 : MINI_CLEAR;
+    lv_obj_t *col = lv_obj_create(scr);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_pos(col, PAD_SIDE, top);
+    lv_obj_set_size(col, scr_w() - 2 * PAD_SIDE, scr_h() - top - bottom);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, 8, 0);
+    lv_obj_set_scrollable(col, false);
+
+    // The message takes what the buttons leave and scrolls when it is long.
+    lv_obj_t *box = lv_obj_create(col);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_width(box, LV_PCT(100));
+    lv_obj_set_flex_grow(box, 1);
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_text(msg, s_notif.message);
+
+    s_notif_status_lbl = lv_label_create(col);
+    lv_obj_set_width(s_notif_status_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(s_notif_status_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_notif_status_lbl, T(STR_NOTIF_SENDING));
+    muted(s_notif_status_lbl);
+
+    // Portrait: one button per line. Landscape: side by side, the height is
+    // short there.
+    lv_obj_t *row = lv_obj_create(col);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, ls ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(row, 8, 0);
+    lv_obj_set_style_pad_column(row, 8, 0);
+    const int n = s_notif.count > 0 ? s_notif.count : 1;
+    for (int i = 0; i < n && i < NOTIF_ACTIONS_MAX; i++) {
+        lv_obj_t *b = lv_button_create(row);
+        lv_obj_set_height(b, 44);
+        if (ls) lv_obj_set_flex_grow(b, 1);
+        else    lv_obj_set_width(b, LV_PCT(100));
+        if (i > 0) {  // the second answer is the quiet one, like Cancel in a modal
+            lv_obj_set_style_bg_color(b, col_surface(), 0);
+            lv_obj_set_style_bg_color(b, col_surface_pr(), LV_STATE_PRESSED);
+        }
+        lv_obj_add_event_cb(b, on_notif_action, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *l = lv_label_create(b);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(l, LV_PCT(100));
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(l, s_notif.count > 0 ? s_notif.act[i].label : T(STR_NOTIF_OK));
+        lv_obj_center(l);
+        s_notif_btn[i] = b;
+    }
+    notif_sync_sending();
+}
+
+static void on_open_notif(lv_event_t *e)
+{
+    (void)e;
+    show(build_notif);
 }
 
 // 1 Hz refresh of an open listening-time screen. A live web toggle of
@@ -8897,6 +9097,9 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "settings_ap",       build_settings_ap },
     { "settings_usage",    build_settings_usage },
     { "agenda",            build_agenda },
+    { "notif",             build_notif },
+    { "notif_act1",        build_notif },  // press the first answer (handled in tick_nav_request)
+    { "notif_act2",        build_notif },  // press the second answer
     { "settings_update",   build_settings_update },
     { "setup",             build_setup },
     { "favorites",         build_favorites },
@@ -9067,6 +9270,54 @@ static void tick_agenda(void)
     }
 }
 
+// Take a notification pushed by Home Assistant (ui_notif_set) and follow the
+// answer being sent. The LVGL task is the only writer of s_notif. Arrival:
+// a toast, nothing else (no sound, a sleeping screen stays off). Home is
+// rebuilt on every change so the bell follows; that can happen under a
+// finger, accepted: a notification is a rare event.
+static void tick_notif(void)
+{
+    bool got = false;
+    portENTER_CRITICAL(&s_notif_mux);
+    if (s_notif_pending_set) {
+        s_notif = s_notif_pending;
+        s_notif_pending_set = false;
+        got = true;
+    }
+    portEXIT_CRITICAL(&s_notif_mux);
+    if (got) {
+        const bool had = s_notif_have;
+        s_notif_have = s_notif.message[0] != '\0';
+        s_notif_gen++;
+        if (s_notif_have) {
+            ESP_LOGI(TAG, "notification: received, %d action(s)", s_notif.count);
+            toast(s_notif.title[0] ? s_notif.title : T(STR_NOTIF_NEW));
+        } else if (had) {
+            ESP_LOGI(TAG, "notification: cleared");
+        }
+        if (s_active_builder == build_notif) show(s_notif_have ? build_notif : build_home);
+        else if (s_active_builder == build_home && (had || s_notif_have)) show(build_home);
+    }
+    if (!s_notif_sending) return;
+    const ha_reply_state_t st = ha_reply_poll();
+    if (st != HA_REPLY_OK && st != HA_REPLY_FAIL) return;
+    s_notif_sending = false;
+    if (s_notif_send_gen != s_notif_gen) {
+        // The notification was replaced or cleared meanwhile: this result is
+        // about the old one. Only give the buttons back.
+        notif_sync_sending();
+        return;
+    }
+    if (st == HA_REPLY_OK) {
+        notif_drop();
+        toast(T(STR_NOTIF_SENT));
+        if (s_active_builder == build_notif || s_active_builder == build_home) show(build_home);
+    } else {
+        toast(T(STR_NOTIF_FAIL));
+        notif_sync_sending();
+    }
+}
+
 // Apply a pending reset of today's usage (POST /api/usage/reset). Runs on the
 // LVGL task, the only writer of the usage counter. The 0 is written to NVS at
 // once: waiting for the next periodic save would let a reboot bring the old
@@ -9103,6 +9354,12 @@ static void tick_nav_request(void)
         }
         if (strcmp(name, "memo_play") == 0) {
             memo_open_row(0);
+            return;
+        }
+        // No touch injection: press the first or second answer of the
+        // notification held ("game_play" precedent).
+        if (strcmp(name, "notif_act1") == 0 || strcmp(name, "notif_act2") == 0) {
+            notif_answer(name[9] - '1');
             return;
         }
         if (strcmp(name, "playlist_tracks") == 0) {
@@ -10563,6 +10820,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_stats_reset();
     tick_usage_reset();  // before tick_1hz and tick_parental_block: the block lifts in this tick
     tick_agenda();  // before tick_nav_request: a debug-nav to the agenda sees the data just pushed
+    tick_notif();   // same reason, for "notif" and "notif_act1"
     tick_nav_request();
     tick_download_scheduler();
     tick_apply_config();

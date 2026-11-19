@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include "esp_err.h"
 #include "agenda.h"
+#include "notif.h"
 #include "driver/i2c_master.h"
 
 // Start the UI task. Touch shares the same I2C bus as the codec, so the shared
@@ -119,6 +120,14 @@ void ui_agenda_set(const agenda_t *agenda);
 
 // True while the device holds fresh agenda data (GET /api/status "agenda").
 bool ui_agenda_fresh(void);
+
+// Notification pushed by Home Assistant (POST /api/notify). Safe from any
+// task: the data is copied and the UI task takes it on its next tick. It
+// replaces the one held. NULL clears it.
+void ui_notif_set(const notif_t *notif);
+
+// True while the device holds a notification (GET /api/status "notify").
+bool ui_notif_held(void);
 
 // Background download job state for the web page to poll.
 typedef enum {

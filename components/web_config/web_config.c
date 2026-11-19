@@ -549,6 +549,64 @@ static esp_err_t agenda_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Notification pushed by Home Assistant, with up to two answer buttons (see
+// notif.h). "{}" clears the one held. All text is untrusted and bounded like
+// the agenda fields. The answer goes to reply_url, which only an
+// authenticated sender can set. Plain-text answer.
+static esp_err_t notify_post(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req, ESP_FAIL);  // body not read yet
+    enum { BODY_MAX = 4096 };     // non-ASCII text arrives as 6-byte escapes
+    char *body = heap_caps_malloc(BODY_MAX, MALLOC_CAP_SPIRAM);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_FAIL;
+    }
+    if (read_body(req, body, BODY_MAX, NULL) != ESP_OK) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;  // body not consumed: close instead of parsing leftovers
+    }
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+        return ESP_OK;  // body was read
+    }
+    if (cJSON_GetArraySize(root) == 0) {
+        cJSON_Delete(root);
+        ui_notif_set(NULL);
+        httpd_resp_sendstr(req, "ok");
+        return ESP_OK;
+    }
+    notif_t n;
+    memset(&n, 0, sizeof(n));
+    agenda_copy_field(n.id, sizeof(n.id), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "id")));
+    agenda_copy_field(n.title, sizeof(n.title), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "title")));
+    agenda_copy_field(n.message, sizeof(n.message), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "message")));
+    // A cut URL would post the answer somewhere else: refuse, never truncate.
+    const char *url = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "reply_url"));
+    bool ok = !url || strlen(url) < sizeof(n.reply_url);
+    if (ok) agenda_copy_field(n.reply_url, sizeof(n.reply_url), url);
+    const cJSON *acts = cJSON_GetObjectItemCaseSensitive(root, "actions");
+    const cJSON *a;
+    cJSON_ArrayForEach(a, acts) {
+        if (n.count >= NOTIF_ACTIONS_MAX) break;  // the rest is ignored
+        notif_action_t *d = &n.act[n.count++];
+        agenda_copy_field(d->id, sizeof(d->id), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(a, "id")));
+        agenda_copy_field(d->label, sizeof(d->label), cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(a, "label")));
+    }
+    cJSON_Delete(root);
+    if (!ok || !notif_valid(&n)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid notification");
+        return ESP_OK;  // body was read
+    }
+    ui_notif_set(&n);
+    httpd_resp_sendstr(req, "ok");
+    return ESP_OK;
+}
+
 static esp_err_t usage_reset_post(httpd_req_t *req)
 {
     REQUIRE_AUTH(req, ESP_FAIL);
@@ -1983,6 +2041,9 @@ static esp_err_t status_get(httpd_req_t *req)
     // firmware answers an unknown route with the captive-portal redirect) and
     // pushes again when it is false (data lost by a reboot, or gone stale).
     cJSON_AddBoolToObject(o, "agenda", ui_agenda_fresh());
+    // Same idea for notifications: the field existing means POST /api/notify
+    // exists, its value says whether one is held.
+    cJSON_AddBoolToObject(o, "notify", ui_notif_held());
     cJSON *sd = cJSON_AddObjectToObject(o, "sd");
     if (sd) {
         cJSON_AddBoolToObject(sd, "present", sd_present);
@@ -2037,7 +2098,7 @@ esp_err_t web_config_start(void)
                                // class of bug as the Sendspin httpd fix). Stays
                                // internal RAM: these handlers write flash.
     cfg.max_open_sockets = 3;  // keep lwip sockets free for streaming + Sendspin
-    cfg.max_uri_handlers = 44; // default 8 is below our route count (registration
+    cfg.max_uri_handlers = 46; // default 8 is below our route count (registration
                                // past the limit fails silently, e.g. /api/playback).
                                // Keep a couple of spare slots above the table below.
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd start failed");
@@ -2083,6 +2144,7 @@ esp_err_t web_config_start(void)
         {.uri = "/api/stats/reset", .method = HTTP_POST, .handler = stats_reset_post},
         {.uri = "/api/usage/reset", .method = HTTP_POST, .handler = usage_reset_post},
         {.uri = "/api/agenda", .method = HTTP_POST, .handler = agenda_post},
+        {.uri = "/api/notify", .method = HTTP_POST, .handler = notify_post},
         {.uri = "/api/status",      .method = HTTP_GET,  .handler = status_get},
         {.uri = "/api/reboot",      .method = HTTP_POST, .handler = reboot_post},
     };
