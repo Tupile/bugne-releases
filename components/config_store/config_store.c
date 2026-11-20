@@ -71,6 +71,7 @@ static void set_defaults(config_t *c)
     c->ui.accent = 0;  // blue
     c->ui.game = 1;    // times-tables game shown on home
     c->ui.tuner = 1;   // instrument tuner shown on home
+    c->ui.lyrics = 0;  // lyrics are unfiltered text: a parent turns them on
     c->ui.timer = 0;   // chrono tile hidden: existing configs see no change
     c->ui.memo_rx = 1; // accept voice memos from other Bugnes
     c->ui.podcast_new_badge = 0;  // new-episode dots off: existing configs see no change
@@ -275,6 +276,8 @@ static void load_from_json(config_t *c, const cJSON *root)
         if (cJSON_IsNumber(gm)) c->ui.game = clampi(gm->valueint, 0, 1);
         const cJSON *tn = cJSON_GetObjectItemCaseSensitive(ui, "tuner");
         if (cJSON_IsNumber(tn)) c->ui.tuner = clampi(tn->valueint, 0, 1);
+        const cJSON *ly = cJSON_GetObjectItemCaseSensitive(ui, "lyrics");
+        if (cJSON_IsNumber(ly)) c->ui.lyrics = clampi(ly->valueint, 0, 1);
         const cJSON *tm = cJSON_GetObjectItemCaseSensitive(ui, "timer");
         if (cJSON_IsNumber(tm)) c->ui.timer = clampi(tm->valueint, 0, 1);
         const cJSON *mr = cJSON_GetObjectItemCaseSensitive(ui, "memo_rx");
@@ -444,6 +447,7 @@ static esp_err_t save_to_disk(const config_t *c)
         !cJSON_AddNumberToObject(ui, "accent", c->ui.accent) ||
         !cJSON_AddNumberToObject(ui, "game", c->ui.game) ||
         !cJSON_AddNumberToObject(ui, "tuner", c->ui.tuner) ||
+        !cJSON_AddNumberToObject(ui, "lyrics", c->ui.lyrics) ||
         !cJSON_AddNumberToObject(ui, "timer", c->ui.timer) ||
         !cJSON_AddNumberToObject(ui, "memo_rx", c->ui.memo_rx) ||
         !cJSON_AddNumberToObject(ui, "podcast_new_badge", c->ui.podcast_new_badge) ||

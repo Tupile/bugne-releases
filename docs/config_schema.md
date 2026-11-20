@@ -47,6 +47,7 @@ configuration:
     "accent": 0,
     "game": 1,
     "tuner": 1,
+    "lyrics": 0,
     "timer": 0,
     "memo_rx": 1,
     "podcast_new_badge": 0,
@@ -105,6 +106,7 @@ configuration:
 | `ui.accent` | int | Button/accent color, 0 to 4: 0 Blue (default), 1 Ocean, 2 Pink, 3 Forest, 4 Orange. |
 | `ui.game` | int | Times-tables game on the home screen: 1 shown (default), 0 hidden. |
 | `ui.tuner` | int | Instrument tuner on the home screen (experimental feature): 1 shown (default), 0 hidden. |
+| `ui.lyrics` | int | Lyrics button on the playing screens: 0 hidden (default), 1 shown. Lyrics come from lrclib.net and are not filtered, so this is a parental setting. With 1, the title and artist of a song are sent to lrclib.net when its lyrics are shown. |
 | `ui.timer` | int | Chrono tile (stopwatch and countdown timer) on the home screen: 0 hidden (default), 1 shown. Live-applied. |
 | `ui.memo_rx` | int | Accept voice memos from other Bugnes: 1 yes (default), 0 refuse. The receive route `POST /api/memo?from=<name>` needs no authentication on the LAN, because a peer does not know the password. It is bounded instead: the content length is required and capped at 4 MB, the device stores 20 memos at most (own plus received, and it refuses the next ones instead of deleting any), it checks the WAV format (PCM 16-bit mono 16 kHz), it sanitizes the sender name, and it chooses the storage path itself (`/sdcard/memos/`). |
 | `ui.podcast_new_badge` | int | Red "new episode" dots: 0 off (default), 1 on. When on, an episode downloaded by the background job is marked new (stored in `/littlefs/podcasts/new.bin`, 128 markers at most) until it is launched; the Podcasts tile, the podcast row and the episode row show a red dot, and `GET /api/podcasts/new` returns `{"<podcast id>": count}` for the web page. Episodes already on the card when it is turned on are not marked. Live-applied. |

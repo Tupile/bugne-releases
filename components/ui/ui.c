@@ -28,6 +28,7 @@
 #include "chrono.h"
 #include "agenda.h"
 #include "notif.h"
+#include "lyrics.h"
 #include "ha_reply.h"
 #include "alarm_next.h"
 #include "stats.h"
@@ -253,6 +254,27 @@ static char         s_art_pending_path[PODCAST_PATH_MAX];
 static uint32_t  s_np_dur_override_ms;  // exact duration (podcasts from RSS); 0 = use decoder's
 static lv_obj_t *s_np_name;     // main title label (SD: tag title, else file name)
 static lv_obj_t *s_np_artist;   // SD: artist from the tag (empty if none)
+
+// Lyrics view (see "Lyrics" further down). LVGL task only.
+#define LYR_ROWS 5                   // synced view: two before, current, two after
+typedef enum { LYR_V_STATUS, LYR_V_SYNCED, LYR_V_PLAIN } lyr_view_mode_t;
+static bool s_lyrics_on;             // the person turned lyrics on (RAM, off at boot)
+static bool s_lyr_view;              // the screen on display is the lyrics view
+static bool s_lyr_btn;               // the screen on display has the lyrics button
+static lyrics_doc_t *s_lyr_doc;      // last result, owned here, kept as the cache
+static lv_obj_t *s_lyr_box;          // content area of the view
+static lv_obj_t *s_lyr_title_lbl;
+static lv_obj_t *s_lyr_row[LYR_ROWS];
+static lyr_view_mode_t s_lyr_mode;
+static str_id_t s_lyr_status;        // text shown in LYR_V_STATUS
+static int s_lyr_idx_shown;          // synced line on display
+static char s_lyr_title_txt[96];     // title on display (never read back from a LONG_DOT label)
+static uint64_t s_lyr_key;           // song the view shows or asked for
+static bool s_lyr_key_valid;
+static uint64_t s_lyr_seen_key;      // last 1 Hz reading of the identity
+static bool s_lyr_seen_valid;
+static int64_t s_lyr_next_check_us;
+static bool s_lyr_asked;             // a lookup was asked and its result not seen yet
 static lv_obj_t *s_np_vol;      // volume slider on the current screen (NULL if none)
 static lv_obj_t *s_sleep_lbl;   // sleep timer remaining-time label, shared like s_np_vol
 static lv_obj_t *s_ep_msg;      // episodes-screen status line (refresh errors/hints)
@@ -2068,6 +2090,11 @@ static void show(screen_builder_t builder)
     s_memo_play_btn = NULL;
     s_talkie_status_lbl = NULL;  // same for the talkie status line
     s_sleep_lbl = NULL;  // same for the sleep timer label
+    s_lyr_view = false;  // same for the lyrics view (set again by its builder)
+    s_lyr_btn = false;
+    s_lyr_box = NULL;
+    s_lyr_title_lbl = NULL;
+    for (int i = 0; i < LYR_ROWS; i++) s_lyr_row[i] = NULL;
     s_ep_msg = NULL;  // same for the episodes status line (rebuilt by its builder)
     s_home_clock = NULL;  // same for the home clock label (rebuilt by build_home)
     s_agenda_date = NULL; // same for the agenda date line (rebuilt by build_agenda)
@@ -2111,6 +2138,7 @@ static void build_home(lv_obj_t *scr);
 static void build_settings(lv_obj_t *scr);
 static void build_now_playing(lv_obj_t *scr);
 static void build_sendspin_playing(lv_obj_t *scr);
+static void ss_fill_title(char *buf, size_t size);  // used by the lyrics view, defined with the Sendspin screen
 static void build_episodes(lv_obj_t *scr);
 static void build_podcasts(lv_obj_t *scr);
 static void build_sd(lv_obj_t *scr);
@@ -2479,6 +2507,450 @@ static void on_fav_toggle(lv_event_t *e)
     show(build_now_playing);
 }
 
+// Lyrics ---------------------------------------------------------------------
+// The playing screen has two views: the controls (build_now_playing and
+// build_sendspin_playing as they always were) and the lyrics. s_lyrics_on picks
+// the view. LIFE RULE: the lyrics view is NOT a screen of its own, it is drawn
+// by those two builders (first statement of each). s_active_builder therefore
+// never changes, and every place that opens, closes, kicks or rebuilds the
+// playing screen applies to the lyrics view with no second rule.
+//
+// ui.lyrics (web option, default 0) is the parental lock: without it there is
+// no button and no lookup. A lookup happens only while the view is on screen.
+#define LYR_FIELD_MAX 96   // Sendspin title/artist size, the largest source
+#define LYR_BTN_COL   52   // width the button takes from a row beside it (44 + 8)
+
+typedef struct {
+    char title[LYR_FIELD_MAX];
+    char artist[LYR_FIELD_MAX];
+    uint32_t dur_ms;                // 0 when unknown (always for a radio)
+    char path[PODCAST_URL_MAX];     // absolute SD path, "" when not an SD file
+    bool has_position;              // false for a radio: plain text only
+    bool waiting;                   // a radio that has sent no title yet
+} lyr_id_t;
+
+static bool lyrics_enabled(void)
+{
+    const config_t *c = config_store_get();
+    return c && c->ui.lyrics == 1;
+}
+
+// Is the content of the LOCAL playing screen music? Decided from what was
+// asked to play, not from the audio arbiter: the screen is built before the
+// worker acquires it, and the arbiter is free between two tracks.
+static bool lyrics_local_is_music(void)
+{
+    if (s_play_ctx == PLAY_CTX_PODCAST) return false;
+    // A cached episode or a memo reached through a favorite or the web path
+    // plays with PLAY_CTX_NONE: tell them apart by their folder.
+    if (s_now_is_file && (strncmp(s_now_target, "/sdcard/podcasts/", 17) == 0 ||
+                          strncmp(s_now_target, "/sdcard/memos/", 14) == 0)) {
+        return false;
+    }
+    return true;
+}
+
+// Which song is playing. One place decides it for the three sources, because
+// the tag title and artist are in s_meta_* only for the SD folder context:
+// library, playlist, favorite and web-path tracks need the decoder's own copy.
+// An empty title or artist means "nothing to ask for".
+static void lyrics_identity(lyr_id_t *id, bool sendspin)
+{
+    memset(id, 0, sizeof(*id));
+    uint32_t pos = 0;
+    if (sendspin) {
+        source_sendspin_title(id->title, sizeof(id->title));
+        source_sendspin_artist(id->artist, sizeof(id->artist));
+        source_sendspin_progress(&pos, &id->dur_ms);
+        id->has_position = true;
+    } else if (s_now_is_file) {
+        decode_metadata(id->title, sizeof(id->title), id->artist, sizeof(id->artist));
+        decode_progress(&pos, &id->dur_ms);
+        if (strncmp(s_now_target, "/sdcard/", 8) == 0) {
+            strlcpy(id->path, s_now_target, sizeof(id->path));
+        }
+        id->has_position = true;
+    } else {
+        char icy[128];
+        source_stream_title(icy, sizeof(icy));
+        // The title is only this stream's once the stream holds the audio:
+        // until its start clears it, the PREVIOUS radio session's title is
+        // still there (it would be looked up, for a song that is not on air).
+        // A reconnect gap keeps the title: the same station comes back.
+        const bool ours = audio_arbiter_active() == AUDIO_SOURCE_STREAM || s_play_retrying;
+        if (!icy[0] || !ours) {
+            id->waiting = true;
+        } else if (!lyrics_icy_split(icy, id->artist, sizeof(id->artist),
+                                     id->title, sizeof(id->title))) {
+            id->title[0] = '\0';   // a talk program: nothing to ask
+            id->artist[0] = '\0';
+        }
+    }
+}
+
+// Should the playing screen show its lyrics view? A failed playback shows
+// the controls: that is where the failure text is.
+static bool lyrics_view_wanted(bool sendspin)
+{
+    if (!s_lyrics_on || !lyrics_enabled()) return false;
+    return sendspin || (lyrics_local_is_music() && !s_play_failed);
+}
+
+static void on_lyrics_toggle(lv_event_t *e)
+{
+    (void)e;
+    s_lyrics_on = !s_lyrics_on;
+    if (!s_lyrics_on) lyrics_cancel();
+    show(s_active_builder);  // same playing screen, other view
+}
+
+// The lyrics button, at the same place on both views: bottom-right corner in
+// portrait (Stop is centered there), right column under the sleep button and
+// its label in landscape. Accent-filled while lyrics are on. Returns false
+// when there is no button (option off, or the content is not music).
+static bool add_lyrics_button(lv_obj_t *scr, bool sendspin)
+{
+    if (!lyrics_enabled() || !(sendspin || lyrics_local_is_music())) return false;
+    lv_obj_t *b = make_round_btn(scr, LV_SYMBOL_LIST, 44, s_lyrics_on, on_lyrics_toggle);
+    if (scr_w() > scr_h()) lv_obj_align(b, LV_ALIGN_TOP_RIGHT, -8, 78);
+    else lv_obj_align(b, LV_ALIGN_BOTTOM_RIGHT, -8, -16);
+    s_lyr_btn = true;
+    return true;
+}
+
+static void lyr_paint_status(str_id_t id)
+{
+    if (!s_lyr_box) return;
+    lv_obj_clean(s_lyr_box);
+    for (int i = 0; i < LYR_ROWS; i++) s_lyr_row[i] = NULL;
+    // The synced view leaves a flex column on the box: without this the
+    // label below would be placed by flex and ignore its own alignment.
+    lv_obj_set_layout(s_lyr_box, LV_LAYOUT_NONE);
+    lv_obj_t *l = lv_label_create(s_lyr_box);
+    muted(l);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, lv_pct(100));
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(l, T(id));
+    lv_obj_center(l);
+    lv_obj_set_scroll_dir(s_lyr_box, LV_DIR_NONE);
+    lv_obj_scroll_to_y(s_lyr_box, 0, LV_ANIM_OFF);  // a scrolled plain text was here
+    s_lyr_mode = LYR_V_STATUS;
+    s_lyr_status = id;
+}
+
+// Plain text, scrolled by finger. The label copies the text, so the cached
+// result can be freed at any time without leaving a pointer behind.
+static void lyr_paint_plain(const char *text)
+{
+    if (!s_lyr_box) return;
+    lv_obj_clean(s_lyr_box);
+    for (int i = 0; i < LYR_ROWS; i++) s_lyr_row[i] = NULL;
+    // The synced view leaves a flex column on the box: without this the
+    // label below would be placed by flex and ignore its own alignment.
+    lv_obj_set_layout(s_lyr_box, LV_LAYOUT_NONE);
+    lv_obj_set_scroll_dir(s_lyr_box, LV_DIR_VER);
+    lv_obj_t *l = lv_label_create(s_lyr_box);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, lv_pct(100));
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(l, text);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_scroll_to_y(s_lyr_box, 0, LV_ANIM_OFF);
+    s_lyr_mode = LYR_V_PLAIN;
+}
+
+// Synced view: LYR_ROWS fixed labels, the middle one is the line being sung.
+// Only their text changes afterwards (lyr_set_rows).
+static void lyr_paint_synced(void)
+{
+    if (!s_lyr_box) return;
+    lv_obj_clean(s_lyr_box);
+    lv_obj_scroll_to_y(s_lyr_box, 0, LV_ANIM_OFF);  // a scrolled plain text was here
+    lv_obj_set_scroll_dir(s_lyr_box, LV_DIR_NONE);
+    lv_obj_set_flex_flow(s_lyr_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_lyr_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_lyr_box, 6, 0);
+    for (int i = 0; i < LYR_ROWS; i++) {
+        lv_obj_t *l = lv_label_create(s_lyr_box);
+        lv_obj_set_width(l, lv_pct(100));
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        if (i == LYR_ROWS / 2) {
+            lv_obj_set_style_text_font(l, &bugne_font_20, 0);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        } else {
+            muted(l);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+            lv_obj_set_height(l, lv_font_get_line_height(&bugne_font_14));
+        }
+        lv_label_set_text(l, "");
+        s_lyr_row[i] = l;
+    }
+    s_lyr_mode = LYR_V_SYNCED;
+    s_lyr_idx_shown = INT32_MIN;  // force the first lyr_set_rows
+}
+
+// Put the lines around idx in the rows. idx is -1 before the first line.
+static void lyr_set_rows(const lyrics_line_t *lines, size_t n, int idx)
+{
+    if (idx == s_lyr_idx_shown) return;
+    s_lyr_idx_shown = idx;
+    for (int i = 0; i < LYR_ROWS; i++) {
+        if (!s_lyr_row[i]) continue;
+        int li = idx + i - LYR_ROWS / 2;
+        const char *text = (li >= 0 && (size_t)li < n) ? lines[li].text : "";
+        // A pause (or the intro) is shown as a note on the current row.
+        if (i == LYR_ROWS / 2 && !text[0]) text = LV_SYMBOL_AUDIO;
+        lv_label_set_text(s_lyr_row[i], text);
+    }
+}
+
+static void lyr_set_title(const char *title)
+{
+    if (!s_lyr_title_lbl || strcmp(title, s_lyr_title_txt) == 0) return;
+    strlcpy(s_lyr_title_txt, title, sizeof(s_lyr_title_txt));
+    lv_label_set_text(s_lyr_title_lbl, s_lyr_title_txt);
+}
+
+// Back button, one-line title and the content box, shared by the real view
+// and the demo screen.
+static void lyr_frame(lv_obj_t *scr, const char *title)
+{
+    const bool ls = scr_w() > scr_h();
+    add_back_button(scr);
+    s_lyr_title_lbl = add_title_wide(scr, "");
+    s_lyr_title_txt[0] = '\0';
+    lyr_set_title(title);
+    lv_obj_t *box = lv_obj_create(scr);
+    lv_obj_remove_style_all(box);
+    // Below the top row (bottom 52). Portrait leaves the bottom band to the
+    // lyrics button; landscape leaves it the right column.
+    if (ls) lv_obj_set_size(box, scr_w() - PAD_SIDE - LYR_BTN_COL - 8, scr_h() - 60 - 8);
+    else    lv_obj_set_size(box, scr_w() - 2 * PAD_SIDE, scr_h() - 60 - 68);
+    lv_obj_align(box, LV_ALIGN_TOP_LEFT, PAD_SIDE, 60);
+    s_lyr_box = box;
+}
+
+// Paint the cached result.
+static void lyr_paint_doc(void)
+{
+    if (s_lyr_doc->synced) lyr_paint_synced();
+    else lyr_paint_plain(s_lyr_doc->text);
+}
+
+// The song title for the view's header: the tag or session title when there
+// is one, else what the playing screen itself shows.
+static void lyr_header_title(const lyr_id_t *id, bool sendspin, char *out, size_t size)
+{
+    if (id->title[0]) strlcpy(out, id->title, size);
+    else if (sendspin) ss_fill_title(out, size);
+    else strlcpy(out, s_now_title, size);
+}
+
+// The lyrics view of a playing screen. Called by build_now_playing and
+// build_sendspin_playing in place of their own layout.
+static void build_lyrics_view(lv_obj_t *scr, bool sendspin)
+{
+    // The controls view's widgets do not exist here: their ticks test these.
+    s_np_icy_lbl = NULL;
+    s_np_prog = NULL;
+    s_np_prog_time = NULL;
+    s_np_name = NULL;
+    s_np_artist = NULL;
+    s_ss_title_lbl = NULL;
+    s_ss_artist_lbl = NULL;
+    s_ss_bar = NULL;
+    s_ss_time_lbl = NULL;
+    s_ss_pause_lbl = NULL;
+
+    lyr_id_t id;
+    lyrics_identity(&id, sendspin);
+    char title[LYR_FIELD_MAX];
+    lyr_header_title(&id, sendspin, title, sizeof(title));
+    lyr_frame(scr, title);
+    add_lyrics_button(scr, sendspin);
+    s_lyr_view = true;
+
+    // A rebuild (rotation, language, theme) of the same song paints the cache
+    // at once and asks nothing. Anything else starts as "searching" and
+    // tick_lyrics takes it from there.
+    uint64_t key = lyrics_key(id.title, id.artist);
+    if (s_lyr_doc && id.title[0] && id.artist[0] && s_lyr_doc->key == key) {
+        s_lyr_key = key;
+        s_lyr_key_valid = true;
+        s_lyr_seen_key = key;
+        s_lyr_seen_valid = true;
+        lyr_paint_doc();
+    } else if (id.title[0] && id.artist[0] && lyrics_state(key) != LYRICS_IDLE) {
+        // A rebuild while this song's lookup runs or waits to be taken (a
+        // cover arriving rebuilds the screen): keep it, do not ask again.
+        s_lyr_key = key;
+        s_lyr_key_valid = true;
+        s_lyr_seen_key = key;
+        s_lyr_seen_valid = true;
+        lyr_paint_status(STR_LYRICS_SEARCHING);  // tick_lyrics paints the outcome
+    } else {
+        s_lyr_key_valid = false;
+        s_lyr_seen_valid = false;
+        lyr_paint_status(STR_LYRICS_SEARCHING);
+    }
+    s_lyr_next_check_us = 0;
+}
+
+// Layout screenshots without network or playback (debug nav "lyrics_demo").
+// The lines are invented test text: never put real song lyrics in the source.
+static void build_lyrics_demo(lv_obj_t *scr)
+{
+    static const lyrics_line_t DEMO[] = {
+        { 0,     "First invented line" },
+        { 4000,  "A second line for the layout" },
+        { 8000,  "The current line is long enough to wrap on two rows" },
+        { 12000, "Then a shorter one" },
+        { 16000, "And the last line of the demo" },
+    };
+    lyr_frame(scr, "Demo song");
+    lv_obj_t *b = make_round_btn(scr, LV_SYMBOL_LIST, 44, true, NULL);
+    if (scr_w() > scr_h()) lv_obj_align(b, LV_ALIGN_TOP_RIGHT, -8, 78);
+    else lv_obj_align(b, LV_ALIGN_BOTTOM_RIGHT, -8, -16);
+    lyr_paint_synced();
+    lyr_set_rows(DEMO, sizeof(DEMO) / sizeof(DEMO[0]), 2);
+}
+
+// Engine of the lyrics view. Runs every tick; does nothing unless a playing
+// screen is on display.
+static void tick_lyrics(void)
+{
+    const bool sendspin = s_active_builder == build_sendspin_playing;
+    if (!sendspin && s_active_builder != build_now_playing) {
+        // The playing screen was left: nothing more goes on the network.
+        if (s_lyr_asked) {
+            s_lyr_asked = false;
+            lyrics_cancel();
+        }
+        return;
+    }
+
+    // Never change the view under a finger: a rebuild orphans the press, and
+    // the plain text is scrolled by drag.
+    if (s_touch_indev && lv_indev_get_state(s_touch_indev) == LV_INDEV_STATE_PRESSED) return;
+
+    // The view on display must be the wanted one: option turned off on the
+    // web page, a podcast after a song, a failed playback.
+    if (lyrics_view_wanted(sendspin) != s_lyr_view) {
+        if (!lyrics_enabled() && s_lyrics_on) {
+            s_lyrics_on = false;   // the lock was closed: forget the choice
+            lyrics_cancel();
+        }
+        show(s_active_builder);
+        return;
+    }
+    // Same for the button: the option turned on (or off) on the web page
+    // while a playing screen is open, or a song after a podcast.
+    if ((lyrics_enabled() && (sendspin || lyrics_local_is_music())) != s_lyr_btn) {
+        show(s_active_builder);
+        return;
+    }
+    // Nothing is looked up or drawn for a dark panel.
+    if (!s_lyr_view || s_asleep) return;
+
+    int64_t now = esp_timer_get_time();
+    if (now >= s_lyr_next_check_us) {
+        s_lyr_next_check_us = now + 1000000;
+        lyr_id_t id;
+        lyrics_identity(&id, sendspin);
+        char title[LYR_FIELD_MAX];
+        lyr_header_title(&id, sendspin, title, sizeof(title));
+        lyr_set_title(title);
+        const bool askable = id.title[0] && id.artist[0];
+        uint64_t key = askable ? lyrics_key(id.title, id.artist) : 0;
+
+        if (!s_lyr_seen_valid || key != s_lyr_seen_key) {
+            // The identity moved (tags and ICY parts arrive one after the
+            // other): wait for two equal readings. The previous song's text
+            // goes at once.
+            s_lyr_seen_key = key;
+            s_lyr_seen_valid = true;
+            if (!s_lyr_key_valid || key != s_lyr_key) {
+                s_lyr_key_valid = false;
+                if (s_lyr_mode != LYR_V_STATUS || s_lyr_status != STR_LYRICS_SEARCHING) {
+                    lyr_paint_status(STR_LYRICS_SEARCHING);
+                }
+            }
+        } else if (!s_lyr_key_valid || key != s_lyr_key) {
+            // Stable, and not the song on display.
+            if (id.waiting) {
+                // A radio that has sent no title yet: keep "searching".
+            } else {
+                s_lyr_key = key;
+                s_lyr_key_valid = true;
+                if (!askable) {
+                    lyr_paint_status(STR_LYRICS_NONE);
+                } else if (s_lyr_doc && s_lyr_doc->key == key) {
+                    lyr_paint_doc();   // cache: no request
+                } else {
+                    // Ask only when the fetch module knows nothing about this
+                    // song. A radio's title can blink (cleared when the stream
+                    // restarts, then set again): the lookup already running or
+                    // finished for it is kept, the block below paints its outcome.
+                    if (lyrics_state(key) == LYRICS_IDLE) {
+                        lyrics_request(id.title, id.artist, id.dur_ms, id.path[0] ? id.path : NULL);
+                        s_lyr_asked = true;
+                    }
+                    lyr_paint_status(STR_LYRICS_SEARCHING);
+                }
+            }
+        } else if (s_lyr_mode == LYR_V_STATUS && s_lyr_status == STR_LYRICS_OFFLINE &&
+                   askable && net_state() == NET_STATE_CONNECTED) {
+            // Wi-Fi came back for a song that was waiting for it.
+            lyrics_request(id.title, id.artist, id.dur_ms, id.path[0] ? id.path : NULL);
+            s_lyr_asked = true;
+            lyr_paint_status(STR_LYRICS_SEARCHING);
+        }
+    }
+
+    // Result of a running lookup.
+    if (s_lyr_key_valid && s_lyr_mode == LYR_V_STATUS && s_lyr_status == STR_LYRICS_SEARCHING) {
+        switch (lyrics_state(s_lyr_key)) {
+            case LYRICS_READY: {
+                lyrics_doc_t *doc = lyrics_take(s_lyr_key);
+                if (doc) {
+                    // The labels copy their text, so the old result can go now.
+                    lyrics_doc_free(s_lyr_doc);
+                    s_lyr_doc = doc;
+                    lyr_paint_doc();
+                }
+                break;
+            }
+            case LYRICS_NOT_FOUND:    lyr_paint_status(STR_LYRICS_NONE); break;
+            case LYRICS_INSTRUMENTAL: lyr_paint_status(STR_LYRICS_INSTRUMENTAL); break;
+            case LYRICS_OFFLINE:      lyr_paint_status(STR_LYRICS_OFFLINE); break;
+            case LYRICS_ERROR:        lyr_paint_status(STR_LYRICS_ERROR); break;
+            case LYRICS_IDLE:
+            case LYRICS_LOADING:      break;
+        }
+        // Anything but "still searching" ends the lookup.
+        if (s_lyr_mode != LYR_V_STATUS || s_lyr_status != STR_LYRICS_SEARCHING) s_lyr_asked = false;
+    }
+
+    // Follow the playback position. A seek shows on the next tick.
+    if (s_lyr_mode == LYR_V_SYNCED && s_lyr_doc && s_lyr_doc->synced) {
+        uint32_t pos = 0, dur = 0;
+        if (sendspin) source_sendspin_progress(&pos, &dur);
+        else decode_progress(&pos, &dur);
+        lyr_set_rows(s_lyr_doc->lines, s_lyr_doc->line_count,
+                     lyrics_line_at(s_lyr_doc->lines, s_lyr_doc->line_count, pos));
+    }
+}
+
+// The lyrics view is read without touching: no screen sleep while it shows
+// and sound plays.
+static bool lyrics_keeps_awake(void)
+{
+    if (!s_lyr_view) return false;
+    if (s_active_builder == build_sendspin_playing) return source_sendspin_active();
+    return audio_is_active() && !audio_is_paused();
+}
+
 // Round favorite toggle in the top-left column, under the back button (the
 // top-right corner belongs to the sleep timer, A2). Created only when the
 // playing content has a stable identity. A star from bugne_icons_20: on an
@@ -2502,9 +2974,16 @@ static void build_now_playing(lv_obj_t *scr)
     // one bottom row (240 px of height cannot fit the portrait two-row layout).
     // The mini bar is hidden here (mini_bar_update), so the bottom margin is ours.
     const bool ls = scr_w() > scr_h();
+    if (lyrics_view_wanted(false)) {  // LIFE RULE: the lyrics view is this screen
+        build_lyrics_view(scr, false);
+        return;
+    }
     add_back_button(scr);  // return to the menu while playback continues
     add_sleep_button(scr); // sleep timer, top-right (mirrors the back button)
     add_fav_button(scr);   // favorites star, top-left column under back (B2)
+    // In landscape the lyrics button sits in the right column (y 78..122): the
+    // rows beside it that reach the right edge give up its width (rn).
+    const int rn = (add_lyrics_button(scr, false) && ls) ? LYR_BTN_COL : 0;
     s_np_icy_lbl = NULL;
     s_np_prog = NULL;
     s_np_prog_time = NULL;
@@ -2573,11 +3052,11 @@ static void build_now_playing(lv_obj_t *scr)
         // One line: LONG_DOT truncates only once the height is bounded too.
         // Same width as the title: the favorites button sits at the left edge
         // down to y 104, and this row (y 84/94) must clear it (B2).
-        lv_obj_set_size(ar, has_art ? art_col_w : scr_w() - 112, lv_font_get_line_height(&bugne_font_14));
+        lv_obj_set_size(ar, has_art ? art_col_w - rn : scr_w() - 112, lv_font_get_line_height(&bugne_font_14));
         lv_obj_set_style_text_align(ar, LV_TEXT_ALIGN_CENTER, 0);
         muted(ar);
         lv_label_set_text(ar, s_meta_artist);
-        lv_obj_align(ar, LV_ALIGN_TOP_MID, art_dx, ls ? 84 : 94);  // under the bounded title block
+        lv_obj_align(ar, LV_ALIGN_TOP_MID, art_dx - (has_art ? rn / 2 : 0), ls ? 84 : 94);  // under the bounded title block
         s_np_artist = ar;
     }
 
@@ -2586,10 +3065,10 @@ static void build_now_playing(lv_obj_t *scr)
         // time label. Draggable to seek when the format supports it; streamed
         // episodes keep a read-only bar.
         lv_obj_t *prog = lv_slider_create(scr);
-        lv_obj_set_width(prog, has_art ? art_col_w : scr_w() - 32);
+        lv_obj_set_width(prog, (has_art ? art_col_w : scr_w() - 32) - rn);
         lv_slider_set_range(prog, 0, 1000);
         lv_slider_set_value(prog, 0, LV_ANIM_OFF);
-        lv_obj_align(prog, LV_ALIGN_TOP_MID, art_dx, ls ? 106 : 116);
+        lv_obj_align(prog, LV_ALIGN_TOP_MID, art_dx - rn / 2, ls ? 106 : 116);
         if (now_playing_seekable()) {
             lv_obj_add_event_cb(prog, on_seek_pressed, LV_EVENT_PRESSED, NULL);
             lv_obj_add_event_cb(prog, on_seek_released, LV_EVENT_RELEASED, NULL);
@@ -2615,11 +3094,11 @@ static void build_now_playing(lv_obj_t *scr)
         // scroll is dropped to LONG_DOT while the screen sleeps (tick_now_playing):
         // no animation should keep rendering into a powered-off panel.
         lv_label_set_long_mode(icyl, s_asleep ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_SCROLL_CIRCULAR);
-        lv_obj_set_size(icyl, has_art ? art_col_w : scr_w() - 2 * PAD_SIDE, lv_font_get_line_height(&bugne_font_14));
+        lv_obj_set_size(icyl, (has_art ? art_col_w : scr_w() - 2 * PAD_SIDE) - rn, lv_font_get_line_height(&bugne_font_14));
         lv_obj_set_style_text_align(icyl, LV_TEXT_ALIGN_CENTER, 0);
         muted(icyl);
         lv_label_set_text(icyl, icy);
-        lv_obj_align(icyl, LV_ALIGN_TOP_MID, art_dx, ls ? 108 : 118);  // under the taller radio title, clear of the star (bottom 104)
+        lv_obj_align(icyl, LV_ALIGN_TOP_MID, art_dx - rn / 2, ls ? 108 : 118);  // under the taller radio title, clear of the star (bottom 104)
         s_np_icy_lbl = icyl;
     }
 
@@ -2744,8 +3223,14 @@ static void build_sendspin_playing(lv_obj_t *scr)
     // transport cluster. The progress widget is a slider that is draggable
     // (seeks the Music Assistant session) only while the server offers seek.
     const bool ls = scr_w() > scr_h();
+    if (lyrics_view_wanted(true)) {  // LIFE RULE: the lyrics view is this screen
+        build_lyrics_view(scr, true);
+        return;
+    }
     add_back_button(scr);  // browse other screens while MA keeps streaming
     add_sleep_button(scr); // sleep timer, top-right (mirrors the back button)
+    // Same landscape rule as build_now_playing for the lyrics button column.
+    const int rn = (add_lyrics_button(scr, true) && ls) ? LYR_BTN_COL : 0;
 
     // Cover art, landscape only (portrait has no room): same slot and same
     // right-hand column as build_now_playing. Every widget below that would
@@ -2788,12 +3273,12 @@ static void build_sendspin_playing(lv_obj_t *scr)
     lv_obj_t *artist = lv_label_create(scr);
     lv_obj_set_style_text_font(artist, &bugne_font_14, 0);
     lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
-    lv_obj_set_size(artist, has_art ? art_col_w : scr_w() - 2 * PAD_SIDE,
+    lv_obj_set_size(artist, (has_art ? art_col_w : scr_w() - 2 * PAD_SIDE) - rn,
                     lv_font_get_line_height(&bugne_font_14));
     lv_obj_set_style_text_align(artist, LV_TEXT_ALIGN_CENTER, 0);
     muted(artist);
     lv_label_set_text(artist, a);
-    lv_obj_align(artist, LV_ALIGN_TOP_MID, art_dx, ls ? 84 : 94);  // under the bounded title block
+    lv_obj_align(artist, LV_ALIGN_TOP_MID, art_dx - rn / 2, ls ? 84 : 94);  // under the bounded title block
     s_ss_artist_lbl = artist;
 
     // Progress slider plus an elapsed/total time label, same slots as
@@ -2802,10 +3287,10 @@ static void build_sendspin_playing(lv_obj_t *scr)
     // events are always attached and ss_refresh toggles knob + clickability.
     s_ss_seeking = false;
     lv_obj_t *bar = lv_slider_create(scr);
-    lv_obj_set_width(bar, has_art ? art_col_w : scr_w() - 32);
+    lv_obj_set_width(bar, (has_art ? art_col_w : scr_w() - 32) - rn);
     lv_slider_set_range(bar, 0, 1000);
     lv_slider_set_value(bar, 0, LV_ANIM_OFF);
-    lv_obj_align(bar, LV_ALIGN_TOP_MID, art_dx, ls ? 106 : 116);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, art_dx - rn / 2, ls ? 106 : 116);
     lv_obj_add_event_cb(bar, on_ss_seek_pressed, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(bar, on_ss_seek_released, LV_EVENT_RELEASED, NULL);
     ss_apply_seekable(bar, source_sendspin_seek_max() > 0);
@@ -8526,6 +9011,7 @@ static void mini_bar_update(void)
     np_source_t np = np_current();
     bool on_np = (s_active_builder == build_now_playing ||
                   s_active_builder == build_sendspin_playing ||
+                  s_active_builder == build_lyrics_demo ||
                   s_active_builder == build_alarm_ringing ||
                   s_active_builder == build_timer_done);
     if (np == NP_NONE || on_np) {
@@ -9114,6 +9600,9 @@ static const nav_screen_t NAV_SCREENS[] = {
     { "timer",             build_timer },
     { "timer_5s",          build_timer },        // bench hook: 5 s countdown
     { "timer_sec",         build_timer },        // bench hook: seconds field, one - step
+    { "lyrics",            build_now_playing },  // bench hook: turn the lyrics view on
+    { "lyrics_off",        build_now_playing },  // bench hook: back to the controls view
+    { "lyrics_demo",       build_lyrics_demo },  // synced view with invented lines
     { "button_0",          NULL },               // bench hook: press external button 0
     { "button_1",          NULL },               // bench hook: press external button 1
     { "button_2",          NULL },               // bench hook: press external button 2
@@ -9345,6 +9834,14 @@ static void tick_nav_request(void)
         // "metronome_play"): "memo_play" opens and plays the first row of the
         // memos list (show "memos" first), "memo_toggle" and "memo_stop" press
         // the player's play/pause and stop buttons.
+        // No touch injection: press the lyrics button of the playing screen
+        // ("game_play" precedent). Needs ui.lyrics = 1, like the button.
+        if (strcmp(name, "lyrics") == 0 || strcmp(name, "lyrics_off") == 0) {
+            s_lyrics_on = name[6] == '\0' && lyrics_enabled();
+            if (!s_lyrics_on) lyrics_cancel();
+            show(source_sendspin_session_active() ? build_sendspin_playing : build_now_playing);
+            return;
+        }
         if (strcmp(name, "sd_low_alert") == 0) {
             if (s_asleep) exit_sleep();  // the message only shows on an awake screen
             show(build_home);
@@ -10792,6 +11289,7 @@ static void tick_wake_and_sleep(void)
                s_active_builder != build_tuner &&
                s_active_builder != build_talkie &&
                !s_tone_running &&
+               !lyrics_keeps_awake() &&
                !(s_active_builder == build_stopwatch && s_sw.running) &&
                !(s_active_builder == build_timer && s_tmr.state == CHRONO_TMR_RUNNING) &&
                s_memo_state != MEMO_UI_RECORDING) {
@@ -10836,6 +11334,7 @@ static void sleep_timer_cb(lv_timer_t *t)
     tick_art();  // before tick_now_playing: a rebuild here re-creates its labels
     tick_ss_art();  // after tick_sendspin: a rebuild here re-creates its labels too
     tick_now_playing();
+    tick_lyrics();  // after tick_art, tick_ss_art and tick_now_playing: it may rebuild the playing screen they just refreshed
     tick_remote();
     tick_advance();
     mini_bar_update();  // persistent now-playing bar across screens

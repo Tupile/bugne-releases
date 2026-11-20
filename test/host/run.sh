@@ -155,6 +155,16 @@ gcc -std=c11 -Wall -Wextra -g \
 echo "=== running ==="
 "$OUT/test_agenda"
 
+echo "=== building lyrics host tests ==="
+gcc -std=c11 -Wall -Wextra -g \
+    -I ../../components/ui/include \
+    -I ../../components/decode/include \
+    -o "$OUT/test_lyrics" \
+    test_lyrics.c ../../components/ui/lyrics.c ../../components/decode/tags.c
+
+echo "=== running ==="
+"$OUT/test_lyrics"
+
 echo "=== building notif host tests ==="
 gcc -std=c11 -Wall -Wextra -g \
     -I ../../components/ha_client/include \

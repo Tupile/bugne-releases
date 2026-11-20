@@ -195,6 +195,11 @@ typedef enum {
     STR_NOTIF_SENT,         // toast: the answer reached Home Assistant
     STR_NOTIF_FAIL,         // toast: the answer could not be sent
     STR_NOTIF_OK,           // button closing a notification without answers
+    STR_LYRICS_SEARCHING,   // lyrics view: lookup running
+    STR_LYRICS_NONE,        // lyrics view: no lyrics for this song
+    STR_LYRICS_INSTRUMENTAL,// lyrics view: the song has no words
+    STR_LYRICS_OFFLINE,     // lyrics view: nothing on the card and no Wi-Fi
+    STR_LYRICS_ERROR,       // lyrics view: the lookup failed
     STR__COUNT
 } str_id_t;
 
